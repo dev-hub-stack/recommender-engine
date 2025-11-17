@@ -1,4 +1,20 @@
-# Recommendation Engine Service Dependencies - Heroku Compatible
+# Recommendation Engine Service Dependencies - Python 3.11 Compatible
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pandas==2.0.3
+numpy==1.24.4
+scikit-learn==1.3.2
+sqlalchemy==2.0.23
+psycopg2-binary==2.9.9
+redis==5.0.1
+pydantic==2.5.2
+python-dotenv==1.0.0
+prometheus-client==0.19.0
+structlog==23.2.0
+joblib==1.3.2
+requests==2.31.0
+apscheduler==3.10.4
+gunicorn==21.2.0Engine Service Dependencies - Heroku Compatible
 fastapi==0.104.1
 uvicorn==0.24.0
 pandas==2.1.4

@@ -34,22 +34,64 @@ SYNC_CONFIG = {
     'incremental': True  # Only fetch new orders
 }
 
-# Database Configuration
-PG_CONFIG = {
-    'host': os.getenv('PG_HOST', 'localhost'),
-    'port': int(os.getenv('PG_PORT', '5432')),
-    'database': os.getenv('PG_DB', 'mastergroup_recommendations'),
-    'user': os.getenv('PG_USER', 'postgres'),
-    'password': os.getenv('PG_PASSWORD', 'postgres')
-}
+# Environment Detection and Database Configuration
+def is_heroku():
+    """Check if we're running on Heroku"""
+    return os.getenv('DATABASE_URL') is not None
 
-# Redis Configuration
-REDIS_CONFIG = {
-    'host': os.getenv('REDIS_HOST', 'localhost'),
-    'port': int(os.getenv('REDIS_PORT', '6379')),
-    'db': int(os.getenv('REDIS_DB', '0')),
-    'ttl': int(os.getenv('CACHE_TTL', '3600'))
-}
+def get_database_config():
+    """Get database configuration based on environment"""
+    if is_heroku():
+        # Parse Heroku DATABASE_URL
+        import urllib.parse as urlparse
+        url = urlparse.urlparse(os.getenv('DATABASE_URL'))
+        return {
+            'host': url.hostname,
+            'port': url.port or 5432,
+            'database': url.path[1:],  # Remove leading slash
+            'user': url.username,
+            'password': url.password,
+            'sslmode': 'require'  # Heroku requires SSL
+        }
+    else:
+        # Local development configuration
+        return {
+            'host': os.getenv('PG_HOST', 'localhost'),
+            'port': int(os.getenv('PG_PORT', '5432')),
+            'database': os.getenv('PG_DB', 'mastergroup_recommendations'),
+            'user': os.getenv('PG_USER', 'postgres'),
+            'password': os.getenv('PG_PASSWORD', 'postgres')
+        }
+
+def get_redis_config():
+    """Get Redis configuration based on environment"""
+    if is_heroku():
+        # Parse Heroku REDIS_URL
+        redis_url = os.getenv('REDIS_URL')
+        if redis_url:
+            import urllib.parse as urlparse
+            url = urlparse.urlparse(redis_url)
+            return {
+                'host': url.hostname,
+                'port': url.port or 6379,
+                'db': int(os.getenv('REDIS_DB', '0')),
+                'ttl': int(os.getenv('CACHE_TTL', '3600')),
+                'password': url.password,
+                'ssl': True,
+                'ssl_cert_reqs': None  # Disable SSL certificate verification for Heroku Redis
+            }
+    
+    # Local development configuration
+    return {
+        'host': os.getenv('REDIS_HOST', 'localhost'),
+        'port': int(os.getenv('REDIS_PORT', '6379')),
+        'db': int(os.getenv('REDIS_DB', '0')),
+        'ttl': int(os.getenv('CACHE_TTL', '3600'))
+    }
+
+# Use environment-specific configurations
+PG_CONFIG = get_database_config()
+REDIS_CONFIG = get_redis_config()
 
 def get_api_url(endpoint_name):
     """Get full API URL for an endpoint"""

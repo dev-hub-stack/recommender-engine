@@ -19,6 +19,11 @@ import requests
 import os
 from collections import defaultdict
 import re
+import sys
+
+# Add config path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config.master_group_api import PG_CONFIG, REDIS_CONFIG, MASTER_GROUP_CONFIG
 
 # Simple settings configuration
 class Settings:
@@ -27,50 +32,42 @@ class Settings:
 
 settings = Settings()
 
-# Redis configuration - Heroku compatible
-REDIS_URL = os.getenv("REDIS_URL")
-if REDIS_URL:
-    # Parse Heroku REDIS_URL
-    import urllib.parse as urlparse
-    url = urlparse.urlparse(REDIS_URL)
-    REDIS_HOST = url.hostname
-    REDIS_PORT = url.port
-    REDIS_PASSWORD = url.password
-else:
-    # Local development fallback
-    REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-    REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
-    REDIS_PASSWORD = None
+# Use centralized configuration
+REDIS_HOST = REDIS_CONFIG.get('host')
+REDIS_PORT = REDIS_CONFIG.get('port')
+REDIS_PASSWORD = REDIS_CONFIG.get('password')
+REDIS_DB = REDIS_CONFIG.get('db')
+CACHE_TTL = REDIS_CONFIG.get('ttl')
 
-REDIS_DB = int(os.getenv("REDIS_DB", "0"))
-CACHE_TTL = int(os.getenv("CACHE_TTL", "3600"))  # 1 hour
+PG_HOST = PG_CONFIG.get('host')
+PG_PORT = PG_CONFIG.get('port')
+PG_DB = PG_CONFIG.get('database')
+PG_USER = PG_CONFIG.get('user')
+PG_PASSWORD = PG_CONFIG.get('password')
 
-# PostgreSQL configuration - Heroku compatible
-DATABASE_URL = os.getenv("DATABASE_URL")
-if DATABASE_URL:
-    # Parse Heroku DATABASE_URL
-    import urllib.parse as urlparse
-    url = urlparse.urlparse(DATABASE_URL)
-    PG_HOST = url.hostname
-    PG_PORT = url.port
-    PG_DB = url.path[1:]  # Remove leading slash
-    PG_USER = url.username
-    PG_PASSWORD = url.password
-else:
-    # Local development fallback
-    PG_HOST = os.getenv("PG_HOST", "localhost")
-    PG_PORT = int(os.getenv("PG_PORT", "5432"))
-    PG_DB = os.getenv("PG_DB", "mastergroup_recommendations")
-    PG_USER = os.getenv("PG_USER", "postgres")
-    PG_PASSWORD = os.getenv("PG_PASSWORD", "postgres")
-
-# Master Group API configuration
-MASTER_GROUP_API_BASE = "https://mes.master.com.pk"
-AUTH_TOKEN = "H2rcLQPfzYoV55k9ZyT5aWkyyMKEyxHhX1r3ntrkrvrGeVL4dOsGv3EcQMY2"
+# Master Group API configuration from centralized config
+MASTER_GROUP_API_BASE = MASTER_GROUP_CONFIG.get('base_url')
+AUTH_TOKEN = MASTER_GROUP_CONFIG.get('auth_token')
 
 # Global connections
 redis_client = None
 pg_conn = None
+
+def get_pg_connection_params():
+    """Get PostgreSQL connection parameters with SSL support"""
+    params = {
+        'host': PG_HOST,
+        'port': PG_PORT,
+        'database': PG_DB,
+        'user': PG_USER,
+        'password': PG_PASSWORD
+    }
+    
+    # Add SSL mode for Heroku if present
+    if PG_CONFIG.get('sslmode'):
+        params['sslmode'] = PG_CONFIG.get('sslmode')
+        
+    return params
 
 # Configure structured logging
 structlog.configure(
@@ -118,18 +115,23 @@ def init_redis():
     """Initialize Redis connection"""
     global redis_client
     try:
-        if REDIS_URL:
-            # Use Redis URL for Heroku
-            redis_client = redis.from_url(REDIS_URL, decode_responses=True)
-        else:
-            # Local development
-            redis_client = redis.Redis(
-                host=REDIS_HOST,
-                port=REDIS_PORT,
-                db=REDIS_DB,
-                password=REDIS_PASSWORD,
-                decode_responses=True
-            )
+        # Build Redis connection parameters based on configuration
+        redis_params = {
+            'host': REDIS_HOST,
+            'port': REDIS_PORT,
+            'db': REDIS_DB,
+            'decode_responses': True
+        }
+        
+        if REDIS_PASSWORD:
+            redis_params['password'] = REDIS_PASSWORD
+            
+        # Add SSL configuration if present (for Heroku)
+        if REDIS_CONFIG.get('ssl'):
+            redis_params['ssl'] = True
+            redis_params['ssl_cert_reqs'] = REDIS_CONFIG.get('ssl_cert_reqs')
+            
+        redis_client = redis.Redis(**redis_params)
         redis_client.ping()
         logger.info("Redis connection established", host=REDIS_HOST, port=REDIS_PORT)
     except Exception as e:
@@ -140,13 +142,7 @@ def init_postgres():
     """Initialize PostgreSQL connection (tables already exist)"""
     global pg_conn
     try:
-        pg_conn = psycopg2.connect(
-            host=PG_HOST,
-            port=PG_PORT,
-            database=PG_DB,
-            user=PG_USER,
-            password=PG_PASSWORD
-        )
+        pg_conn = psycopg2.connect(**get_pg_connection_params())
         
         logger.info("PostgreSQL connection established", host=PG_HOST, port=PG_PORT)
     except Exception as e:
@@ -867,13 +863,7 @@ async def get_sync_history(limit: int = 10):
     cursor = None
     try:
         # Create fresh database connection to avoid transaction errors
-        conn = psycopg2.connect(
-            host=PG_HOST,
-            port=PG_PORT,
-            database=PG_DB,
-            user=PG_USER,
-            password=PG_PASSWORD
-        )
+        conn = psycopg2.connect(**get_pg_connection_params())
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
         cursor.execute("""
@@ -1022,13 +1012,7 @@ async def get_product_analytics(
         start_date = calculate_date_range(time_filter)
         
         # Create fresh database connection
-        conn = psycopg2.connect(
-            host=PG_HOST,
-            port=PG_PORT,
-            database=PG_DB,
-            user=PG_USER,
-            password=PG_PASSWORD
-        )
+        conn = psycopg2.connect(**get_pg_connection_params())
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
         if start_date:
@@ -1131,13 +1115,7 @@ async def get_dashboard_metrics(
         start_date = calculate_date_range(time_filter)
         
         # Create fresh database connection
-        conn = psycopg2.connect(
-            host=PG_HOST,
-            port=PG_PORT,
-            database=PG_DB,
-            user=PG_USER,
-            password=PG_PASSWORD
-        )
+        conn = psycopg2.connect(**get_pg_connection_params())
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
         # Query dashboard metrics - Optimized with separate queries for better performance
@@ -1276,13 +1254,7 @@ async def get_pos_vs_oe_revenue(
         start_date = calculate_date_range(time_filter)
         
         # Create fresh database connection
-        conn = psycopg2.connect(
-            host=PG_HOST,
-            port=PG_PORT,
-            database=PG_DB,
-            user=PG_USER,
-            password=PG_PASSWORD
-        )
+        conn = psycopg2.connect(**get_pg_connection_params())
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
         # Query POS vs OE revenue breakdown - Optimized with separate queries
@@ -1461,13 +1433,7 @@ async def get_revenue_trend(
         start_date = calculate_date_range(time_filter)
         
         # Create fresh database connection
-        conn = psycopg2.connect(
-            host=PG_HOST,
-            port=PG_PORT,
-            database=PG_DB,
-            user=PG_USER,
-            password=PG_PASSWORD
-        )
+        conn = psycopg2.connect(**get_pg_connection_params())
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
         # Determine grouping based on period and time filter
@@ -1598,13 +1564,7 @@ async def get_customer_analytics(
         start_date = calculate_date_range(time_filter)
         
         # Create fresh database connection
-        conn = psycopg2.connect(
-            host=PG_HOST,
-            port=PG_PORT,
-            database=PG_DB,
-            user=PG_USER,
-            password=PG_PASSWORD
-        )
+        conn = psycopg2.connect(**get_pg_connection_params())
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
         # Get customer analytics with names
@@ -1739,13 +1699,7 @@ async def get_customer_segments(
         start_date = calculate_date_range(time_filter)
         
         # Create fresh database connection
-        conn = psycopg2.connect(
-            host=PG_HOST,
-            port=PG_PORT,
-            database=PG_DB,
-            user=PG_USER,
-            password=PG_PASSWORD
-        )
+        conn = psycopg2.connect(**get_pg_connection_params())
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
         # Get customer segment distribution
@@ -1872,13 +1826,7 @@ async def get_customer_analytics(
         start_date = calculate_date_range(time_filter)
         
         # Create fresh database connection
-        conn = psycopg2.connect(
-            host=PG_HOST,
-            port=PG_PORT,
-            database=PG_DB,
-            user=PG_USER,
-            password=PG_PASSWORD
-        )
+        conn = psycopg2.connect(**get_pg_connection_params())
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
         # Get top customers with their names and spending data
@@ -2000,13 +1948,7 @@ async def get_customer_analytics(
         start_date = calculate_date_range(time_filter)
         
         # Create fresh database connection
-        conn = psycopg2.connect(
-            host=PG_HOST,
-            port=PG_PORT,
-            database=PG_DB,
-            user=PG_USER,
-            password=PG_PASSWORD
-        )
+        conn = psycopg2.connect(**get_pg_connection_params())
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
         # Build the query based on time filter

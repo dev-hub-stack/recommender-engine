@@ -1,14 +1,12 @@
-# Recommendation Engine Service Dependencies
+# Recommendation Engine Service Dependencies - Heroku Compatible
 fastapi==0.104.1
 uvicorn==0.24.0
 pandas==2.1.4
 numpy==1.24.3
 scikit-learn==1.3.2
-scikit-surprise==1.1.3
 sqlalchemy==2.0.23
 psycopg2-binary==2.9.9
 redis==5.0.1
-mlflow==2.8.1
 pydantic==2.5.2
 python-dotenv==1.0.0
 prometheus-client==0.19.0

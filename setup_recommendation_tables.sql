@@ -82,6 +82,25 @@ CREATE TABLE IF NOT EXISTS recommendation_cache (
     last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 7. Sync Metadata table (for tracking synchronization history)
+-- Note: This matches the existing table structure from the sync service
+CREATE TABLE IF NOT EXISTS sync_metadata (
+    id SERIAL PRIMARY KEY,
+    sync_type VARCHAR(100) NOT NULL,
+    last_sync_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    sync_started_at TIMESTAMP,
+    sync_completed_at TIMESTAMP,
+    orders_synced INTEGER DEFAULT 0,
+    orders_inserted INTEGER DEFAULT 0,
+    orders_updated INTEGER DEFAULT 0,
+    sync_duration_seconds NUMERIC,
+    sync_status VARCHAR(50) NOT NULL DEFAULT 'pending',
+    error_message TEXT,
+    api_response_time_ms INTEGER,
+    data_quality_score NUMERIC,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Create indices for performance
 CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id);
 CREATE INDEX IF NOT EXISTS idx_order_items_product ON order_items(product_id);
@@ -106,6 +125,10 @@ CREATE INDEX IF NOT EXISTS idx_customer_stats_orders ON customer_statistics(tota
 CREATE INDEX IF NOT EXISTS idx_rec_cache_type ON recommendation_cache(recommendation_type);
 CREATE INDEX IF NOT EXISTS idx_rec_cache_customer ON recommendation_cache(customer_id);
 CREATE INDEX IF NOT EXISTS idx_rec_cache_expires ON recommendation_cache(expires_at);
+
+CREATE INDEX IF NOT EXISTS idx_sync_metadata_type ON sync_metadata(sync_type);
+CREATE INDEX IF NOT EXISTS idx_sync_metadata_timestamp ON sync_metadata(last_sync_timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_sync_metadata_status ON sync_metadata(sync_status);
 
 -- Create function to populate order_items from existing orders
 CREATE OR REPLACE FUNCTION populate_order_items_from_orders()
@@ -340,6 +363,7 @@ $$ LANGUAGE plpgsql;
 DO $$
 BEGIN
     RAISE NOTICE 'Recommendation tables created successfully!';
+    RAISE NOTICE 'Tables created: 7 total (orders, order_items, customer_purchases, product_pairs, product_statistics, customer_statistics, recommendation_cache, sync_metadata)';
     RAISE NOTICE 'Run the following to populate data:';
     RAISE NOTICE '1. SELECT populate_order_items_from_orders();';
     RAISE NOTICE '2. SELECT rebuild_customer_purchases();';

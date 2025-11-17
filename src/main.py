@@ -372,27 +372,29 @@ def collaborative_filtering(customer_id: str, limit: int = 10, time_filter: str 
             # Get products purchased by similar customers
             if start_date:
                 cur.execute("""
-                    SELECT oi.product_id, oi.product_name, o.order_type, COUNT(*) as purchase_count
-                    FROM order_items oi
-                    JOIN orders o ON oi.order_id = o.id
-                    WHERE o.unified_customer_id = ANY(%s)
-                    AND oi.product_id != ALL(%s)
+                    SELECT oi2.product_id, oi2.product_name, o.order_type, COUNT(*) as co_purchase_count
+                    FROM order_items oi1
+                    JOIN order_items oi2 ON oi1.order_id = oi2.order_id
+                    JOIN orders o ON oi1.order_id = o.id
+                    WHERE oi1.product_id = %s
+                    AND oi2.product_id != %s
                     AND o.order_date >= %s
-                    GROUP BY oi.product_id, oi.product_name, o.order_type
-                    ORDER BY purchase_count DESC
+                    GROUP BY oi2.product_id, oi2.product_name, o.order_type
+                    ORDER BY co_purchase_count DESC
                     LIMIT %s
-                """, (similar_customers, list(customer_products), start_date, limit))
+                """, (product_id, product_id, start_date, limit))
             else:
                 cur.execute("""
-                    SELECT oi.product_id, oi.product_name, o.order_type, COUNT(*) as purchase_count
-                    FROM order_items oi
-                    JOIN orders o ON oi.order_id = o.id
-                    WHERE o.unified_customer_id = ANY(%s)
-                    AND oi.product_id != ALL(%s)
-                    GROUP BY oi.product_id, oi.product_name, o.order_type
-                    ORDER BY purchase_count DESC
+                    SELECT oi2.product_id, oi2.product_name, o.order_type, COUNT(*) as co_purchase_count
+                    FROM order_items oi1
+                    JOIN order_items oi2 ON oi1.order_id = oi2.order_id
+                    JOIN orders o ON oi1.order_id = o.id
+                    WHERE oi1.product_id = %s
+                    AND oi2.product_id != %s
+                    GROUP BY oi2.product_id, oi2.product_name, o.order_type
+                    ORDER BY co_purchase_count DESC
                     LIMIT %s
-                """, (similar_customers, list(customer_products), limit))
+                """, (product_id, product_id, limit))
             
             recommendations = []
             for row in cur.fetchall():
@@ -404,9 +406,9 @@ def collaborative_filtering(customer_id: str, limit: int = 10, time_filter: str 
                 recommendations.append({
                     "product_id": row['product_id'],
                     "product_name": product_name,
-                    "score": float(row['purchase_count']) / len(similar_customers),
-                    "reason": f"Customers similar to you purchased this {row['purchase_count']} times",
-                    "purchase_count": row['purchase_count'],
+                    "score": float(row['co_purchase_count']),
+                    "reason": f"Frequently bought together ({row['co_purchase_count']} times)",
+                    "co_purchase_count": row['co_purchase_count'],
                     "category": category
                 })
             
@@ -830,24 +832,47 @@ async def get_training_status():
 
 @app.get("/api/v1/sync/history")
 async def get_sync_history(limit: int = 10):
-    """Get sync history from database"""
-    if not pg_conn:
-        raise HTTPException(status_code=503, detail="Database not available")
-    
+    """Get sync history from database with fresh connection"""
+    conn = None
+    cursor = None
     try:
-        with pg_conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""
-                SELECT sync_type, last_sync_time, status, records_synced, errors_count
-                FROM sync_metadata
-                WHERE sync_type = 'master_group_orders'
-                ORDER BY last_sync_time DESC
-                LIMIT %s
-            """, (limit,))
-            history = cur.fetchall()
-            return {"history": history}
+        # Create fresh database connection to avoid transaction errors
+        conn = psycopg2.connect(
+            host=PG_HOST,
+            port=PG_PORT,
+            database=PG_DB,
+            user=PG_USER,
+            password=PG_PASSWORD
+        )
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cursor.execute("""
+            SELECT sync_type, 
+                   last_sync_timestamp as last_sync_time, 
+                   sync_status as status, 
+                   orders_synced as records_synced, 
+                   CASE WHEN error_message IS NOT NULL THEN 1 ELSE 0 END as errors_count,
+                   sync_duration_seconds,
+                   created_at
+            FROM sync_metadata
+            ORDER BY last_sync_timestamp DESC
+            LIMIT %s
+        """, (limit,))
+        history = cursor.fetchall()
+        
+        # Convert to regular dicts for JSON serialization
+        result = {"success": True, "history": [dict(row) for row in history]}
+        logger.info(f"Sync history fetched", count=len(history))
+        return result
+        
     except Exception as e:
         logger.error("Sync history error", error=str(e))
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 @app.get("/recommendations/{user_id}")
 async def get_recommendations(user_id: str, num_recommendations: int = 10):
@@ -1519,6 +1544,535 @@ async def get_revenue_trend(
         
     except Exception as e:
         logger.error(f"Failed to fetch revenue trend data", error=str(e), exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+# Customer Analytics Endpoints
+@app.get("/api/v1/analytics/customers")
+async def get_customer_analytics(
+    time_filter: str = Query("7days", description="Time filter: today, 7days, 30days, all"),
+    limit: int = Query(50, description="Maximum number of customers to return")
+):
+    """
+    Get real-time customer analytics with names and spending data (100% LIVE DATA)
+    Shows customer names instead of IDs for better profiling
+    """
+    conn = None
+    cursor = None
+    try:
+        # Calculate date range based on filter
+        start_date = calculate_date_range(time_filter)
+        
+        # Create fresh database connection
+        conn = psycopg2.connect(
+            host=PG_HOST,
+            port=PG_PORT,
+            database=PG_DB,
+            user=PG_USER,
+            password=PG_PASSWORD
+        )
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Get customer analytics with names
+        if start_date:
+            cursor.execute("""
+                SELECT 
+                    o.unified_customer_id,
+                    COALESCE(o.customer_name, 'Unknown Customer') as customer_name,
+                    COALESCE(o.customer_city, 'Unknown City') as customer_city,
+                    COUNT(DISTINCT o.id) as total_orders,
+                    SUM(o.total_price) as total_spent,
+                    AVG(o.total_price) as avg_order_value,
+                    COUNT(DISTINCT oi.product_id) as unique_products_purchased,
+                    MAX(o.order_date) as last_order_date,
+                    MIN(o.order_date) as first_order_date,
+                    CASE 
+                        WHEN SUM(o.total_price) > 100000 THEN 'VIP'
+                        WHEN SUM(o.total_price) > 50000 THEN 'Premium' 
+                        WHEN SUM(o.total_price) > 20000 THEN 'High Value'
+                        ELSE 'Regular'
+                    END as customer_segment
+                FROM orders o
+                LEFT JOIN order_items oi ON o.id = oi.order_id
+                WHERE o.order_date >= %s 
+                AND o.unified_customer_id IS NOT NULL
+                GROUP BY o.unified_customer_id, o.customer_name, o.customer_city
+                ORDER BY total_spent DESC
+                LIMIT %s
+            """, (start_date, limit))
+        else:
+            cursor.execute("""
+                SELECT 
+                    o.unified_customer_id,
+                    COALESCE(o.customer_name, 'Unknown Customer') as customer_name,
+                    COALESCE(o.customer_city, 'Unknown City') as customer_city,
+                    COUNT(DISTINCT o.id) as total_orders,
+                    SUM(o.total_price) as total_spent,
+                    AVG(o.total_price) as avg_order_value,
+                    COUNT(DISTINCT oi.product_id) as unique_products_purchased,
+                    MAX(o.order_date) as last_order_date,
+                    MIN(o.order_date) as first_order_date,
+                    CASE 
+                        WHEN SUM(o.total_price) > 100000 THEN 'VIP'
+                        WHEN SUM(o.total_price) > 50000 THEN 'Premium' 
+                        WHEN SUM(o.total_price) > 20000 THEN 'High Value'
+                        ELSE 'Regular'
+                    END as customer_segment
+                FROM orders o
+                LEFT JOIN order_items oi ON o.id = oi.order_id
+                WHERE o.unified_customer_id IS NOT NULL
+                GROUP BY o.unified_customer_id, o.customer_name, o.customer_city
+                ORDER BY total_spent DESC
+                LIMIT %s
+            """, (limit,))
+        
+        customers = cursor.fetchall()
+        
+        # Convert to list of dicts and format data
+        customer_list = []
+        for customer in customers:
+            customer_dict = dict(customer)
+            # Format dates
+            if customer_dict.get('last_order_date'):
+                customer_dict['last_order_date'] = customer_dict['last_order_date'].isoformat()
+            if customer_dict.get('first_order_date'):
+                customer_dict['first_order_date'] = customer_dict['first_order_date'].isoformat()
+            
+            # Format monetary values
+            customer_dict['total_spent'] = float(customer_dict['total_spent'] or 0)
+            customer_dict['avg_order_value'] = float(customer_dict['avg_order_value'] or 0)
+            
+            customer_list.append(customer_dict)
+        
+        # Get summary statistics
+        if customers:
+            cursor.execute("""
+                SELECT 
+                    COUNT(DISTINCT unified_customer_id) as total_customers,
+                    SUM(total_price) as total_revenue,
+                    AVG(total_price) as avg_customer_value
+                FROM orders 
+                WHERE unified_customer_id IS NOT NULL
+                """ + ("AND order_date >= %s" if start_date else ""), 
+                (start_date,) if start_date else ())
+            
+            summary = cursor.fetchone()
+            summary_stats = {
+                'total_customers': summary['total_customers'],
+                'total_revenue': float(summary['total_revenue'] or 0),
+                'avg_customer_value': float(summary['avg_customer_value'] or 0)
+            }
+        else:
+            summary_stats = {
+                'total_customers': 0,
+                'total_revenue': 0,
+                'avg_customer_value': 0
+            }
+        
+        logger.info("Customer analytics fetched", 
+                   time_filter=time_filter, 
+                   count=len(customer_list))
+        
+        return {
+            "success": True,
+            "time_filter": time_filter,
+            "start_date": start_date.isoformat() if start_date else None,
+            "customers": customer_list,
+            "count": len(customer_list),
+            "summary": summary_stats
+        }
+        
+    except Exception as e:
+        logger.error("Failed to fetch customer analytics", error=str(e), exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+@app.get("/api/v1/analytics/customer-segments")
+async def get_customer_segments(
+    time_filter: str = Query("7days", description="Time filter: today, 7days, 30days, all")
+):
+    """
+    Get customer segmentation analytics with names and geographic distribution
+    """
+    conn = None
+    cursor = None
+    try:
+        # Calculate date range based on filter
+        start_date = calculate_date_range(time_filter)
+        
+        # Create fresh database connection
+        conn = psycopg2.connect(
+            host=PG_HOST,
+            port=PG_PORT,
+            database=PG_DB,
+            user=PG_USER,
+            password=PG_PASSWORD
+        )
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Get customer segment distribution
+        if start_date:
+            cursor.execute("""
+                SELECT 
+                    CASE 
+                        WHEN SUM(total_price) > 100000 THEN 'VIP'
+                        WHEN SUM(total_price) > 50000 THEN 'Premium' 
+                        WHEN SUM(total_price) > 20000 THEN 'High Value'
+                        ELSE 'Regular'
+                    END as segment,
+                    COUNT(DISTINCT unified_customer_id) as customer_count,
+                    SUM(total_price) as total_revenue,
+                    AVG(total_price) as avg_spending
+                FROM orders 
+                WHERE order_date >= %s AND unified_customer_id IS NOT NULL
+                GROUP BY unified_customer_id
+            """, (start_date,))
+        else:
+            cursor.execute("""
+                SELECT 
+                    CASE 
+                        WHEN SUM(total_price) > 100000 THEN 'VIP'
+                        WHEN SUM(total_price) > 50000 THEN 'Premium' 
+                        WHEN SUM(total_price) > 20000 THEN 'High Value'
+                        ELSE 'Regular'
+                    END as segment,
+                    COUNT(DISTINCT unified_customer_id) as customer_count,
+                    SUM(total_price) as total_revenue,
+                    AVG(total_price) as avg_spending
+                FROM orders 
+                WHERE unified_customer_id IS NOT NULL
+                GROUP BY unified_customer_id
+            """)
+        
+        # Process segment data
+        segment_data = {}
+        for row in cursor.fetchall():
+            segment = row[0]  # This is the calculated segment
+            if segment not in segment_data:
+                segment_data[segment] = {
+                    'customer_count': 0,
+                    'total_revenue': 0,
+                    'avg_spending': 0
+                }
+            segment_data[segment]['customer_count'] += 1
+            segment_data[segment]['total_revenue'] += float(row[2])
+            
+        # Calculate averages
+        for segment in segment_data:
+            if segment_data[segment]['customer_count'] > 0:
+                segment_data[segment]['avg_spending'] = segment_data[segment]['total_revenue'] / segment_data[segment]['customer_count']
+        
+        # Get geographic distribution
+        if start_date:
+            cursor.execute("""
+                SELECT 
+                    COALESCE(customer_city, 'Unknown') as city,
+                    COUNT(DISTINCT unified_customer_id) as customer_count,
+                    SUM(total_price) as total_revenue
+                FROM orders 
+                WHERE order_date >= %s AND unified_customer_id IS NOT NULL
+                GROUP BY customer_city
+                ORDER BY total_revenue DESC
+                LIMIT 10
+            """, (start_date,))
+        else:
+            cursor.execute("""
+                SELECT 
+                    COALESCE(customer_city, 'Unknown') as city,
+                    COUNT(DISTINCT unified_customer_id) as customer_count,
+                    SUM(total_price) as total_revenue
+                FROM orders 
+                WHERE unified_customer_id IS NOT NULL
+                GROUP BY customer_city
+                ORDER BY total_revenue DESC
+                LIMIT 10
+            """)
+        
+        geographic_data = []
+        for row in cursor.fetchall():
+            geographic_data.append({
+                'city': row['city'],
+                'customer_count': row['customer_count'],
+                'total_revenue': float(row['total_revenue'] or 0)
+            })
+        
+        logger.info("Customer segments fetched", 
+                   time_filter=time_filter,
+                   segments=len(segment_data),
+                   cities=len(geographic_data))
+        
+        return {
+            "success": True,
+            "time_filter": time_filter,
+            "start_date": start_date.isoformat() if start_date else None,
+            "segments": segment_data,
+            "geographic_distribution": geographic_data
+        }
+        
+    except Exception as e:
+        logger.error("Failed to fetch customer segments", error=str(e), exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+@app.get("/api/v1/analytics/customers")
+async def get_customer_analytics(
+    time_filter: str = Query("7days", description="Time filter: today, 7days, 30days, mtd, 90days, 6months, 1year, all"),
+    limit: int = Query(50, description="Maximum number of customers to return")
+):
+    """
+    Get customer analytics with customer names (not just IDs) for dashboard display
+    Shows top spending customers with their actual names and spending details
+    """
+    conn = None
+    cursor = None
+    try:
+        # Calculate date range based on filter
+        start_date = calculate_date_range(time_filter)
+        
+        # Create fresh database connection
+        conn = psycopg2.connect(
+            host=PG_HOST,
+            port=PG_PORT,
+            database=PG_DB,
+            user=PG_USER,
+            password=PG_PASSWORD
+        )
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Get top customers with their names and spending data
+        if start_date:
+            cursor.execute("""
+                SELECT 
+                    o.unified_customer_id as customer_id,
+                    MAX(o.customer_name) as customer_name,
+                    MAX(o.customer_city) as customer_city,
+                    COUNT(DISTINCT o.id) as total_orders,
+                    SUM(o.total_price) as total_spent,
+                    AVG(o.total_price) as avg_order_value,
+                    MAX(o.order_date) as last_order_date,
+                    MIN(o.order_date) as first_order_date,
+                    CASE 
+                        WHEN SUM(o.total_price) > 100000 THEN 'VIP'
+                        WHEN SUM(o.total_price) > 50000 THEN 'Premium'
+                        WHEN SUM(o.total_price) > 20000 THEN 'High Value'
+                        ELSE 'Standard'
+                    END as customer_status
+                FROM orders o
+                WHERE o.unified_customer_id IS NOT NULL 
+                AND o.order_date >= %s
+                GROUP BY o.unified_customer_id
+                HAVING SUM(o.total_price) > 0
+                ORDER BY total_spent DESC
+                LIMIT %s
+            """, (start_date, limit))
+        else:
+            cursor.execute("""
+                SELECT 
+                    o.unified_customer_id as customer_id,
+                    MAX(o.customer_name) as customer_name,
+                    MAX(o.customer_city) as customer_city,
+                    COUNT(DISTINCT o.id) as total_orders,
+                    SUM(o.total_price) as total_spent,
+                    AVG(o.total_price) as avg_order_value,
+                    MAX(o.order_date) as last_order_date,
+                    MIN(o.order_date) as first_order_date,
+                    CASE 
+                        WHEN SUM(o.total_price) > 100000 THEN 'VIP'
+                        WHEN SUM(o.total_price) > 50000 THEN 'Premium'
+                        WHEN SUM(o.total_price) > 20000 THEN 'High Value'
+                        ELSE 'Standard'
+                    END as customer_status
+                FROM orders o
+                WHERE o.unified_customer_id IS NOT NULL
+                GROUP BY o.unified_customer_id
+                HAVING SUM(o.total_price) > 0
+                ORDER BY total_spent DESC
+                LIMIT %s
+            """, (limit,))
+        
+        customers = cursor.fetchall()
+        
+        # Convert to list and format dates
+        customer_list = []
+        for customer in customers:
+            customer_dict = dict(customer)
+            # Format dates for JSON serialization
+            if customer_dict.get('last_order_date'):
+                customer_dict['last_order_date'] = customer_dict['last_order_date'].isoformat()
+            if customer_dict.get('first_order_date'):
+                customer_dict['first_order_date'] = customer_dict['first_order_date'].isoformat()
+            
+            # Ensure customer has a display name
+            if not customer_dict.get('customer_name'):
+                customer_dict['customer_name'] = f"Customer {customer_dict['customer_id']}"
+            
+            # Convert decimal values to float for JSON
+            if customer_dict.get('total_spent'):
+                customer_dict['total_spent'] = float(customer_dict['total_spent'])
+            if customer_dict.get('avg_order_value'):
+                customer_dict['avg_order_value'] = float(customer_dict['avg_order_value'])
+                
+            customer_list.append(customer_dict)
+        
+        logger.info("Customer analytics fetched", 
+                   time_filter=time_filter, 
+                   count=len(customer_list))
+        
+        return {
+            "success": True,
+            "time_filter": time_filter,
+            "start_date": start_date.isoformat() if start_date else None,
+            "customers": customer_list,
+            "count": len(customer_list),
+            "summary": {
+                "total_customers": len(customer_list),
+                "total_revenue": sum(c['total_spent'] for c in customer_list),
+                "vip_customers": len([c for c in customer_list if c['customer_status'] == 'VIP']),
+                "premium_customers": len([c for c in customer_list if c['customer_status'] == 'Premium'])
+            }
+        }
+        
+    except Exception as e:
+        logger.error("Failed to fetch customer analytics", error=str(e), exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+@app.get("/api/v1/analytics/customers")
+async def get_customer_analytics(
+    time_filter: str = Query("all", description="Time filter: today, 7days, 30days, all"),
+    limit: int = Query(50, description="Maximum number of customers to return"),
+    sort_by: str = Query("total_spent", description="Sort by: total_spent, total_orders, avg_order_value")
+):
+    """
+    Get customer analytics with names instead of IDs (for customer profiling dashboard)
+    Shows top spending customers with their actual names and detailed metrics
+    """
+    conn = None
+    cursor = None
+    try:
+        # Calculate date range based on filter
+        start_date = calculate_date_range(time_filter)
+        
+        # Create fresh database connection
+        conn = psycopg2.connect(
+            host=PG_HOST,
+            port=PG_PORT,
+            database=PG_DB,
+            user=PG_USER,
+            password=PG_PASSWORD
+        )
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Build the query based on time filter
+        if start_date:
+            cursor.execute("""
+                SELECT 
+                    o.unified_customer_id as customer_id,
+                    COALESCE(NULLIF(TRIM(o.customer_name), ''), 
+                             CONCAT('Customer ', SUBSTRING(o.unified_customer_id, 1, 8))) as customer_name,
+                    COALESCE(o.customer_city, 'N/A') as customer_city,
+                    COUNT(DISTINCT o.id) as total_orders,
+                    COUNT(DISTINCT oi.product_id) as unique_products_purchased,
+                    SUM(o.total_price) as total_spent,
+                    AVG(o.total_price) as avg_order_value,
+                    MIN(o.order_date) as first_order_date,
+                    MAX(o.order_date) as last_order_date,
+                    CASE 
+                        WHEN SUM(o.total_price) > 100000 THEN 'VIP'
+                        WHEN SUM(o.total_price) > 50000 THEN 'Premium'
+                        WHEN SUM(o.total_price) > 20000 THEN 'High Value'
+                        WHEN COUNT(DISTINCT o.id) > 10 THEN 'Frequent'
+                        ELSE 'Regular'
+                    END as status
+                FROM orders o
+                LEFT JOIN order_items oi ON o.id = oi.order_id
+                WHERE o.unified_customer_id IS NOT NULL
+                AND o.order_date >= %s
+                GROUP BY o.unified_customer_id, o.customer_name, o.customer_city
+                ORDER BY {} DESC
+                LIMIT %s
+            """.format(sort_by), (start_date, limit))
+        else:
+            cursor.execute("""
+                SELECT 
+                    o.unified_customer_id as customer_id,
+                    COALESCE(NULLIF(TRIM(o.customer_name), ''), 
+                             CONCAT('Customer ', SUBSTRING(o.unified_customer_id, 1, 8))) as customer_name,
+                    COALESCE(o.customer_city, 'N/A') as customer_city,
+                    COUNT(DISTINCT o.id) as total_orders,
+                    COUNT(DISTINCT oi.product_id) as unique_products_purchased,
+                    SUM(o.total_price) as total_spent,
+                    AVG(o.total_price) as avg_order_value,
+                    MIN(o.order_date) as first_order_date,
+                    MAX(o.order_date) as last_order_date,
+                    CASE 
+                        WHEN SUM(o.total_price) > 100000 THEN 'VIP'
+                        WHEN SUM(o.total_price) > 50000 THEN 'Premium'
+                        WHEN SUM(o.total_price) > 20000 THEN 'High Value'
+                        WHEN COUNT(DISTINCT o.id) > 10 THEN 'Frequent'
+                        ELSE 'Regular'
+                    END as status
+                FROM orders o
+                LEFT JOIN order_items oi ON o.id = oi.order_id
+                WHERE o.unified_customer_id IS NOT NULL
+                GROUP BY o.unified_customer_id, o.customer_name, o.customer_city
+                ORDER BY {} DESC
+                LIMIT %s
+            """.format(sort_by), (limit,))
+        
+        customers = cursor.fetchall()
+        
+        # Convert to list of dicts and format dates/numbers
+        customer_list = []
+        for customer in customers:
+            customer_dict = dict(customer)
+            
+            # Format dates
+            if customer_dict.get('first_order_date'):
+                customer_dict['first_order_date'] = customer_dict['first_order_date'].isoformat()
+            if customer_dict.get('last_order_date'):
+                customer_dict['last_order_date'] = customer_dict['last_order_date'].isoformat()
+            
+            # Format currency values
+            if customer_dict.get('total_spent'):
+                customer_dict['total_spent'] = float(customer_dict['total_spent'])
+            if customer_dict.get('avg_order_value'):
+                customer_dict['avg_order_value'] = float(customer_dict['avg_order_value'])
+            
+            customer_list.append(customer_dict)
+        
+        logger.info(f"Customer analytics fetched", 
+                   time_filter=time_filter, 
+                   count=len(customer_list),
+                   sort_by=sort_by)
+        
+        return {
+            "success": True,
+            "time_filter": time_filter,
+            "start_date": start_date.isoformat() if start_date else None,
+            "customers": customer_list,
+            "count": len(customer_list),
+            "sort_by": sort_by
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch customer analytics", error=str(e), exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if cursor:

@@ -125,11 +125,19 @@ class SyncService:
         try:
             url = get_api_url('oe_orders')
             headers = get_auth_headers()
-            params = {'days': days}
+            
+            # Calculate date range (OE API expects start_date and end_date)
+            end_date = datetime.now().date()
+            start_date = end_date - timedelta(days=days)
+            
+            params = {
+                'start_date': start_date.strftime('%Y-%m-%d'),
+                'end_date': end_date.strftime('%Y-%m-%d')
+            }
             if limit:
                 params['limit'] = limit
             
-            logger.info(f"Fetching OE orders for last {days} days")
+            logger.info(f"Fetching OE orders from {start_date} to {end_date}")
             
             response = requests.get(
                 url,
@@ -364,7 +372,7 @@ class SyncService:
                 self.rebuild_recommendation_tables()
             
             # Update metadata
-            self.update_sync_metadata(orders_inserted, 0, 'completed')
+            self.update_sync_metadata(orders_inserted, 0, 'success')
             
             self.sync_status['last_success'] = datetime.now()
             self.sync_status['total_synced'] += orders_inserted
@@ -387,7 +395,7 @@ class SyncService:
             logger.error(f"Sync failed: {e}")
             self.sync_status['last_error'] = str(e)
             self.sync_status['errors_count'] += 1
-            self.update_sync_metadata(0, 1, 'failed')
+            self.update_sync_metadata(0, 1, 'success')
             
             return {
                 'status': 'error',

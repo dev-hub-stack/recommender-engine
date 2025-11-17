@@ -1,0 +1,46 @@
+{
+  "name": "Master Group Recommendation Engine",
+  "description": "Production-ready recommendation system with ML algorithms and real-time analytics",
+  "repository": "https://github.com/dev-hub-stack/recommender-engine",
+  "keywords": ["python", "fastapi", "ml", "recommendation-system", "analytics"],
+  "success_url": "/health",
+  "env": {
+    "MASTER_GROUP_API_BASE": {
+      "description": "Master Group API base URL",
+      "value": "https://mes.master.com.pk"
+    },
+    "MASTER_GROUP_AUTH_TOKEN": {
+      "description": "Authorization token for Master Group APIs",
+      "value": "H2rcLQPfzYoV55k9ZyT5aWkyyMKEyxHhX1r3ntrkrvrGeVL4dOsGv3EcQMY2"
+    },
+    "SYNC_INTERVAL_MINUTES": {
+      "description": "Sync interval in minutes",
+      "value": "15"
+    },
+    "ENABLE_AUTO_SYNC": {
+      "description": "Enable automatic syncing",
+      "value": "true"
+    }
+  },
+  "formation": {
+    "web": {
+      "quantity": 1,
+      "size": "basic"
+    }
+  },
+  "addons": [
+    {
+      "plan": "heroku-postgresql:essential-0",
+      "as": "DATABASE"
+    },
+    {
+      "plan": "heroku-redis:mini",
+      "as": "REDIS"
+    }
+  ],
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    }
+  ]
+}

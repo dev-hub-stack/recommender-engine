@@ -27,18 +27,42 @@ class Settings:
 
 settings = Settings()
 
-# Redis configuration
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+# Redis configuration - Heroku compatible
+REDIS_URL = os.getenv("REDIS_URL")
+if REDIS_URL:
+    # Parse Heroku REDIS_URL
+    import urllib.parse as urlparse
+    url = urlparse.urlparse(REDIS_URL)
+    REDIS_HOST = url.hostname
+    REDIS_PORT = url.port
+    REDIS_PASSWORD = url.password
+else:
+    # Local development fallback
+    REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+    REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+    REDIS_PASSWORD = None
+
 REDIS_DB = int(os.getenv("REDIS_DB", "0"))
 CACHE_TTL = int(os.getenv("CACHE_TTL", "3600"))  # 1 hour
 
-# PostgreSQL configuration
-PG_HOST = os.getenv("PG_HOST", "localhost")
-PG_PORT = int(os.getenv("PG_PORT", "5432"))
-PG_DB = os.getenv("PG_DB", "mastergroup_recommendations")
-PG_USER = os.getenv("PG_USER", "postgres")
-PG_PASSWORD = os.getenv("PG_PASSWORD", "postgres")
+# PostgreSQL configuration - Heroku compatible
+DATABASE_URL = os.getenv("DATABASE_URL")
+if DATABASE_URL:
+    # Parse Heroku DATABASE_URL
+    import urllib.parse as urlparse
+    url = urlparse.urlparse(DATABASE_URL)
+    PG_HOST = url.hostname
+    PG_PORT = url.port
+    PG_DB = url.path[1:]  # Remove leading slash
+    PG_USER = url.username
+    PG_PASSWORD = url.password
+else:
+    # Local development fallback
+    PG_HOST = os.getenv("PG_HOST", "localhost")
+    PG_PORT = int(os.getenv("PG_PORT", "5432"))
+    PG_DB = os.getenv("PG_DB", "mastergroup_recommendations")
+    PG_USER = os.getenv("PG_USER", "postgres")
+    PG_PASSWORD = os.getenv("PG_PASSWORD", "postgres")
 
 # Master Group API configuration
 MASTER_GROUP_API_BASE = "https://mes.master.com.pk"
@@ -94,12 +118,18 @@ def init_redis():
     """Initialize Redis connection"""
     global redis_client
     try:
-        redis_client = redis.Redis(
-            host=REDIS_HOST,
-            port=REDIS_PORT,
-            db=REDIS_DB,
-            decode_responses=True
-        )
+        if REDIS_URL:
+            # Use Redis URL for Heroku
+            redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+        else:
+            # Local development
+            redis_client = redis.Redis(
+                host=REDIS_HOST,
+                port=REDIS_PORT,
+                db=REDIS_DB,
+                password=REDIS_PASSWORD,
+                decode_responses=True
+            )
         redis_client.ping()
         logger.info("Redis connection established", host=REDIS_HOST, port=REDIS_PORT)
     except Exception as e:
@@ -2082,10 +2112,11 @@ async def get_customer_analytics(
 
 if __name__ == "__main__":
     import uvicorn
+    port = int(os.getenv("PORT", 8001))  # Use Heroku's PORT or default to 8001
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8001,  # Changed from 8000 to avoid conflict with API Gateway
+        port=port,
         log_level="info",
         reload=settings.debug
     )

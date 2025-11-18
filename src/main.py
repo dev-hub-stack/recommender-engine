@@ -4,7 +4,12 @@ Core ML algorithms and recommendation inference with Redis caching and PostgreSQ
 """
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Depends, status
+from auth import (
+    authenticate_user, create_access_token, update_last_login,
+    get_current_active_user, User, LoginRequest, Token,
+    ACCESS_TOKEN_EXPIRE_MINUTES
+)
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import start_http_server
 import structlog
@@ -598,6 +603,47 @@ def popular_products(limit: int = 10, time_filter: str = "7days") -> List[Dict]:
 
 
 # API Endpoints
+
+
+# ============================================
+# AUTHENTICATION ENDPOINTS
+# ============================================
+
+@app.post("/api/v1/auth/login", response_model=Token, tags=["Authentication"])
+async def login(login_data: LoginRequest):
+    """
+    Login endpoint - authenticate user and return JWT token
+    
+    Default credentials:
+    - Email: admin@mastergroup.com
+    - Password: admin123
+    """
+    user = authenticate_user(login_data.email, login_data.password)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # Update last login
+    update_last_login(user.email)
+    
+    # Create access token
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.email}, expires_delta=access_token_expires
+    )
+    
+    logger.info(f"User logged in: {user.email}")
+    
+    return {"access_token": access_token, "token_type": "bearer"}
+
+@app.get("/api/v1/auth/me", response_model=User, tags=["Authentication"])
+async def get_current_user_info(current_user: User = Depends(get_current_active_user)):
+    """Get current logged in user information"""
+    return current_user
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""

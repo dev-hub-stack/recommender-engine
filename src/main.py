@@ -2320,60 +2320,76 @@ async def get_collaborative_metrics(
         
         # ============================================
         # CARD 2: Average Similarity Score
-        # IMPROVED: Use Jaccard similarity (real similarity metric)
+        # IMPROVED: Use Jaccard similarity (real similarity metric) - Fixed array operator issue
         # ============================================
         if start_date:
             cursor.execute("""
                 WITH customer_products AS (
                     SELECT 
                         o.unified_customer_id,
-                        ARRAY_AGG(DISTINCT oi.product_id) as products
+                        COUNT(DISTINCT oi.product_id) as product_count
                     FROM orders o
                     JOIN order_items oi ON o.id = oi.order_id
                     WHERE o.order_date >= %s
                     AND o.unified_customer_id IS NOT NULL
                     GROUP BY o.unified_customer_id
                 ),
-                similarity_scores AS (
+                shared_products AS (
                     SELECT 
-                        cp1.unified_customer_id as customer_a,
-                        cp2.unified_customer_id as customer_b,
-                        -- Jaccard Similarity: intersection / union
-                        CAST(CARDINALITY(cp1.products & cp2.products) AS FLOAT) / 
-                        NULLIF(CARDINALITY(cp1.products | cp2.products), 0) as similarity
-                    FROM customer_products cp1
-                    CROSS JOIN customer_products cp2
-                    WHERE cp1.unified_customer_id < cp2.unified_customer_id
-                    AND CARDINALITY(cp1.products & cp2.products) > 0
+                        o1.unified_customer_id as customer_a,
+                        o2.unified_customer_id as customer_b,
+                        COUNT(DISTINCT oi1.product_id) as shared_count,
+                        cp1.product_count as count_a,
+                        cp2.product_count as count_b
+                    FROM orders o1
+                    JOIN order_items oi1 ON o1.id = oi1.order_id
+                    JOIN order_items oi2 ON oi1.product_id = oi2.product_id
+                    JOIN orders o2 ON oi2.order_id = o2.id
+                    JOIN customer_products cp1 ON o1.unified_customer_id = cp1.unified_customer_id
+                    JOIN customer_products cp2 ON o2.unified_customer_id = cp2.unified_customer_id
+                    WHERE o1.unified_customer_id < o2.unified_customer_id
+                    AND o1.order_date >= %s
+                    AND o2.order_date >= %s
+                    GROUP BY o1.unified_customer_id, o2.unified_customer_id, cp1.product_count, cp2.product_count
                 )
-                SELECT AVG(similarity) as avg_similarity
-                FROM similarity_scores
-            """, (start_date,))
+                SELECT AVG(
+                    CAST(shared_count AS FLOAT) / 
+                    NULLIF(count_a + count_b - shared_count, 0)
+                ) as avg_similarity
+                FROM shared_products
+            """, (start_date, start_date, start_date))
         else:
             cursor.execute("""
                 WITH customer_products AS (
                     SELECT 
                         o.unified_customer_id,
-                        ARRAY_AGG(DISTINCT oi.product_id) as products
+                        COUNT(DISTINCT oi.product_id) as product_count
                     FROM orders o
                     JOIN order_items oi ON o.id = oi.order_id
                     WHERE o.unified_customer_id IS NOT NULL
                     GROUP BY o.unified_customer_id
                 ),
-                similarity_scores AS (
+                shared_products AS (
                     SELECT 
-                        cp1.unified_customer_id as customer_a,
-                        cp2.unified_customer_id as customer_b,
-                        -- Jaccard Similarity: intersection / union
-                        CAST(CARDINALITY(cp1.products & cp2.products) AS FLOAT) / 
-                        NULLIF(CARDINALITY(cp1.products | cp2.products), 0) as similarity
-                    FROM customer_products cp1
-                    CROSS JOIN customer_products cp2
-                    WHERE cp1.unified_customer_id < cp2.unified_customer_id
-                    AND CARDINALITY(cp1.products & cp2.products) > 0
+                        o1.unified_customer_id as customer_a,
+                        o2.unified_customer_id as customer_b,
+                        COUNT(DISTINCT oi1.product_id) as shared_count,
+                        cp1.product_count as count_a,
+                        cp2.product_count as count_b
+                    FROM orders o1
+                    JOIN order_items oi1 ON o1.id = oi1.order_id
+                    JOIN order_items oi2 ON oi1.product_id = oi2.product_id
+                    JOIN orders o2 ON oi2.order_id = o2.id
+                    JOIN customer_products cp1 ON o1.unified_customer_id = cp1.unified_customer_id
+                    JOIN customer_products cp2 ON o2.unified_customer_id = cp2.unified_customer_id
+                    WHERE o1.unified_customer_id < o2.unified_customer_id
+                    GROUP BY o1.unified_customer_id, o2.unified_customer_id, cp1.product_count, cp2.product_count
                 )
-                SELECT AVG(similarity) as avg_similarity
-                FROM similarity_scores
+                SELECT AVG(
+                    CAST(shared_count AS FLOAT) / 
+                    NULLIF(count_a + count_b - shared_count, 0)
+                ) as avg_similarity
+                FROM shared_products
             """)
         
         result = cursor.fetchone()

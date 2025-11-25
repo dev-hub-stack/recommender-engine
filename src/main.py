@@ -2577,6 +2577,532 @@ async def get_collaborative_pairs(
         if conn:
             conn.close()
 
+# ===========================
+# PHASE 1 ADVANCED ANALYTICS
+# ===========================
+
+# Geographic Intelligence Endpoints
+@app.get("/api/v1/analytics/geographic/provinces")
+async def get_province_performance(
+    time_filter: str = Query("all", description="Time filter: today, 7days, 30days, all")
+):
+    """
+    Get province-level performance metrics with regional grouping
+    Returns aggregated data by province with region classification
+    """
+    conn = None
+    cursor = None
+    try:
+        start_date = calculate_date_range(time_filter)
+        
+        conn = psycopg2.connect(**get_pg_connection_params())
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        if start_date:
+            cursor.execute("""
+                SELECT 
+                    province,
+                    region,
+                    COUNT(DISTINCT id) as total_orders,
+                    COUNT(DISTINCT unified_customer_id) as unique_customers,
+                    SUM(total_price) as total_revenue,
+                    AVG(total_price) as avg_order_value,
+                    COUNT(DISTINCT customer_city) as cities_covered
+                FROM orders
+                WHERE province IS NOT NULL
+                AND order_date >= %s
+                GROUP BY province, region
+                ORDER BY total_revenue DESC
+            """, (start_date,))
+        else:
+            cursor.execute("""
+                SELECT 
+                    province,
+                    region,
+                    COUNT(DISTINCT id) as total_orders,
+                    COUNT(DISTINCT unified_customer_id) as unique_customers,
+                    SUM(total_price) as total_revenue,
+                    AVG(total_price) as avg_order_value,
+                    COUNT(DISTINCT customer_city) as cities_covered
+                FROM orders
+                WHERE province IS NOT NULL
+                GROUP BY province, region
+                ORDER BY total_revenue DESC
+            """)
+        
+        provinces = cursor.fetchall()
+        
+        province_list = []
+        for prov in provinces:
+            prov_dict = dict(prov)
+            prov_dict['total_revenue'] = float(prov_dict['total_revenue'] or 0)
+            prov_dict['avg_order_value'] = float(prov_dict['avg_order_value'] or 0)
+            province_list.append(prov_dict)
+        
+        logger.info("Province performance fetched", 
+                   time_filter=time_filter,
+                   count=len(province_list))
+        
+        return {"provinces": province_list}
+        
+    except Exception as e:
+        logger.error("Failed to fetch province performance", error=str(e), exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+@app.get("/api/v1/analytics/geographic/cities")
+async def get_city_performance(
+    time_filter: str = Query("all", description="Time filter: today, 7days, 30days, all"),
+    limit: int = Query(20, description="Maximum number of cities to return")
+):
+    """
+    Get top performing cities with geographic context
+    Returns city-level metrics with province and region information
+    """
+    conn = None
+    cursor = None
+    try:
+        start_date = calculate_date_range(time_filter)
+        
+        conn = psycopg2.connect(**get_pg_connection_params())
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        if start_date:
+            cursor.execute("""
+                SELECT 
+                    o.customer_city as city,
+                    o.province,
+                    o.region,
+                    COUNT(DISTINCT o.id) as total_orders,
+                    COUNT(DISTINCT o.unified_customer_id) as unique_customers,
+                    SUM(o.total_price) as total_revenue,
+                    AVG(o.total_price) as avg_order_value
+                FROM orders o
+                WHERE o.customer_city IS NOT NULL
+                AND o.order_date >= %s
+                GROUP BY o.customer_city, o.province, o.region
+                ORDER BY total_revenue DESC
+                LIMIT %s
+            """, (start_date, limit))
+        else:
+            cursor.execute("""
+                SELECT 
+                    o.customer_city as city,
+                    o.province,
+                    o.region,
+                    COUNT(DISTINCT o.id) as total_orders,
+                    COUNT(DISTINCT o.unified_customer_id) as unique_customers,
+                    SUM(o.total_price) as total_revenue,
+                    AVG(o.total_price) as avg_order_value
+                FROM orders o
+                WHERE o.customer_city IS NOT NULL
+                GROUP BY o.customer_city, o.province, o.region
+                ORDER BY total_revenue DESC
+                LIMIT %s
+            """, (limit,))
+        
+        cities = cursor.fetchall()
+        
+        city_list = []
+        for city in cities:
+            city_dict = dict(city)
+            city_dict['total_revenue'] = float(city_dict['total_revenue'] or 0)
+            city_dict['avg_order_value'] = float(city_dict['avg_order_value'] or 0)
+            city_list.append(city_dict)
+        
+        logger.info("City performance fetched", 
+                   time_filter=time_filter,
+                   count=len(city_list))
+        
+        return {"cities": city_list}
+        
+    except Exception as e:
+        logger.error("Failed to fetch city performance", error=str(e), exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+@app.get("/api/v1/analytics/geographic/city-performance/{city}")
+async def get_specific_city_performance(
+    city: str,
+    time_filter: str = Query("all", description="Time filter: today, 7days, 30days, all")
+):
+    """
+    Get detailed performance metrics for a specific city
+    """
+    conn = None
+    cursor = None
+    try:
+        start_date = calculate_date_range(time_filter)
+        
+        conn = psycopg2.connect(**get_pg_connection_params())
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        if start_date:
+            cursor.execute("""
+                SELECT 
+                    customer_city as city,
+                    province,
+                    region,
+                    COUNT(DISTINCT id) as total_orders,
+                    COUNT(DISTINCT unified_customer_id) as unique_customers,
+                    SUM(total_price) as total_revenue,
+                    AVG(total_price) as avg_order_value
+                FROM orders
+                WHERE LOWER(customer_city) = LOWER(%s)
+                AND order_date >= %s
+                GROUP BY customer_city, province, region
+            """, (city, start_date))
+        else:
+            cursor.execute("""
+                SELECT 
+                    customer_city as city,
+                    province,
+                    region,
+                    COUNT(DISTINCT id) as total_orders,
+                    COUNT(DISTINCT unified_customer_id) as unique_customers,
+                    SUM(total_price) as total_revenue,
+                    AVG(total_price) as avg_order_value
+                FROM orders
+                WHERE LOWER(customer_city) = LOWER(%s)
+                GROUP BY customer_city, province, region
+            """, (city,))
+        
+        result = cursor.fetchone()
+        
+        if not result:
+            raise HTTPException(status_code=404, detail=f"City '{city}' not found")
+        
+        city_dict = dict(result)
+        city_dict['total_revenue'] = float(city_dict['total_revenue'] or 0)
+        city_dict['avg_order_value'] = float(city_dict['avg_order_value'] or 0)
+        
+        return city_dict
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to fetch city performance", city=city, error=str(e), exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+# RFM Customer Segmentation Endpoints
+@app.get("/api/v1/analytics/customers/rfm-segments")
+async def get_rfm_segments(
+    time_filter: str = Query("all", description="Time filter: today, 7days, 30days, all")
+):
+    """
+    Get RFM customer segmentation summary
+    Returns aggregated metrics for each customer segment
+    """
+    conn = None
+    cursor = None
+    try:
+        start_date = calculate_date_range(time_filter)
+        
+        conn = psycopg2.connect(**get_pg_connection_params())
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        if start_date:
+            cursor.execute("""
+                SELECT 
+                    cs.customer_segment as segment_name,
+                    COUNT(DISTINCT cs.unified_customer_id) as customer_count,
+                    SUM(cs.total_spent) as total_revenue,
+                    AVG(cs.total_spent) as avg_customer_value,
+                    AVG(cs.total_orders) as avg_orders_per_customer,
+                    AVG(EXTRACT(EPOCH FROM (NOW() - cs.last_order_date)) / 86400)::INTEGER as avg_recency_days
+                FROM customer_statistics cs
+                WHERE cs.customer_segment IS NOT NULL
+                AND cs.last_order_date >= %s
+                GROUP BY cs.customer_segment
+                ORDER BY total_revenue DESC
+            """, (start_date,))
+        else:
+            cursor.execute("""
+                SELECT 
+                    cs.customer_segment as segment_name,
+                    COUNT(DISTINCT cs.unified_customer_id) as customer_count,
+                    SUM(cs.total_spent) as total_revenue,
+                    AVG(cs.total_spent) as avg_customer_value,
+                    AVG(cs.total_orders) as avg_orders_per_customer,
+                    AVG(EXTRACT(EPOCH FROM (NOW() - cs.last_order_date)) / 86400)::INTEGER as avg_recency_days
+                FROM customer_statistics cs
+                WHERE cs.customer_segment IS NOT NULL
+                GROUP BY cs.customer_segment
+                ORDER BY total_revenue DESC
+            """)
+        
+        segments = cursor.fetchall()
+        
+        segment_list = []
+        for seg in segments:
+            seg_dict = dict(seg)
+            seg_dict['total_revenue'] = float(seg_dict['total_revenue'] or 0)
+            seg_dict['avg_customer_value'] = float(seg_dict['avg_customer_value'] or 0)
+            seg_dict['avg_orders_per_customer'] = float(seg_dict['avg_orders_per_customer'] or 0)
+            segment_list.append(seg_dict)
+        
+        logger.info("RFM segments fetched", 
+                   time_filter=time_filter,
+                   count=len(segment_list))
+        
+        return {"segments": segment_list}
+        
+    except Exception as e:
+        logger.error("Failed to fetch RFM segments", error=str(e), exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+@app.get("/api/v1/analytics/customers/segment-details/{segment}")
+async def get_segment_details(
+    segment: str,
+    limit: int = Query(100, description="Maximum number of customers to return")
+):
+    """
+    Get detailed customer list for a specific RFM segment
+    Returns individual customer records with RFM metrics
+    """
+    conn = None
+    cursor = None
+    try:
+        conn = psycopg2.connect(**get_pg_connection_params())
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cursor.execute("""
+            SELECT 
+                cs.unified_customer_id as customer_id,
+                o.customer_name,
+                o.customer_city,
+                cs.customer_segment as segment,
+                cs.total_orders,
+                cs.total_spent,
+                cs.avg_order_value,
+                cs.last_order_date,
+                EXTRACT(EPOCH FROM (NOW() - cs.last_order_date))::INTEGER / 86400 as recency_days,
+                -- Calculate RFM scores (1-5 scale)
+                CASE 
+                    WHEN EXTRACT(EPOCH FROM (NOW() - cs.last_order_date))::INTEGER / 86400 <= 30 THEN 5
+                    WHEN EXTRACT(EPOCH FROM (NOW() - cs.last_order_date))::INTEGER / 86400 <= 60 THEN 4
+                    WHEN EXTRACT(EPOCH FROM (NOW() - cs.last_order_date))::INTEGER / 86400 <= 90 THEN 3
+                    WHEN EXTRACT(EPOCH FROM (NOW() - cs.last_order_date))::INTEGER / 86400 <= 180 THEN 2
+                    ELSE 1
+                END as recency_score,
+                CASE 
+                    WHEN cs.total_orders >= 20 THEN 5
+                    WHEN cs.total_orders >= 10 THEN 4
+                    WHEN cs.total_orders >= 5 THEN 3
+                    WHEN cs.total_orders >= 2 THEN 2
+                    ELSE 1
+                END as frequency_score,
+                CASE 
+                    WHEN cs.total_spent >= 500000 THEN 5
+                    WHEN cs.total_spent >= 200000 THEN 4
+                    WHEN cs.total_spent >= 100000 THEN 3
+                    WHEN cs.total_spent >= 50000 THEN 2
+                    ELSE 1
+                END as monetary_score
+            FROM customer_statistics cs
+            LEFT JOIN (
+                SELECT DISTINCT ON (unified_customer_id) 
+                    unified_customer_id,
+                    customer_name,
+                    customer_city
+                FROM orders
+                WHERE customer_name IS NOT NULL
+            ) o ON cs.unified_customer_id = o.unified_customer_id
+            WHERE cs.customer_segment = %s
+            ORDER BY cs.total_spent DESC
+            LIMIT %s
+        """, (segment, limit))
+        
+        customers = cursor.fetchall()
+        
+        customer_list = []
+        for cust in customers:
+            cust_dict = dict(cust)
+            if cust_dict.get('last_order_date'):
+                cust_dict['last_order_date'] = cust_dict['last_order_date'].isoformat()
+            cust_dict['total_spent'] = float(cust_dict['total_spent'] or 0)
+            cust_dict['avg_order_value'] = float(cust_dict['avg_order_value'] or 0)
+            # Combine RFM scores
+            cust_dict['rfm_score'] = f"{cust_dict['recency_score']}{cust_dict['frequency_score']}{cust_dict['monetary_score']}"
+            customer_list.append(cust_dict)
+        
+        logger.info("Segment details fetched", 
+                   segment=segment,
+                   count=len(customer_list))
+        
+        return {
+            "segment": segment,
+            "customers": customer_list,
+            "total_count": len(customer_list)
+        }
+        
+    except Exception as e:
+        logger.error("Failed to fetch segment details", segment=segment, error=str(e), exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+@app.get("/api/v1/analytics/customers/at-risk")
+async def get_at_risk_customers(
+    limit: int = Query(50, description="Maximum number of customers to return")
+):
+    """
+    Get customers at risk of churning
+    Returns customers in segments: At Risk, Hibernating, Cannot Lose Them, Lost
+    """
+    conn = None
+    cursor = None
+    try:
+        conn = psycopg2.connect(**get_pg_connection_params())
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cursor.execute("""
+            SELECT 
+                cs.unified_customer_id as customer_id,
+                o.customer_name,
+                o.customer_city,
+                cs.customer_segment as segment,
+                cs.total_orders,
+                cs.total_spent,
+                cs.avg_order_value,
+                cs.last_order_date,
+                EXTRACT(EPOCH FROM (NOW() - cs.last_order_date))::INTEGER / 86400 as days_since_purchase
+            FROM customer_statistics cs
+            LEFT JOIN (
+                SELECT DISTINCT ON (unified_customer_id) 
+                    unified_customer_id,
+                    customer_name,
+                    customer_city
+                FROM orders
+                WHERE customer_name IS NOT NULL
+            ) o ON cs.unified_customer_id = o.unified_customer_id
+            WHERE cs.customer_segment IN ('At Risk', 'Hibernating', 'Cannot Lose Them', 'Lost')
+            ORDER BY cs.total_spent DESC, cs.last_order_date ASC
+            LIMIT %s
+        """, (limit,))
+        
+        customers = cursor.fetchall()
+        
+        customer_list = []
+        for cust in customers:
+            cust_dict = dict(cust)
+            if cust_dict.get('last_order_date'):
+                cust_dict['last_order_date'] = cust_dict['last_order_date'].isoformat()
+            cust_dict['total_spent'] = float(cust_dict['total_spent'] or 0)
+            cust_dict['avg_order_value'] = float(cust_dict['avg_order_value'] or 0)
+            customer_list.append(cust_dict)
+        
+        logger.info("At-risk customers fetched", count=len(customer_list))
+        
+        return {"customers": customer_list}
+        
+    except Exception as e:
+        logger.error("Failed to fetch at-risk customers", error=str(e), exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+# Brand Performance Endpoint
+@app.get("/api/v1/analytics/brands/performance")
+async def get_brand_performance(
+    time_filter: str = Query("all", description="Time filter: today, 7days, 30days, all"),
+    limit: int = Query(20, description="Maximum number of brands to return")
+):
+    """
+    Get top performing brands with detailed metrics
+    Returns brand-level analytics with revenue and order volume
+    """
+    conn = None
+    cursor = None
+    try:
+        start_date = calculate_date_range(time_filter)
+        
+        conn = psycopg2.connect(**get_pg_connection_params())
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        if start_date:
+            cursor.execute("""
+                SELECT 
+                    p.brand,
+                    COUNT(DISTINCT oi.order_id) as total_orders,
+                    SUM(oi.quantity) as units_sold,
+                    SUM(oi.quantity * oi.unit_price) as total_revenue,
+                    AVG(oi.unit_price) as avg_price,
+                    COUNT(DISTINCT p.id) as product_count
+                FROM order_items oi
+                JOIN products p ON oi.product_id = p.id
+                JOIN orders o ON oi.order_id = o.id
+                WHERE p.brand IS NOT NULL
+                AND o.order_date >= %s
+                GROUP BY p.brand
+                ORDER BY total_revenue DESC
+                LIMIT %s
+            """, (start_date, limit))
+        else:
+            cursor.execute("""
+                SELECT 
+                    p.brand,
+                    COUNT(DISTINCT oi.order_id) as total_orders,
+                    SUM(oi.quantity) as units_sold,
+                    SUM(oi.quantity * oi.unit_price) as total_revenue,
+                    AVG(oi.unit_price) as avg_price,
+                    COUNT(DISTINCT p.id) as product_count
+                FROM order_items oi
+                JOIN products p ON oi.product_id = p.id
+                WHERE p.brand IS NOT NULL
+                GROUP BY p.brand
+                ORDER BY total_revenue DESC
+                LIMIT %s
+            """, (limit,))
+        
+        brands = cursor.fetchall()
+        
+        brand_list = []
+        for brand in brands:
+            brand_dict = dict(brand)
+            brand_dict['total_revenue'] = float(brand_dict['total_revenue'] or 0)
+            brand_dict['avg_price'] = float(brand_dict['avg_price'] or 0)
+            brand_list.append(brand_dict)
+        
+        logger.info("Brand performance fetched", 
+                   time_filter=time_filter,
+                   count=len(brand_list))
+        
+        return {"brands": brand_list}
+        
+    except Exception as e:
+        logger.error("Failed to fetch brand performance", error=str(e), exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8001))  # Use Heroku's PORT or default to 8001

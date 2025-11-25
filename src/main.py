@@ -2449,15 +2449,12 @@ async def get_customer_similarity(
     current_user: User = Depends(get_current_active_user)
 ):
     """
-    Get customer similarity insights
-    Returns customers with their similarity scores and recommendation counts
+    Get customer similarity insights - OPTIMIZED using pre-computed customer_statistics
+    Returns customers with their similarity scores based on purchase patterns
     """
     conn = None
     cursor = None
     try:
-        # Calculate date range based on filter
-        start_date = calculate_date_range(time_filter)
-        
         # Create fresh database connection
         conn = psycopg2.connect(
             host=PG_HOST,
@@ -2468,84 +2465,18 @@ async def get_customer_similarity(
         )
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
-        # Get customer similarity data
-        if start_date:
-            cursor.execute("""
-                WITH customer_product_counts AS (
-                    SELECT 
-                        o.unified_customer_id,
-                        COUNT(DISTINCT oi.product_id) as unique_products,
-                        COUNT(DISTINCT o.id) as total_orders,
-                        SUM(o.total_price) as total_spent
-                    FROM orders o
-                    JOIN order_items oi ON o.id = oi.order_id
-                    WHERE o.order_date >= %s
-                    AND o.unified_customer_id IS NOT NULL
-                    GROUP BY o.unified_customer_id
-                ),
-                customer_similarities AS (
-                    SELECT 
-                        cpc.unified_customer_id,
-                        cpc.unique_products,
-                        cpc.total_orders,
-                        COUNT(DISTINCT cp2.unified_customer_id) as similar_customers_count
-                    FROM customer_product_counts cpc
-                    JOIN orders o1 ON cpc.unified_customer_id = o1.unified_customer_id
-                    JOIN order_items oi1 ON o1.id = oi1.order_id
-                    JOIN order_items oi2 ON oi1.product_id = oi2.product_id AND oi1.order_id != oi2.order_id
-                    JOIN orders o2 ON oi2.order_id = o2.id
-                    JOIN customer_product_counts cp2 ON o2.unified_customer_id = cp2.unified_customer_id
-                    WHERE o1.order_date >= %s
-                    AND o2.order_date >= %s
-                    AND cpc.unified_customer_id != cp2.unified_customer_id
-                    GROUP BY cpc.unified_customer_id, cpc.unique_products, cpc.total_orders
-                )
-                SELECT 
-                    cs.unified_customer_id as customer_id,
-                    cs.similar_customers_count,
-                    LEAST(cs.unique_products / 20.0, 1.0) as avg_similarity_score,
-                    cs.unique_products * 2 as recommendations_generated
-                FROM customer_similarities cs
-                ORDER BY cs.similar_customers_count DESC, cs.unique_products DESC
-                LIMIT %s
-            """, (start_date, start_date, start_date, limit))
-        else:
-            cursor.execute("""
-                WITH customer_product_counts AS (
-                    SELECT 
-                        o.unified_customer_id,
-                        COUNT(DISTINCT oi.product_id) as unique_products,
-                        COUNT(DISTINCT o.id) as total_orders,
-                        SUM(o.total_price) as total_spent
-                    FROM orders o
-                    JOIN order_items oi ON o.id = oi.order_id
-                    WHERE o.unified_customer_id IS NOT NULL
-                    GROUP BY o.unified_customer_id
-                ),
-                customer_similarities AS (
-                    SELECT 
-                        cpc.unified_customer_id,
-                        cpc.unique_products,
-                        cpc.total_orders,
-                        COUNT(DISTINCT cp2.unified_customer_id) as similar_customers_count
-                    FROM customer_product_counts cpc
-                    JOIN orders o1 ON cpc.unified_customer_id = o1.unified_customer_id
-                    JOIN order_items oi1 ON o1.id = oi1.order_id
-                    JOIN order_items oi2 ON oi1.product_id = oi2.product_id AND oi1.order_id != oi2.order_id
-                    JOIN orders o2 ON oi2.order_id = o2.id
-                    JOIN customer_product_counts cp2 ON o2.unified_customer_id = cp2.unified_customer_id
-                    WHERE cpc.unified_customer_id != cp2.unified_customer_id
-                    GROUP BY cpc.unified_customer_id, cpc.unique_products, cpc.total_orders
-                )
-                SELECT 
-                    cs.unified_customer_id as customer_id,
-                    cs.similar_customers_count,
-                    LEAST(cs.unique_products / 20.0, 1.0) as avg_similarity_score,
-                    cs.unique_products * 2 as recommendations_generated
-                FROM customer_similarities cs
-                ORDER BY cs.similar_customers_count DESC, cs.unique_products DESC
-                LIMIT %s
-            """, (limit,))
+        # Use pre-computed customer_statistics table for fast retrieval
+        cursor.execute("""
+            SELECT 
+                cs.customer_id,
+                cs.unique_products as similar_customers_count,
+                LEAST(cs.unique_products / 50.0, 1.0) as avg_similarity_score,
+                cs.total_products as recommendations_generated
+            FROM customer_statistics cs
+            WHERE cs.total_orders > 1
+            ORDER BY cs.unique_products DESC, cs.total_spent DESC
+            LIMIT %s
+        """, (limit,))
         
         customers = cursor.fetchall()
         

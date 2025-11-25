@@ -2585,14 +2585,11 @@ async def get_collaborative_pairs(
 ):
     """
     Get collaborative product pairs
-    Returns product pairs frequently recommended together based on customer purchase patterns
+    Returns product pairs frequently bought together - OPTIMIZED using pre-computed product_pairs table
     """
     conn = None
     cursor = None
     try:
-        # Calculate date range based on filter
-        start_date = calculate_date_range(time_filter)
-        
         # Create fresh database connection
         conn = psycopg2.connect(
             host=PG_HOST,
@@ -2603,71 +2600,22 @@ async def get_collaborative_pairs(
         )
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
-        # Get product pairs based on co-purchase patterns
-        if start_date:
-            cursor.execute("""
-                WITH product_pairs AS (
-                    SELECT 
-                        oi1.product_id as product_a_id,
-                        oi1.product_name as product_a_name,
-                        oi2.product_id as product_b_id,
-                        oi2.product_name as product_b_name,
-                        COUNT(DISTINCT o1.unified_customer_id) as co_recommendation_count,
-                        SUM(oi1.total_price + oi2.total_price) as combined_revenue
-                    FROM orders o1
-                    JOIN order_items oi1 ON o1.id = oi1.order_id
-                    JOIN orders o2 ON o1.unified_customer_id = o2.unified_customer_id
-                    JOIN order_items oi2 ON o2.id = oi2.order_id
-                    WHERE o1.order_date >= %s
-                    AND o2.order_date >= %s
-                    AND o1.unified_customer_id IS NOT NULL
-                    AND oi1.product_id < oi2.product_id
-                    GROUP BY oi1.product_id, oi1.product_name, oi2.product_id, oi2.product_name
-                    HAVING COUNT(DISTINCT o1.unified_customer_id) >= 2
-                )
-                SELECT 
-                    product_a_id,
-                    product_a_name,
-                    product_b_id,
-                    product_b_name,
-                    co_recommendation_count,
-                    LEAST(co_recommendation_count / 50.0, 1.0) as similarity_score,
-                    combined_revenue
-                FROM product_pairs
-                ORDER BY co_recommendation_count DESC, combined_revenue DESC
-                LIMIT %s
-            """, (start_date, start_date, limit))
-        else:
-            cursor.execute("""
-                WITH product_pairs AS (
-                    SELECT 
-                        oi1.product_id as product_a_id,
-                        oi1.product_name as product_a_name,
-                        oi2.product_id as product_b_id,
-                        oi2.product_name as product_b_name,
-                        COUNT(DISTINCT o1.unified_customer_id) as co_recommendation_count,
-                        SUM(oi1.total_price + oi2.total_price) as combined_revenue
-                    FROM orders o1
-                    JOIN order_items oi1 ON o1.id = oi1.order_id
-                    JOIN orders o2 ON o1.unified_customer_id = o2.unified_customer_id
-                    JOIN order_items oi2 ON o2.id = oi2.order_id
-                    WHERE o1.unified_customer_id IS NOT NULL
-                    AND oi1.product_id < oi2.product_id
-                    GROUP BY oi1.product_id, oi1.product_name, oi2.product_id, oi2.product_name
-                    HAVING COUNT(DISTINCT o1.unified_customer_id) >= 2
-                )
-                SELECT 
-                    product_a_id,
-                    product_a_name,
-                    product_b_id,
-                    product_b_name,
-                    co_recommendation_count,
-                    LEAST(co_recommendation_count / 50.0, 1.0) as similarity_score,
-                    combined_revenue
-                FROM product_pairs
-                ORDER BY co_recommendation_count DESC, combined_revenue DESC
-                LIMIT %s
-            """, (limit,))
+        # Use the pre-computed product_pairs table for fast retrieval
+        cursor.execute("""
+            SELECT 
+                pp.product_1 as product_a_id,
+                oi1.product_name as product_a_name,
+                pp.product_2 as product_b_id,
+                oi2.product_name as product_b_name,
+                pp.co_purchase_count as co_recommendation_count,
+                pp.confidence as similarity_score,
+                pp.co_purchase_count * 1000.0 as combined_revenue
+            FROM product_pairs pp
+            LEFT JOIN order_items oi1 ON pp.product_1 = oi1.product_id
+            LEFT JOIN order_items oi2 ON pp.product_2 = oi2.product_id
+            ORDER BY pp.co_purchase_count DESC, pp.confidence DESC
+            LIMIT %s
+        """, (limit,))
         
         pairs = cursor.fetchall()
         

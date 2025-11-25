@@ -371,3 +371,22 @@ BEGIN
     RAISE NOTICE '4. SELECT rebuild_product_statistics();';
     RAISE NOTICE '5. SELECT rebuild_customer_statistics();';
 END $$;
+
+-- 8. Users table (for authentication)
+CREATE TABLE IF NOT EXISTS users (
+    id SERIAL PRIMARY KEY,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    full_name VARCHAR(255),
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_login TIMESTAMP
+);
+
+-- Create index on email for faster lookups
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+
+-- Add comment
+COMMENT ON TABLE users IS 'User authentication table for dashboard access';
+COMMENT ON COLUMN users.password_hash IS 'Bcrypt hashed password';
+COMMENT ON COLUMN users.is_active IS 'Flag to enable/disable user access';

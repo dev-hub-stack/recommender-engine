@@ -2162,8 +2162,8 @@ async def get_collaborative_metrics(
     current_user: User = Depends(get_current_active_user)
 ):
     """
-    Get collaborative filtering metrics and statistics
-    Returns: total recommendations, avg similarity score, active customer pairs, algorithm accuracy
+    Get collaborative filtering metrics and statistics - IMPROVED VERSION
+    All calculations use real data without arbitrary multipliers or divisors
     """
     conn = None
     cursor = None
@@ -2181,23 +2181,96 @@ async def get_collaborative_metrics(
         )
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
-        # Calculate total recommendations generated (based on order patterns)
+        # ============================================
+        # CARD 1: Total Collaborative Recommendations
+        # IMPROVED: Use actual recommendation count, not arbitrary ×2
+        # ============================================
         if start_date:
             cursor.execute("""
-                SELECT COUNT(DISTINCT o.unified_customer_id) as active_customers
-                FROM orders o
-                WHERE o.order_date >= %s
-            """, (start_date,))
+                WITH customer_purchases AS (
+                    SELECT 
+                        o.unified_customer_id,
+                        ARRAY_AGG(DISTINCT oi.product_id) as purchased_products
+                    FROM orders o
+                    JOIN order_items oi ON o.id = oi.order_id
+                    WHERE o.order_date >= %s
+                    AND o.unified_customer_id IS NOT NULL
+                    GROUP BY o.unified_customer_id
+                ),
+                similar_customers AS (
+                    SELECT DISTINCT
+                        cp1.unified_customer_id,
+                        cp2.unified_customer_id as similar_customer_id
+                    FROM customer_purchases cp1
+                    JOIN orders o1 ON cp1.unified_customer_id = o1.unified_customer_id
+                    JOIN order_items oi1 ON o1.id = oi1.order_id
+                    JOIN order_items oi2 ON oi1.product_id = oi2.product_id
+                    JOIN orders o2 ON oi2.order_id = o2.id
+                    JOIN customer_purchases cp2 ON o2.unified_customer_id = cp2.unified_customer_id
+                    WHERE cp1.unified_customer_id != cp2.unified_customer_id
+                    AND o1.order_date >= %s
+                    AND o2.order_date >= %s
+                ),
+                recommendable_products AS (
+                    SELECT 
+                        sc.unified_customer_id,
+                        COUNT(DISTINCT oi.product_id) as recommendations_count
+                    FROM similar_customers sc
+                    JOIN orders o ON sc.similar_customer_id = o.unified_customer_id
+                    JOIN order_items oi ON o.id = oi.order_id
+                    JOIN customer_purchases cp ON sc.unified_customer_id = cp.unified_customer_id
+                    WHERE o.order_date >= %s
+                    AND NOT (oi.product_id = ANY(cp.purchased_products))
+                    GROUP BY sc.unified_customer_id
+                )
+                SELECT COALESCE(SUM(recommendations_count), 0) as total_recommendations
+                FROM recommendable_products
+            """, (start_date, start_date, start_date, start_date))
         else:
             cursor.execute("""
-                SELECT COUNT(DISTINCT o.unified_customer_id) as active_customers
-                FROM orders o
+                WITH customer_purchases AS (
+                    SELECT 
+                        o.unified_customer_id,
+                        ARRAY_AGG(DISTINCT oi.product_id) as purchased_products
+                    FROM orders o
+                    JOIN order_items oi ON o.id = oi.order_id
+                    WHERE o.unified_customer_id IS NOT NULL
+                    GROUP BY o.unified_customer_id
+                ),
+                similar_customers AS (
+                    SELECT DISTINCT
+                        cp1.unified_customer_id,
+                        cp2.unified_customer_id as similar_customer_id
+                    FROM customer_purchases cp1
+                    JOIN orders o1 ON cp1.unified_customer_id = o1.unified_customer_id
+                    JOIN order_items oi1 ON o1.id = oi1.order_id
+                    JOIN order_items oi2 ON oi1.product_id = oi2.product_id
+                    JOIN orders o2 ON oi2.order_id = o2.id
+                    JOIN customer_purchases cp2 ON o2.unified_customer_id = cp2.unified_customer_id
+                    WHERE cp1.unified_customer_id != cp2.unified_customer_id
+                ),
+                recommendable_products AS (
+                    SELECT 
+                        sc.unified_customer_id,
+                        COUNT(DISTINCT oi.product_id) as recommendations_count
+                    FROM similar_customers sc
+                    JOIN orders o ON sc.similar_customer_id = o.unified_customer_id
+                    JOIN order_items oi ON o.id = oi.order_id
+                    JOIN customer_purchases cp ON sc.unified_customer_id = cp.unified_customer_id
+                    WHERE NOT (oi.product_id = ANY(cp.purchased_products))
+                    GROUP BY sc.unified_customer_id
+                )
+                SELECT COALESCE(SUM(recommendations_count), 0) as total_recommendations
+                FROM recommendable_products
             """)
         
         result = cursor.fetchone()
-        active_customers = result['active_customers'] if result else 0
+        total_recommendations = result['total_recommendations'] if result else 0
         
-        # Calculate customer pairs (customers who bought similar products)
+        # ============================================
+        # CARD 3: Active Customer Pairs
+        # This one is already accurate - keep as is
+        # ============================================
         if start_date:
             cursor.execute("""
                 WITH customer_products AS (
@@ -2245,48 +2318,71 @@ async def get_collaborative_metrics(
         result = cursor.fetchone()
         active_customer_pairs = result['pair_count'] if result else 0
         
-        # Calculate average similarity score (based on product overlap)
+        # ============================================
+        # CARD 2: Average Similarity Score
+        # IMPROVED: Use Jaccard similarity (real similarity metric)
+        # ============================================
         if start_date:
             cursor.execute("""
                 WITH customer_products AS (
                     SELECT 
                         o.unified_customer_id,
-                        COUNT(DISTINCT oi.product_id) as product_count
+                        ARRAY_AGG(DISTINCT oi.product_id) as products
                     FROM orders o
                     JOIN order_items oi ON o.id = oi.order_id
                     WHERE o.order_date >= %s
                     AND o.unified_customer_id IS NOT NULL
                     GROUP BY o.unified_customer_id
+                ),
+                similarity_scores AS (
+                    SELECT 
+                        cp1.unified_customer_id as customer_a,
+                        cp2.unified_customer_id as customer_b,
+                        -- Jaccard Similarity: intersection / union
+                        CAST(CARDINALITY(cp1.products & cp2.products) AS FLOAT) / 
+                        NULLIF(CARDINALITY(cp1.products | cp2.products), 0) as similarity
+                    FROM customer_products cp1
+                    CROSS JOIN customer_products cp2
+                    WHERE cp1.unified_customer_id < cp2.unified_customer_id
+                    AND CARDINALITY(cp1.products & cp2.products) > 0
                 )
-                SELECT AVG(product_count) as avg_products_per_customer
-                FROM customer_products
+                SELECT AVG(similarity) as avg_similarity
+                FROM similarity_scores
             """, (start_date,))
         else:
             cursor.execute("""
                 WITH customer_products AS (
                     SELECT 
                         o.unified_customer_id,
-                        COUNT(DISTINCT oi.product_id) as product_count
+                        ARRAY_AGG(DISTINCT oi.product_id) as products
                     FROM orders o
                     JOIN order_items oi ON o.id = oi.order_id
                     WHERE o.unified_customer_id IS NOT NULL
                     GROUP BY o.unified_customer_id
+                ),
+                similarity_scores AS (
+                    SELECT 
+                        cp1.unified_customer_id as customer_a,
+                        cp2.unified_customer_id as customer_b,
+                        -- Jaccard Similarity: intersection / union
+                        CAST(CARDINALITY(cp1.products & cp2.products) AS FLOAT) / 
+                        NULLIF(CARDINALITY(cp1.products | cp2.products), 0) as similarity
+                    FROM customer_products cp1
+                    CROSS JOIN customer_products cp2
+                    WHERE cp1.unified_customer_id < cp2.unified_customer_id
+                    AND CARDINALITY(cp1.products & cp2.products) > 0
                 )
-                SELECT AVG(product_count) as avg_products_per_customer
-                FROM customer_products
+                SELECT AVG(similarity) as avg_similarity
+                FROM similarity_scores
             """)
         
         result = cursor.fetchone()
-        avg_products = float(result['avg_products_per_customer']) if result and result['avg_products_per_customer'] else 0
+        avg_similarity_score = float(result['avg_similarity']) if result and result['avg_similarity'] else 0.0
         
-        # Calculate similarity score (normalized between 0-1)
-        # Higher product diversity = higher similarity potential
-        avg_similarity_score = min(avg_products / 20.0, 1.0)  # Normalize to 0-1 scale
-        
-        # Estimate total recommendations (customers * avg products they could be recommended)
-        total_recommendations = active_customers * int(avg_products * 2)
-        
-        # Calculate algorithm accuracy (based on repeat purchase rate)
+        # ============================================
+        # CARD 4: Algorithm Accuracy
+        # IMPROVED: Use actual conversion rate, no artificial caps
+        # ============================================
         if start_date:
             cursor.execute("""
                 WITH customer_repeat_purchases AS (
@@ -2303,7 +2399,11 @@ async def get_collaborative_metrics(
                 )
                 SELECT 
                     COUNT(*) as repeat_purchases,
-                    (SELECT COUNT(*) FROM orders WHERE order_date >= %s) as total_orders
+                    (SELECT COUNT(DISTINCT o.unified_customer_id || '_' || oi.product_id) 
+                     FROM orders o 
+                     JOIN order_items oi ON o.id = oi.order_id 
+                     WHERE o.order_date >= %s 
+                     AND o.unified_customer_id IS NOT NULL) as total_customer_products
                 FROM customer_repeat_purchases
             """, (start_date, start_date))
         else:
@@ -2321,30 +2421,29 @@ async def get_collaborative_metrics(
                 )
                 SELECT 
                     COUNT(*) as repeat_purchases,
-                    (SELECT COUNT(*) FROM orders) as total_orders
+                    (SELECT COUNT(DISTINCT o.unified_customer_id || '_' || oi.product_id) 
+                     FROM orders o 
+                     JOIN order_items oi ON o.id = oi.order_id 
+                     WHERE o.unified_customer_id IS NOT NULL) as total_customer_products
                 FROM customer_repeat_purchases
             """)
         
         result = cursor.fetchone()
         repeat_purchases = result['repeat_purchases'] if result else 0
-        total_orders = result['total_orders'] if result else 1
+        total_customer_products = result['total_customer_products'] if result else 1
         
-        # Algorithm accuracy based on repeat purchase rate (proxy for recommendation success)
-        algorithm_accuracy = min((repeat_purchases / total_orders) * 100, 95.0) if total_orders > 0 else 0
+        # Real accuracy: percentage of customer-product combinations that resulted in repeat purchases
+        algorithm_accuracy = (repeat_purchases / total_customer_products) * 100 if total_customer_products > 0 else 0.0
         
-        # Ensure minimum accuracy of 75% for established systems
-        if active_customers > 100:
-            algorithm_accuracy = max(algorithm_accuracy, 75.0)
-        
-        logger.info("Collaborative metrics fetched", 
+        logger.info("Collaborative metrics fetched (improved version)", 
                    time_filter=time_filter,
-                   active_customers=active_customers,
-                   customer_pairs=active_customer_pairs)
+                   total_recommendations=total_recommendations,
+                   active_customer_pairs=active_customer_pairs)
         
         return {
-            "total_recommendations": total_recommendations,
+            "total_recommendations": int(total_recommendations),
             "avg_similarity_score": round(avg_similarity_score, 3),
-            "active_customer_pairs": active_customer_pairs,
+            "active_customer_pairs": int(active_customer_pairs),
             "algorithm_accuracy": round(algorithm_accuracy, 2),
             "time_period": time_filter
         }
@@ -2357,6 +2456,7 @@ async def get_collaborative_metrics(
             cursor.close()
         if conn:
             conn.close()
+
 
 
 @app.get("/api/v1/analytics/collaborative-products")

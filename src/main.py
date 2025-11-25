@@ -5,7 +5,7 @@ Core ML algorithms and recommendation inference with Redis caching and PostgreSQ
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Query, Depends, status
-from auth import (
+from src.auth import (
     authenticate_user, create_access_token, update_last_login,
     get_current_active_user, User, LoginRequest, Token,
     ACCESS_TOKEN_EXPIRE_MINUTES

@@ -1173,22 +1173,21 @@ async def get_dashboard_metrics(
         
         # Query dashboard metrics - Optimized with separate queries for better performance
         if start_date:
-            # Basic order metrics
+            # Basic order metrics with revenue from orders table (NOT order_items)
             cursor.execute("""
                 SELECT 
                     COUNT(*) as total_orders,
                     COUNT(DISTINCT unified_customer_id) as total_customers,
-                    SUM(total_price) as total_revenue_orders
+                    SUM(total_price) as total_revenue,
+                    AVG(total_price) as avg_order_value
                 FROM orders
                 WHERE order_date >= %s
             """, (start_date,))
             basic_metrics = cursor.fetchone()
             
-            # Order items metrics
+            # Product count from order_items
             cursor.execute("""
                 SELECT 
-                    SUM(oi.total_price) as total_revenue,
-                    AVG(oi.total_price) as avg_order_value,
                     COUNT(DISTINCT oi.product_id) as total_products
                 FROM order_items oi
                 JOIN orders o ON o.id = oi.order_id
@@ -1200,8 +1199,8 @@ async def get_dashboard_metrics(
             metrics = {
                 'total_orders': basic_metrics['total_orders'],
                 'total_customers': basic_metrics['total_customers'], 
-                'total_revenue': items_metrics['total_revenue'] or 0,
-                'avg_order_value': items_metrics['avg_order_value'] or 0,
+                'total_revenue': basic_metrics['total_revenue'] or 0,
+                'avg_order_value': basic_metrics['avg_order_value'] or 0,
                 'total_products': items_metrics['total_products'] or 0
             }
         else:
@@ -1209,15 +1208,15 @@ async def get_dashboard_metrics(
             cursor.execute("""
                 SELECT 
                     COUNT(*) as total_orders,
-                    COUNT(DISTINCT unified_customer_id) as total_customers
+                    COUNT(DISTINCT unified_customer_id) as total_customers,
+                    SUM(total_price) as total_revenue,
+                    AVG(total_price) as avg_order_value
                 FROM orders
             """)
             basic_metrics = cursor.fetchone()
             
             cursor.execute("""
                 SELECT 
-                    SUM(total_price) as total_revenue,
-                    AVG(total_price) as avg_order_value,
                     COUNT(DISTINCT product_id) as total_products
                 FROM order_items
             """)
@@ -1227,8 +1226,8 @@ async def get_dashboard_metrics(
             metrics = {
                 'total_orders': basic_metrics['total_orders'],
                 'total_customers': basic_metrics['total_customers'],
-                'total_revenue': items_metrics['total_revenue'] or 0,
-                'avg_order_value': items_metrics['avg_order_value'] or 0,
+                'total_revenue': basic_metrics['total_revenue'] or 0,
+                'avg_order_value': basic_metrics['avg_order_value'] or 0,
                 'total_products': items_metrics['total_products'] or 0
             }
         

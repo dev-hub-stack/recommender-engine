@@ -2818,7 +2818,7 @@ async def get_rfm_segments(
             cursor.execute("""
                 SELECT 
                     cs.customer_segment as segment_name,
-                    COUNT(DISTINCT cs.unified_customer_id) as customer_count,
+                    COUNT(DISTINCT cs.customer_id) as customer_count,
                     SUM(cs.total_spent) as total_revenue,
                     AVG(cs.total_spent) as avg_customer_value,
                     AVG(cs.total_orders) as avg_orders_per_customer,
@@ -2833,7 +2833,7 @@ async def get_rfm_segments(
             cursor.execute("""
                 SELECT 
                     cs.customer_segment as segment_name,
-                    COUNT(DISTINCT cs.unified_customer_id) as customer_count,
+                    COUNT(DISTINCT cs.customer_id) as customer_count,
                     SUM(cs.total_spent) as total_revenue,
                     AVG(cs.total_spent) as avg_customer_value,
                     AVG(cs.total_orders) as avg_orders_per_customer,
@@ -2886,9 +2886,9 @@ async def get_segment_details(
         
         cursor.execute("""
             SELECT 
-                cs.unified_customer_id as customer_id,
-                o.customer_name,
-                o.customer_city,
+                cs.customer_id,
+                cs.customer_name,
+                cs.customer_city,
                 cs.customer_segment as segment,
                 cs.total_orders,
                 cs.total_spent,
@@ -2918,14 +2918,6 @@ async def get_segment_details(
                     ELSE 1
                 END as monetary_score
             FROM customer_statistics cs
-            LEFT JOIN (
-                SELECT DISTINCT ON (unified_customer_id) 
-                    unified_customer_id,
-                    customer_name,
-                    customer_city
-                FROM orders
-                WHERE customer_name IS NOT NULL
-            ) o ON cs.unified_customer_id = o.unified_customer_id
             WHERE cs.customer_segment = %s
             ORDER BY cs.total_spent DESC
             LIMIT %s
@@ -2979,9 +2971,9 @@ async def get_at_risk_customers(
         
         cursor.execute("""
             SELECT 
-                cs.unified_customer_id as customer_id,
-                o.customer_name,
-                o.customer_city,
+                cs.customer_id,
+                cs.customer_name,
+                cs.customer_city,
                 cs.customer_segment as segment,
                 cs.total_orders,
                 cs.total_spent,
@@ -2989,14 +2981,6 @@ async def get_at_risk_customers(
                 cs.last_order_date,
                 EXTRACT(EPOCH FROM (NOW() - cs.last_order_date))::INTEGER / 86400 as days_since_purchase
             FROM customer_statistics cs
-            LEFT JOIN (
-                SELECT DISTINCT ON (unified_customer_id) 
-                    unified_customer_id,
-                    customer_name,
-                    customer_city
-                FROM orders
-                WHERE customer_name IS NOT NULL
-            ) o ON cs.unified_customer_id = o.unified_customer_id
             WHERE cs.customer_segment IN ('At Risk', 'Hibernating', 'Cannot Lose Them', 'Lost')
             ORDER BY cs.total_spent DESC, cs.last_order_date ASC
             LIMIT %s

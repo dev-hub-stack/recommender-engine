@@ -2507,8 +2507,8 @@ async def get_customer_similarity(
     current_user: User = Depends(get_current_active_user)
 ):
     """
-    Get customer similarity insights
-    Returns customers with their similarity scores and recommendation counts
+    Get customer similarity insights with ACTUAL recommendation counts.
+    Returns customers with their similarity scores and real recommendation opportunities.
     """
     conn = None
     cursor = None
@@ -2526,82 +2526,117 @@ async def get_customer_similarity(
         )
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
-        # Get customer similarity data
+        # NEW QUERY: Calculate actual recommendation opportunities
         if start_date:
             cursor.execute("""
-                WITH customer_product_counts AS (
+                WITH customer_purchases AS (
+                    -- Get all products each customer has bought
                     SELECT 
                         o.unified_customer_id,
-                        COUNT(DISTINCT oi.product_id) as unique_products,
-                        COUNT(DISTINCT o.id) as total_orders,
-                        SUM(o.total_price) as total_spent
+                        ARRAY_AGG(DISTINCT oi.product_id) as purchased_products,
+                        COUNT(DISTINCT oi.product_id) as unique_products
                     FROM orders o
                     JOIN order_items oi ON o.id = oi.order_id
                     WHERE o.order_date >= %s
                     AND o.unified_customer_id IS NOT NULL
                     GROUP BY o.unified_customer_id
                 ),
-                customer_similarities AS (
-                    SELECT 
-                        cpc.unified_customer_id,
-                        cpc.unique_products,
-                        cpc.total_orders,
-                        COUNT(DISTINCT cp2.unified_customer_id) as similar_customers_count
-                    FROM customer_product_counts cpc
-                    JOIN orders o1 ON cpc.unified_customer_id = o1.unified_customer_id
+                similar_customers AS (
+                    -- Find similar customers (who bought same products)
+                    SELECT DISTINCT
+                        cp1.unified_customer_id,
+                        cp2.unified_customer_id as similar_customer_id
+                    FROM customer_purchases cp1
+                    JOIN orders o1 ON cp1.unified_customer_id = o1.unified_customer_id
                     JOIN order_items oi1 ON o1.id = oi1.order_id
-                    JOIN order_items oi2 ON oi1.product_id = oi2.product_id AND oi1.order_id != oi2.order_id
+                    JOIN order_items oi2 ON oi1.product_id = oi2.product_id
                     JOIN orders o2 ON oi2.order_id = o2.id
-                    JOIN customer_product_counts cp2 ON o2.unified_customer_id = cp2.unified_customer_id
-                    WHERE o1.order_date >= %s
+                    JOIN customer_purchases cp2 ON o2.unified_customer_id = cp2.unified_customer_id
+                    WHERE cp1.unified_customer_id != cp2.unified_customer_id
+                    AND o1.order_date >= %s
                     AND o2.order_date >= %s
-                    AND cpc.unified_customer_id != cp2.unified_customer_id
-                    GROUP BY cpc.unified_customer_id, cpc.unique_products, cpc.total_orders
+                ),
+                recommendable_products AS (
+                    -- Count products that similar customers bought that this customer hasn't
+                    SELECT 
+                        sc.unified_customer_id,
+                        COUNT(DISTINCT oi.product_id) as actual_recommendations
+                    FROM similar_customers sc
+                    JOIN orders o ON sc.similar_customer_id = o.unified_customer_id
+                    JOIN order_items oi ON o.id = oi.order_id
+                    JOIN customer_purchases cp ON sc.unified_customer_id = cp.unified_customer_id
+                    WHERE o.order_date >= %s
+                    AND NOT (oi.product_id = ANY(cp.purchased_products))
+                    GROUP BY sc.unified_customer_id
                 )
                 SELECT 
-                    cs.unified_customer_id as customer_id,
-                    cs.similar_customers_count,
-                    LEAST(cs.unique_products / 20.0, 1.0) as avg_similarity_score,
-                    cs.unique_products * 2 as recommendations_generated
-                FROM customer_similarities cs
-                ORDER BY cs.similar_customers_count DESC, cs.unique_products DESC
+                    cp.unified_customer_id as customer_id,
+                    COUNT(DISTINCT sc.similar_customer_id) as similar_customers_count,
+                    COALESCE(rp.actual_recommendations, 0) as actual_recommendations,
+                    cp.unique_products * 2 as recommendations_generated
+                FROM customer_purchases cp
+                LEFT JOIN similar_customers sc ON cp.unified_customer_id = sc.unified_customer_id
+                LEFT JOIN recommendable_products rp ON cp.unified_customer_id = rp.unified_customer_id
+                GROUP BY 
+                    cp.unified_customer_id,
+                    cp.unique_products,
+                    rp.actual_recommendations
+                HAVING COUNT(DISTINCT sc.similar_customer_id) > 0
+                ORDER BY similar_customers_count DESC, actual_recommendations DESC
                 LIMIT %s
-            """, (start_date, start_date, start_date, limit))
+            """, (start_date, start_date, start_date, start_date, limit))
         else:
             cursor.execute("""
-                WITH customer_product_counts AS (
+                WITH customer_purchases AS (
+                    -- Get all products each customer has bought
                     SELECT 
                         o.unified_customer_id,
-                        COUNT(DISTINCT oi.product_id) as unique_products,
-                        COUNT(DISTINCT o.id) as total_orders,
-                        SUM(o.total_price) as total_spent
+                        ARRAY_AGG(DISTINCT oi.product_id) as purchased_products,
+                        COUNT(DISTINCT oi.product_id) as unique_products
                     FROM orders o
                     JOIN order_items oi ON o.id = oi.order_id
                     WHERE o.unified_customer_id IS NOT NULL
                     GROUP BY o.unified_customer_id
                 ),
-                customer_similarities AS (
-                    SELECT 
-                        cpc.unified_customer_id,
-                        cpc.unique_products,
-                        cpc.total_orders,
-                        COUNT(DISTINCT cp2.unified_customer_id) as similar_customers_count
-                    FROM customer_product_counts cpc
-                    JOIN orders o1 ON cpc.unified_customer_id = o1.unified_customer_id
+                similar_customers AS (
+                    -- Find similar customers (who bought same products)
+                    SELECT DISTINCT
+                        cp1.unified_customer_id,
+                        cp2.unified_customer_id as similar_customer_id
+                    FROM customer_purchases cp1
+                    JOIN orders o1 ON cp1.unified_customer_id = o1.unified_customer_id
                     JOIN order_items oi1 ON o1.id = oi1.order_id
-                    JOIN order_items oi2 ON oi1.product_id = oi2.product_id AND oi1.order_id != oi2.order_id
+                    JOIN order_items oi2 ON oi1.product_id = oi2.product_id
                     JOIN orders o2 ON oi2.order_id = o2.id
-                    JOIN customer_product_counts cp2 ON o2.unified_customer_id = cp2.unified_customer_id
-                    WHERE cpc.unified_customer_id != cp2.unified_customer_id
-                    GROUP BY cpc.unified_customer_id, cpc.unique_products, cpc.total_orders
+                    JOIN customer_purchases cp2 ON o2.unified_customer_id = cp2.unified_customer_id
+                    WHERE cp1.unified_customer_id != cp2.unified_customer_id
+                ),
+                recommendable_products AS (
+                    -- Count products that similar customers bought that this customer hasn't
+                    SELECT 
+                        sc.unified_customer_id,
+                        COUNT(DISTINCT oi.product_id) as actual_recommendations
+                    FROM similar_customers sc
+                    JOIN orders o ON sc.similar_customer_id = o.unified_customer_id
+                    JOIN order_items oi ON o.id = oi.order_id
+                    JOIN customer_purchases cp ON sc.unified_customer_id = cp.unified_customer_id
+                    WHERE NOT (oi.product_id = ANY(cp.purchased_products))
+                    GROUP BY sc.unified_customer_id
                 )
                 SELECT 
-                    cs.unified_customer_id as customer_id,
-                    cs.similar_customers_count,
-                    LEAST(cs.unique_products / 20.0, 1.0) as avg_similarity_score,
-                    cs.unique_products * 2 as recommendations_generated
-                FROM customer_similarities cs
-                ORDER BY cs.similar_customers_count DESC, cs.unique_products DESC
+                    cp.unified_customer_id as customer_id,
+                    COUNT(DISTINCT sc.similar_customer_id) as similar_customers_count,
+                    COALESCE(rp.actual_recommendations, 0) as actual_recommendations,
+                    cp.unique_products * 2 as recommendations_generated
+                FROM customer_purchases cp
+                LEFT JOIN similar_customers sc ON cp.unified_customer_id = sc.unified_customer_id
+                LEFT JOIN recommendable_products rp ON cp.unified_customer_id = rp.unified_customer_id
+                GROUP BY 
+                    cp.unified_customer_id,
+                    cp.unique_products,
+                    rp.actual_recommendations
+                HAVING COUNT(DISTINCT sc.similar_customer_id) > 0
+                ORDER BY similar_customers_count DESC, actual_recommendations DESC
                 LIMIT %s
             """, (limit,))
         
@@ -2611,13 +2646,54 @@ async def get_customer_similarity(
         customer_list = []
         for customer in customers:
             customer_dict = dict(customer)
-            if customer_dict.get('avg_similarity_score'):
-                customer_dict['avg_similarity_score'] = float(customer_dict['avg_similarity_score'])
-            # Add empty top_similar_customers array (would require more complex query)
+            
+            # Fetch top shared products for this customer
+            customer_id = customer_dict['customer_id']
+            try:
+                if start_date:
+                    cursor.execute("""
+                        SELECT oi.product_name, COUNT(DISTINCT o2.unified_customer_id) as shared_count
+                        FROM order_items oi
+                        JOIN orders o1 ON oi.order_id = o1.id
+                        JOIN order_items oi2 ON oi.product_id = oi2.product_id AND oi.order_id != oi2.order_id
+                        JOIN orders o2 ON oi2.order_id = o2.id
+                        WHERE o1.unified_customer_id = %s
+                        AND o2.unified_customer_id != %s
+                        AND o1.order_date >= %s
+                        AND o2.order_date >= %s
+                        AND oi.product_name IS NOT NULL
+                        GROUP BY oi.product_name
+                        ORDER BY shared_count DESC
+                        LIMIT 3
+                    """, (customer_id, customer_id, start_date, start_date))
+                else:
+                    cursor.execute("""
+                        SELECT oi.product_name, COUNT(DISTINCT o2.unified_customer_id) as shared_count
+                        FROM order_items oi
+                        JOIN orders o1 ON oi.order_id = o1.id
+                        JOIN order_items oi2 ON oi.product_id = oi2.product_id AND oi.order_id != oi2.order_id
+                        JOIN orders o2 ON oi2.order_id = o2.id
+                        WHERE o1.unified_customer_id = %s
+                        AND o2.unified_customer_id != %s
+                        AND oi.product_name IS NOT NULL
+                        GROUP BY oi.product_name
+                        ORDER BY shared_count DESC
+                        LIMIT 3
+                    """, (customer_id, customer_id))
+                
+                top_products = cursor.fetchall()
+                customer_dict['top_shared_products'] = [
+                    {'product_name': p['product_name'], 'shared_count': p['shared_count']}
+                    for p in top_products
+                ]
+            except Exception as e:
+                logger.warning(f"Failed to fetch shared products for customer {customer_id}", error=str(e))
+                customer_dict['top_shared_products'] = []
+            
             customer_dict['top_similar_customers'] = []
             customer_list.append(customer_dict)
         
-        logger.info("Customer similarity data fetched", 
+        logger.info("Customer similarity data fetched with actual recommendations", 
                    time_filter=time_filter,
                    count=len(customer_list))
         
@@ -2633,6 +2709,8 @@ async def get_customer_similarity(
             cursor.close()
         if conn:
             conn.close()
+
+
 
 
 @app.get("/api/v1/analytics/collaborative-pairs")

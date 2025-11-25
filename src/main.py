@@ -211,10 +211,17 @@ app = FastAPI(
 # Add CORS middleware to allow dashboard access
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000", "*"],  # Allow dashboard origins
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "https://master-dashboard.netlify.app",
+        "https://*.netlify.app",
+        "*"
+    ],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 

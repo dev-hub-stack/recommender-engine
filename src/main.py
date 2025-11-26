@@ -1045,2182 +1045,386 @@ async def get_matrix_factorization_recommendations(
         logger.error("Matrix factorization failed", error=str(e), exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-# ==============================================
-# ANALYTICS ENDPOINTS (REAL-TIME DATA)
-# ==============================================
+# ============================================================================
+# ML RECOMMENDATION ENDPOINTS (PHASE 1.5)
+# ============================================================================
 
-@app.get("/api/v1/analytics/products")
-async def get_product_analytics(
-    time_filter: str = Query("all", description="Time filter: today, 7days, 30days, all"),
-    limit: int = Query(100, description="Maximum number of products to return")
+from algorithms.ml_recommendation_service import get_ml_service
+import random
+
+# A/B Testing configuration
+AB_TEST_CONFIG = {
+    'ml_recommendation_rollout': 50,  # % of traffic that gets ML recommendations
+    'enabled_dashboards': ['analytics', 'customer_detail', 'product_recommendations']
+}
+
+@app.post("/api/v1/ml/train")
+async def train_ml_models(
+    time_filter: str = Query("30days", description="Time filter for training data"),
+    force_retrain: bool = Query(False, description="Force retraining even if models exist")
 ):
     """
-    Get real-time product analytics with sales data (100% LIVE DATA)
-    Time filters: today, 7days, 30days, all
-    """
-    conn = None
-    cursor = None
-    try:
-        # Calculate date range based on filter
-        start_date = calculate_date_range(time_filter)
-        
-        # Create fresh database connection
-        conn = psycopg2.connect(**get_pg_connection_params())
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        if start_date:
-            cursor.execute("""
-                SELECT 
-                    oi.product_id,
-                    oi.product_name,
-                    'General' as category,
-                    AVG(oi.unit_price) as price,
-                    COUNT(DISTINCT oi.order_id) as total_orders,
-                    SUM(oi.quantity) as total_quantity_sold,
-                    SUM(oi.total_price) as total_revenue,
-                    COUNT(DISTINCT o.unified_customer_id) as unique_customers,
-                    AVG(oi.total_price) as avg_order_value,
-                    MAX(o.order_date) as last_order_date
-                FROM order_items oi
-                JOIN orders o ON oi.order_id = o.id
-                WHERE o.order_date >= %s
-                GROUP BY oi.product_id, oi.product_name
-                ORDER BY total_revenue DESC
-                LIMIT %s
-            """, (start_date, limit))
-        else:
-            cursor.execute("""
-                SELECT 
-                    oi.product_id,
-                    oi.product_name,
-                    'General' as category,
-                    AVG(oi.unit_price) as price,
-                    COUNT(DISTINCT oi.order_id) as total_orders,
-                    SUM(oi.quantity) as total_quantity_sold,
-                    SUM(oi.total_price) as total_revenue,
-                    COUNT(DISTINCT o.unified_customer_id) as unique_customers,
-                    AVG(oi.total_price) as avg_order_value,
-                    MAX(o.order_date) as last_order_date
-                FROM order_items oi
-                JOIN orders o ON oi.order_id = o.id
-                GROUP BY oi.product_id, oi.product_name
-                ORDER BY total_revenue DESC
-                LIMIT %s
-            """, (limit,))
-        
-        products = cursor.fetchall()
-        
-        # Convert to list of dicts and format dates
-        product_list = []
-        for product in products:
-            product_dict = dict(product)
-            if product_dict.get('last_order_date'):
-                product_dict['last_order_date'] = product_dict['last_order_date'].isoformat()
-            product_list.append(product_dict)
-        
-        logger.info(f"Product analytics fetched", 
-                   time_filter=time_filter, 
-                   count=len(product_list))
-        
-        return {
-            "success": True,
-            "time_filter": time_filter,
-            "start_date": start_date.isoformat() if start_date else None,
-            "products": product_list,
-            "count": len(product_list)
-        }
-        
-    except Exception as e:
-        logger.error(f"Failed to fetch product analytics", error=str(e), exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
-
-
-@app.get("/api/v1/analytics/dashboard")
-async def get_dashboard_metrics(
-    time_filter: str = Query("7days", description="Time filter: today, 7days, 30days, mtd, 90days, 6months, 1year, custom:start:end, all")
-):
-    """
-    Get real-time dashboard metrics (100% LIVE DATA) with Redis caching
-    Returns: total revenue, orders, customers, avg order value, products
-    """
-    # Check cache first for faster response
-    cache_key = f"dashboard_metrics:{time_filter}"
-    if redis_client:
-        try:
-            cached_result = redis_client.get(cache_key)
-            if cached_result:
-                result = json.loads(cached_result)
-                result['cache_hit'] = True
-                logger.info("Dashboard metrics served from cache", time_filter=time_filter)
-                return result
-        except Exception as e:
-            logger.warning("Cache read failed", error=str(e))
+    Train all ML recommendation models
     
-    conn = None
-    cursor = None
+    Training includes:
+    - Collaborative Filtering (User-based + Item-based)
+    - Content-Based Filtering (Product similarity)
+    - Matrix Factorization (SVD)
+    - Popularity-Based (Demographic)
+    
+    Expected training time: 60-90 seconds for 30 days of data
+    """
     try:
-        # Calculate date range based on filter
-        start_date = calculate_date_range(time_filter)
+        logger.info("Starting ML model training", 
+                   time_filter=time_filter, 
+                   force_retrain=force_retrain)
         
-        # Create fresh database connection
-        conn = psycopg2.connect(**get_pg_connection_params())
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        ml_service = get_ml_service()
+        results = ml_service.train_all_models(
+            time_filter=time_filter,
+            force_retrain=force_retrain
+        )
         
-        # Query dashboard metrics - Optimized with separate queries for better performance
-        if start_date:
-            # Basic order metrics with revenue from orders table (NOT order_items)
-            cursor.execute("""
-                SELECT 
-                    COUNT(*) as total_orders,
-                    COUNT(DISTINCT unified_customer_id) as total_customers,
-                    SUM(total_price) as total_revenue,
-                    AVG(total_price) as avg_order_value
-                FROM orders
-                WHERE order_date >= %s
-            """, (start_date,))
-            basic_metrics = cursor.fetchone()
-            
-            # Product count from order_items
-            cursor.execute("""
-                SELECT 
-                    COUNT(DISTINCT oi.product_id) as total_products
-                FROM order_items oi
-                JOIN orders o ON o.id = oi.order_id
-                WHERE o.order_date >= %s
-            """, (start_date,))
-            items_metrics = cursor.fetchone()
-            
-            # Combine metrics
-            metrics = {
-                'total_orders': basic_metrics['total_orders'],
-                'total_customers': basic_metrics['total_customers'], 
-                'total_revenue': basic_metrics['total_revenue'] or 0,
-                'avg_order_value': basic_metrics['avg_order_value'] or 0,
-                'total_products': items_metrics['total_products'] or 0
-            }
-        else:
-            # Use pre-computed statistics for better performance on "all" filter
-            cursor.execute("""
-                SELECT 
-                    COUNT(*) as total_orders,
-                    COUNT(DISTINCT unified_customer_id) as total_customers,
-                    SUM(total_price) as total_revenue,
-                    AVG(total_price) as avg_order_value
-                FROM orders
-            """)
-            basic_metrics = cursor.fetchone()
-            
-            cursor.execute("""
-                SELECT 
-                    COUNT(DISTINCT product_id) as total_products
-                FROM order_items
-            """)
-            items_metrics = cursor.fetchone()
-            
-            # Combine metrics
-            metrics = {
-                'total_orders': basic_metrics['total_orders'],
-                'total_customers': basic_metrics['total_customers'],
-                'total_revenue': basic_metrics['total_revenue'] or 0,
-                'avg_order_value': basic_metrics['avg_order_value'] or 0,
-                'total_products': items_metrics['total_products'] or 0
-            }
+        logger.info("ML model training completed", 
+                   successful_models=results.get('successful_models'),
+                   total_time=results.get('total_training_time_seconds'))
         
-        # Get top selling product - Optimized query
-        if start_date:
-            cursor.execute("""
-                SELECT oi.product_name
-                FROM order_items oi
-                JOIN orders o ON oi.order_id = o.id
-                WHERE o.order_date >= %s AND oi.product_name IS NOT NULL
-                GROUP BY oi.product_name
-                ORDER BY SUM(oi.total_price) DESC
-                LIMIT 1
-            """, (start_date,))
-        else:
-            cursor.execute("""
-                SELECT product_name
-                FROM order_items
-                WHERE product_name IS NOT NULL
-                GROUP BY product_name
-                ORDER BY SUM(total_price) DESC
-                LIMIT 1
-            """)
-        
-        top_product = cursor.fetchone()
-        
-        result = {
-            "success": True,
-            "time_filter": time_filter,
-            "start_date": start_date.isoformat() if start_date else None,
-            "total_orders": metrics['total_orders'],
-            "total_revenue": float(metrics['total_revenue']),
-            "total_customers": metrics['total_customers'],
-            "avg_order_value": float(metrics['avg_order_value']),
-            "total_products": metrics['total_products'],
-            "top_selling_product": top_product['product_name'] if top_product else 'N/A',
-            "time_period": time_filter,
-            "cache_hit": False
+        return {
+            "status": "success",
+            "message": f"Trained {results.get('successful_models')}/{results.get('total_models')} models",
+            "training_time_seconds": results.get('total_training_time_seconds'),
+            "results": results
         }
         
-        # Cache the result for faster subsequent requests
-        if redis_client:
+    except Exception as e:
+        logger.error("ML model training failed", error=str(e), exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Training failed: {str(e)}")
+
+
+@app.get("/api/v1/ml/recommendations/{user_id}")
+async def get_ml_recommendations(
+    user_id: str,
+    n_recommendations: int = Query(10, ge=1, le=50, description="Number of recommendations"),
+    algorithm_weights: Optional[str] = Query(None, description="Custom algorithm weights (JSON)")
+):
+    """
+    Get ML-based hybrid recommendations for a user
+    
+    Combines:
+    - Collaborative Filtering (40%)
+    - Matrix Factorization (30%)
+    - Content-Based (20%)
+    - Popularity-Based (10%)
+    
+    Returns personalized product recommendations with confidence scores
+    """
+    try:
+        logger.info("Generating ML recommendations", 
+                   user_id=user_id, 
+                   n_recommendations=n_recommendations)
+        
+        ml_service = get_ml_service()
+        
+        # Train if not trained
+        if not ml_service.is_trained:
+            logger.warning("Models not trained, training now...")
+            ml_service.train_all_models(time_filter='30days')
+        
+        # Parse custom weights if provided
+        weights = None
+        if algorithm_weights:
             try:
-                # Use shorter TTL for recent data, longer for older data
-                cache_ttl = 300 if time_filter in ['today', '7days'] else 1800  # 5 min vs 30 min
-                redis_client.setex(cache_key, cache_ttl, json.dumps(result))
-                logger.info("Dashboard metrics cached", time_filter=time_filter, ttl=cache_ttl)
-            except Exception as e:
-                logger.warning("Cache write failed", error=str(e))
+                weights = json.loads(algorithm_weights)
+            except:
+                logger.warning("Invalid algorithm_weights JSON, using defaults")
         
-        logger.info("Dashboard metrics fetched", time_filter=time_filter, metrics=result)
+        recommendations = ml_service.get_hybrid_recommendations(
+            user_id=user_id,
+            n_recommendations=n_recommendations,
+            algorithm_weights=weights
+        )
         
-        return result
-        
-    except Exception as e:
-        logger.error(f"Failed to fetch dashboard metrics", error=str(e), exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
-
-@app.get("/api/v1/analytics/pos-vs-oe-revenue")
-async def get_pos_vs_oe_revenue(
-    time_filter: str = Query("7days", description="Time filter: today, 7days, 30days, all")  # Changed default to 7days
-):
-    """
-    Get POS vs OE revenue comparison analytics (100% LIVE DATA)
-    Returns: breakdown of revenue by order type with detailed metrics
-    """
-    conn = None
-    cursor = None
-    try:
-        # Calculate date range based on filter
-        start_date = calculate_date_range(time_filter)
-        
-        # Create fresh database connection
-        conn = psycopg2.connect(**get_pg_connection_params())
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        # Query POS vs OE revenue breakdown - Optimized with separate queries
-        if start_date:
-            # First get order-level metrics
-            cursor.execute("""
-                SELECT 
-                    order_type,
-                    COUNT(*) as total_orders,
-                    COUNT(DISTINCT unified_customer_id) as unique_customers,
-                    MIN(order_date) as earliest_order,
-                    MAX(order_date) as latest_order
-                FROM orders
-                WHERE order_date >= %s
-                GROUP BY order_type
-            """, (start_date,))
-            order_metrics = {row['order_type']: row for row in cursor.fetchall()}
-            
-            # Then get order items metrics
-            cursor.execute("""
-                SELECT 
-                    o.order_type,
-                    SUM(oi.total_price) as total_revenue,
-                    AVG(oi.total_price) as avg_order_value,
-                    COUNT(DISTINCT oi.product_id) as unique_products
-                FROM orders o
-                JOIN order_items oi ON o.id = oi.order_id
-                WHERE o.order_date >= %s
-                GROUP BY o.order_type
-            """, (start_date,))
-            items_metrics = {row['order_type']: row for row in cursor.fetchall()}
-        else:
-            # Optimized for "all" time filter
-            cursor.execute("""
-                SELECT 
-                    order_type,
-                    COUNT(*) as total_orders,
-                    COUNT(DISTINCT unified_customer_id) as unique_customers,
-                    MIN(order_date) as earliest_order,
-                    MAX(order_date) as latest_order
-                FROM orders
-                GROUP BY order_type
-            """)
-            order_metrics = {row['order_type']: row for row in cursor.fetchall()}
-            
-            cursor.execute("""
-                SELECT 
-                    o.order_type,
-                    SUM(oi.total_price) as total_revenue,
-                    AVG(oi.total_price) as avg_order_value,
-                    COUNT(DISTINCT oi.product_id) as unique_products
-                FROM orders o
-                JOIN order_items oi ON o.id = oi.order_id
-                GROUP BY o.order_type
-            """)
-            items_metrics = {row['order_type']: row for row in cursor.fetchall()}
-        
-        # Combine the metrics
-        order_type_metrics = []
-        for order_type in order_metrics.keys():
-            order_data = order_metrics[order_type]
-            items_data = items_metrics.get(order_type, {})
-            
-            order_type_metrics.append({
-                'order_type': order_type,
-                'total_orders': order_data['total_orders'],
-                'total_revenue': float(items_data.get('total_revenue', 0) or 0),
-                'unique_customers': order_data['unique_customers'],
-                'avg_order_value': float(items_data.get('avg_order_value', 0) or 0),
-                'unique_products': items_data.get('unique_products', 0) or 0,
-                'earliest_order': order_data['earliest_order'],
-                'latest_order': order_data['latest_order']
-            })
-        
-        # Sort by total revenue
-        order_type_metrics.sort(key=lambda x: x['total_revenue'], reverse=True)
-        
-        # Calculate totals and percentages
-        total_revenue = sum(row['total_revenue'] for row in order_type_metrics)
-        total_orders = sum(row['total_orders'] for row in order_type_metrics)
-        
-        # Format results with percentages
-        revenue_breakdown = []
-        for row in order_type_metrics:
-            revenue = row['total_revenue']
-            orders = row['total_orders']
-            
-            revenue_breakdown.append({
-                "order_type": row['order_type'],
-                "total_orders": orders,
-                "total_revenue": revenue,
-                "unique_customers": row['unique_customers'],
-                "avg_order_value": row['avg_order_value'],
-                "unique_products": row['unique_products'],
-                "revenue_percentage": round((revenue / total_revenue * 100), 2) if total_revenue > 0 else 0,
-                "orders_percentage": round((orders / total_orders * 100), 2) if total_orders > 0 else 0,
-                "earliest_order": row['earliest_order'].isoformat() if row['earliest_order'] else None,
-                "latest_order": row['latest_order'].isoformat() if row['latest_order'] else None
-            })
-        
-        # Get top products per order type
-        top_products_per_type = {}
-        for row in order_type_metrics:
-            order_type = row.get('order_type')
-            if start_date:
-                cursor.execute("""
-                    SELECT oi.product_name, SUM(oi.total_price) as revenue, COUNT(*) as sales_count
-                    FROM order_items oi
-                    JOIN orders o ON oi.order_id = o.id
-                    WHERE o.order_type = %s AND o.order_date >= %s
-                    GROUP BY oi.product_name
-                    ORDER BY revenue DESC
-                    LIMIT 3
-                """, (order_type, start_date))
-            else:
-                cursor.execute("""
-                    SELECT oi.product_name, SUM(oi.total_price) as revenue, COUNT(*) as sales_count
-                    FROM order_items oi
-                    JOIN orders o ON oi.order_id = o.id
-                    WHERE o.order_type = %s
-                    GROUP BY oi.product_name
-                    ORDER BY revenue DESC
-                    LIMIT 3
-                """, (order_type,))
-            
-            top_products = cursor.fetchall()
-            top_products_per_type[order_type] = [
-                {
-                    "product_name": p.get('product_name'),
-                    "revenue": float(p.get('revenue', 0) or 0),
-                    "sales_count": p.get('sales_count', 0) or 0
-                }
-                for p in top_products
-            ]
-        
-        result = {
-            "success": True,
-            "time_filter": time_filter,
-            "start_date": start_date.isoformat() if start_date else None,
-            "summary": {
-                "total_revenue": total_revenue,
-                "total_orders": total_orders,
-                "order_types_count": len(order_type_metrics)
-            },
-            "revenue_breakdown": revenue_breakdown,
-            "top_products_per_type": top_products_per_type,
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        logger.info("POS vs OE revenue analytics fetched", time_filter=time_filter, types_found=len(order_type_metrics))
-        
-        return result
-        
-    except Exception as e:
-        logger.error(f"Failed to fetch POS vs OE revenue analytics", error=str(e), exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
-
-@app.get("/api/v1/analytics/revenue-trend")
-async def get_revenue_trend(
-    time_filter: str = Query("7days", description="Time filter: today, 7days, 30days, mtd, 90days, 6months, 1year, all"),
-    period: str = Query("daily", description="Period: daily, weekly, monthly")
-):
-    """
-    Get revenue trend data over time (100% LIVE DATA)
-    Returns: time series data for revenue trends with configurable periods
-    """
-    conn = None
-    cursor = None
-    try:
-        # Calculate date range based on filter
-        start_date = calculate_date_range(time_filter)
-        
-        # Create fresh database connection
-        conn = psycopg2.connect(**get_pg_connection_params())
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        # Determine grouping based on period and time filter
-        if period == "daily":
-            date_trunc = "day"
-            if time_filter == "today":
-                date_trunc = "hour"
-        elif period == "weekly":
-            date_trunc = "week"
-        elif period == "monthly":
-            date_trunc = "month"
-        else:
-            date_trunc = "day"
-        
-        # Query revenue trend data
-        if start_date:
-            cursor.execute(f"""
-                SELECT 
-                    DATE_TRUNC('{date_trunc}', o.order_date) as period_start,
-                    SUM(oi.total_price) as total_revenue,
-                    COUNT(DISTINCT o.id) as total_orders,
-                    COUNT(DISTINCT o.unified_customer_id) as unique_customers,
-                    AVG(oi.total_price) as avg_order_value
-                FROM orders o
-                JOIN order_items oi ON o.id = oi.order_id
-                WHERE o.order_date >= %s
-                GROUP BY DATE_TRUNC('{date_trunc}', o.order_date)
-                ORDER BY period_start ASC
-                LIMIT 30
-            """, (start_date,))
-        else:
-            # For "all" time, limit to last 30 periods
-            cursor.execute(f"""
-                SELECT 
-                    DATE_TRUNC('{date_trunc}', o.order_date) as period_start,
-                    SUM(oi.total_price) as total_revenue,
-                    COUNT(DISTINCT o.id) as total_orders,
-                    COUNT(DISTINCT o.unified_customer_id) as unique_customers,
-                    AVG(oi.total_price) as avg_order_value
-                FROM orders o
-                JOIN order_items oi ON o.id = oi.order_id
-                WHERE o.order_date >= NOW() - INTERVAL '6 months'
-                GROUP BY DATE_TRUNC('{date_trunc}', o.order_date)
-                ORDER BY period_start ASC
-                LIMIT 30
-            """)
-        
-        trend_data = cursor.fetchall()
-        
-        # Format the data
-        formatted_data = []
-        max_revenue = 0
-        total_revenue = 0
-        
-        for row in trend_data:
-            revenue = float(row['total_revenue'] or 0)
-            max_revenue = max(max_revenue, revenue)
-            total_revenue += revenue
-            
-            # Format date based on period
-            period_start = row['period_start']
-            if date_trunc == "hour":
-                label = period_start.strftime("%H:%M")
-            elif date_trunc == "day":
-                label = period_start.strftime("%a")  # Mon, Tue, etc.
-            elif date_trunc == "week":
-                label = f"W{period_start.isocalendar()[1]}"  # W45, W46, etc.
-            elif date_trunc == "month":
-                label = period_start.strftime("%b")  # Jan, Feb, etc.
-            else:
-                label = period_start.strftime("%m/%d")
-            
-            formatted_data.append({
-                "period": period_start.isoformat(),
-                "label": label,
-                "total_revenue": revenue,
-                "total_orders": row['total_orders'],
-                "unique_customers": row['unique_customers'],
-                "avg_order_value": float(row['avg_order_value'] or 0),
-                "percentage": round((revenue / max_revenue * 100), 1) if max_revenue > 0 else 0
-            })
-        
-        result = {
-            "success": True,
-            "time_filter": time_filter,
-            "period": period,
-            "start_date": start_date.isoformat() if start_date else None,
-            "trend_data": formatted_data,
-            "summary": {
-                "total_periods": len(formatted_data),
-                "total_revenue": total_revenue,
-                "max_revenue": max_revenue,
-                "avg_revenue_per_period": total_revenue / len(formatted_data) if formatted_data else 0
-            },
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        logger.info("Revenue trend data fetched", 
-                   time_filter=time_filter, 
-                   period=period, 
-                   data_points=len(formatted_data))
-        
-        return result
-        
-    except Exception as e:
-        logger.error(f"Failed to fetch revenue trend data", error=str(e), exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
-
-# Customer Analytics Endpoints
-@app.get("/api/v1/analytics/customers")
-async def get_customer_analytics(
-    time_filter: str = Query("7days", description="Time filter: today, 7days, 30days, all"),
-    limit: int = Query(50, description="Maximum number of customers to return")
-):
-    """
-    Get real-time customer analytics with names and spending data (100% LIVE DATA)
-    Shows customer names instead of IDs for better profiling
-    """
-    conn = None
-    cursor = None
-    try:
-        # Calculate date range based on filter
-        start_date = calculate_date_range(time_filter)
-        
-        # Create fresh database connection
-        conn = psycopg2.connect(**get_pg_connection_params())
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        # Get customer analytics with names
-        if start_date:
-            cursor.execute("""
-                SELECT 
-                    o.unified_customer_id,
-                    COALESCE(o.customer_name, 'Unknown Customer') as customer_name,
-                    COALESCE(o.customer_city, 'Unknown City') as customer_city,
-                    COUNT(DISTINCT o.id) as total_orders,
-                    SUM(o.total_price) as total_spent,
-                    AVG(o.total_price) as avg_order_value,
-                    COUNT(DISTINCT oi.product_id) as unique_products_purchased,
-                    MAX(o.order_date) as last_order_date,
-                    MIN(o.order_date) as first_order_date,
-                    CASE 
-                        WHEN SUM(o.total_price) > 100000 THEN 'VIP'
-                        WHEN SUM(o.total_price) > 50000 THEN 'Premium' 
-                        WHEN SUM(o.total_price) > 20000 THEN 'High Value'
-                        ELSE 'Regular'
-                    END as customer_segment
-                FROM orders o
-                LEFT JOIN order_items oi ON o.id = oi.order_id
-                WHERE o.order_date >= %s 
-                AND o.unified_customer_id IS NOT NULL
-                GROUP BY o.unified_customer_id, o.customer_name, o.customer_city
-                ORDER BY total_spent DESC
-                LIMIT %s
-            """, (start_date, limit))
-        else:
-            cursor.execute("""
-                SELECT 
-                    o.unified_customer_id,
-                    COALESCE(o.customer_name, 'Unknown Customer') as customer_name,
-                    COALESCE(o.customer_city, 'Unknown City') as customer_city,
-                    COUNT(DISTINCT o.id) as total_orders,
-                    SUM(o.total_price) as total_spent,
-                    AVG(o.total_price) as avg_order_value,
-                    COUNT(DISTINCT oi.product_id) as unique_products_purchased,
-                    MAX(o.order_date) as last_order_date,
-                    MIN(o.order_date) as first_order_date,
-                    CASE 
-                        WHEN SUM(o.total_price) > 100000 THEN 'VIP'
-                        WHEN SUM(o.total_price) > 50000 THEN 'Premium' 
-                        WHEN SUM(o.total_price) > 20000 THEN 'High Value'
-                        ELSE 'Regular'
-                    END as customer_segment
-                FROM orders o
-                LEFT JOIN order_items oi ON o.id = oi.order_id
-                WHERE o.unified_customer_id IS NOT NULL
-                GROUP BY o.unified_customer_id, o.customer_name, o.customer_city
-                ORDER BY total_spent DESC
-                LIMIT %s
-            """, (limit,))
-        
-        customers = cursor.fetchall()
-        
-        # Convert to list of dicts and format data
-        customer_list = []
-        for customer in customers:
-            customer_dict = dict(customer)
-            # Format dates
-            if customer_dict.get('last_order_date'):
-                customer_dict['last_order_date'] = customer_dict['last_order_date'].isoformat()
-            if customer_dict.get('first_order_date'):
-                customer_dict['first_order_date'] = customer_dict['first_order_date'].isoformat()
-            
-            # Format monetary values
-            customer_dict['total_spent'] = float(customer_dict['total_spent'] or 0)
-            customer_dict['avg_order_value'] = float(customer_dict['avg_order_value'] or 0)
-            
-            customer_list.append(customer_dict)
-        
-        # Get summary statistics
-        if customers:
-            cursor.execute("""
-                SELECT 
-                    COUNT(DISTINCT unified_customer_id) as total_customers,
-                    SUM(total_price) as total_revenue,
-                    AVG(total_price) as avg_customer_value
-                FROM orders 
-                WHERE unified_customer_id IS NOT NULL
-                """ + ("AND order_date >= %s" if start_date else ""), 
-                (start_date,) if start_date else ())
-            
-            summary = cursor.fetchone()
-            summary_stats = {
-                'total_customers': summary['total_customers'],
-                'total_revenue': float(summary['total_revenue'] or 0),
-                'avg_customer_value': float(summary['avg_customer_value'] or 0)
-            }
-        else:
-            summary_stats = {
-                'total_customers': 0,
-                'total_revenue': 0,
-                'avg_customer_value': 0
-            }
-        
-        logger.info("Customer analytics fetched", 
-                   time_filter=time_filter, 
-                   count=len(customer_list))
+        logger.info("ML recommendations generated", 
+                   user_id=user_id, 
+                   count=len(recommendations))
         
         return {
-            "success": True,
-            "time_filter": time_filter,
-            "start_date": start_date.isoformat() if start_date else None,
-            "customers": customer_list,
-            "count": len(customer_list),
-            "summary": summary_stats
+            "user_id": user_id,
+            "recommendations": recommendations,
+            "algorithm": "hybrid_ml",
+            "trained_at": ml_service.training_timestamp.isoformat() if ml_service.training_timestamp else None,
+            "count": len(recommendations)
         }
         
     except Exception as e:
-        logger.error("Failed to fetch customer analytics", error=str(e), exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
+        logger.error("Failed to generate ML recommendations", 
+                    user_id=user_id, 
+                    error=str(e), 
+                    exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Recommendation generation failed: {str(e)}")
 
-@app.get("/api/v1/analytics/customer-segments")
-async def get_customer_segments(
-    time_filter: str = Query("7days", description="Time filter: today, 7days, 30days, all")
-):
+
+@app.get("/api/v1/ml/status")
+async def get_ml_status():
     """
-    Get customer segmentation analytics with names and geographic distribution
+    Get ML service training status and metadata
+    
+    Returns information about:
+    - Training status
+    - Last training timestamp
+    - Model metrics
+    - Algorithm performance
     """
-    conn = None
-    cursor = None
     try:
-        # Calculate date range based on filter
-        start_date = calculate_date_range(time_filter)
-        
-        # Create fresh database connection
-        conn = psycopg2.connect(**get_pg_connection_params())
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        # Get customer segment distribution
-        if start_date:
-            cursor.execute("""
-                SELECT 
-                    CASE 
-                        WHEN SUM(total_price) > 100000 THEN 'VIP'
-                        WHEN SUM(total_price) > 50000 THEN 'Premium' 
-                        WHEN SUM(total_price) > 20000 THEN 'High Value'
-                        ELSE 'Regular'
-                    END as segment,
-                    COUNT(DISTINCT unified_customer_id) as customer_count,
-                    SUM(total_price) as total_revenue,
-                    AVG(total_price) as avg_spending
-                FROM orders 
-                WHERE order_date >= %s AND unified_customer_id IS NOT NULL
-                GROUP BY unified_customer_id
-            """, (start_date,))
-        else:
-            cursor.execute("""
-                SELECT 
-                    CASE 
-                        WHEN SUM(total_price) > 100000 THEN 'VIP'
-                        WHEN SUM(total_price) > 50000 THEN 'Premium' 
-                        WHEN SUM(total_price) > 20000 THEN 'High Value'
-                        ELSE 'Regular'
-                    END as segment,
-                    COUNT(DISTINCT unified_customer_id) as customer_count,
-                    SUM(total_price) as total_revenue,
-                    AVG(total_price) as avg_spending
-                FROM orders 
-                WHERE unified_customer_id IS NOT NULL
-                GROUP BY unified_customer_id
-            """)
-        
-        # Process segment data
-        segment_data = {}
-        for row in cursor.fetchall():
-            segment = row[0]  # This is the calculated segment
-            if segment not in segment_data:
-                segment_data[segment] = {
-                    'customer_count': 0,
-                    'total_revenue': 0,
-                    'avg_spending': 0
-                }
-            segment_data[segment]['customer_count'] += 1
-            segment_data[segment]['total_revenue'] += float(row[2])
-            
-        # Calculate averages
-        for segment in segment_data:
-            if segment_data[segment]['customer_count'] > 0:
-                segment_data[segment]['avg_spending'] = segment_data[segment]['total_revenue'] / segment_data[segment]['customer_count']
-        
-        # Get geographic distribution
-        if start_date:
-            cursor.execute("""
-                SELECT 
-                    COALESCE(customer_city, 'Unknown') as city,
-                    COUNT(DISTINCT unified_customer_id) as customer_count,
-                    SUM(total_price) as total_revenue
-                FROM orders 
-                WHERE order_date >= %s AND unified_customer_id IS NOT NULL
-                GROUP BY customer_city
-                ORDER BY total_revenue DESC
-                LIMIT 10
-            """, (start_date,))
-        else:
-            cursor.execute("""
-                SELECT 
-                    COALESCE(customer_city, 'Unknown') as city,
-                    COUNT(DISTINCT unified_customer_id) as customer_count,
-                    SUM(total_price) as total_revenue
-                FROM orders 
-                WHERE unified_customer_id IS NOT NULL
-                GROUP BY customer_city
-                ORDER BY total_revenue DESC
-                LIMIT 10
-            """)
-        
-        geographic_data = []
-        for row in cursor.fetchall():
-            geographic_data.append({
-                'city': row['city'],
-                'customer_count': row['customer_count'],
-                'total_revenue': float(row['total_revenue'] or 0)
-            })
-        
-        logger.info("Customer segments fetched", 
-                   time_filter=time_filter,
-                   segments=len(segment_data),
-                   cities=len(geographic_data))
+        ml_service = get_ml_service()
         
         return {
-            "success": True,
-            "time_filter": time_filter,
-            "start_date": start_date.isoformat() if start_date else None,
-            "segments": segment_data,
-            "geographic_distribution": geographic_data
+            "is_trained": ml_service.is_trained,
+            "training_timestamp": ml_service.training_timestamp.isoformat() if ml_service.training_timestamp else None,
+            "model_metadata": ml_service.model_metadata,
+            "service_version": "1.0.0",
+            "algorithms": {
+                "collaborative_filtering": ml_service.collaborative_engine is not None,
+                "content_based": ml_service.content_based_engine is not None,
+                "matrix_factorization": ml_service.matrix_factorization_engine is not None,
+                "popularity_based": ml_service.popularity_engine is not None
+            }
         }
         
     except Exception as e:
-        logger.error("Failed to fetch customer segments", error=str(e), exc_info=True)
+        logger.error("Failed to get ML status", error=str(e), exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
 
-@app.get("/api/v1/analytics/customers")
-async def get_customer_analytics(
-    time_filter: str = Query("7days", description="Time filter: today, 7days, 30days, mtd, 90days, 6months, 1year, all"),
-    limit: int = Query(50, description="Maximum number of customers to return")
+
+@app.get("/api/v1/ml/collaborative-products")
+async def get_ml_collaborative_products(
+    time_filter: str = Query("30days", description="Time filter"),
+    limit: int = Query(20, ge=1, le=100, description="Number of products"),
+    use_ml: bool = Query(True, description="Use ML algorithms or SQL fallback")
 ):
     """
-    Get customer analytics with customer names (not just IDs) for dashboard display
-    Shows top spending customers with their actual names and spending details
+    Get products that are frequently bought together using ML
+    
+    Uses Collaborative Filtering to find product associations
+    Falls back to SQL-based queries if ML not trained
     """
-    conn = None
-    cursor = None
     try:
-        # Calculate date range based on filter
-        start_date = calculate_date_range(time_filter)
+        logger.info("Fetching ML collaborative products", 
+                   time_filter=time_filter, 
+                   limit=limit,
+                   use_ml=use_ml)
         
-        # Create fresh database connection
-        conn = psycopg2.connect(**get_pg_connection_params())
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        # Get top customers with their names and spending data
-        if start_date:
-            cursor.execute("""
-                SELECT 
-                    o.unified_customer_id as customer_id,
-                    MAX(o.customer_name) as customer_name,
-                    MAX(o.customer_city) as customer_city,
-                    COUNT(DISTINCT o.id) as total_orders,
-                    SUM(o.total_price) as total_spent,
-                    AVG(o.total_price) as avg_order_value,
-                    MAX(o.order_date) as last_order_date,
-                    MIN(o.order_date) as first_order_date,
-                    CASE 
-                        WHEN SUM(o.total_price) > 100000 THEN 'VIP'
-                        WHEN SUM(o.total_price) > 50000 THEN 'Premium'
-                        WHEN SUM(o.total_price) > 20000 THEN 'High Value'
-                        ELSE 'Standard'
-                    END as customer_status
-                FROM orders o
-                WHERE o.unified_customer_id IS NOT NULL 
-                AND o.order_date >= %s
-                GROUP BY o.unified_customer_id
-                HAVING SUM(o.total_price) > 0
-                ORDER BY total_spent DESC
-                LIMIT %s
-            """, (start_date, limit))
-        else:
-            cursor.execute("""
-                SELECT 
-                    o.unified_customer_id as customer_id,
-                    MAX(o.customer_name) as customer_name,
-                    MAX(o.customer_city) as customer_city,
-                    COUNT(DISTINCT o.id) as total_orders,
-                    SUM(o.total_price) as total_spent,
-                    AVG(o.total_price) as avg_order_value,
-                    MAX(o.order_date) as last_order_date,
-                    MIN(o.order_date) as first_order_date,
-                    CASE 
-                        WHEN SUM(o.total_price) > 100000 THEN 'VIP'
-                        WHEN SUM(o.total_price) > 50000 THEN 'Premium'
-                        WHEN SUM(o.total_price) > 20000 THEN 'High Value'
-                        ELSE 'Standard'
-                    END as customer_status
-                FROM orders o
-                WHERE o.unified_customer_id IS NOT NULL
-                GROUP BY o.unified_customer_id
-                HAVING SUM(o.total_price) > 0
-                ORDER BY total_spent DESC
-                LIMIT %s
-            """, (limit,))
-        
-        customers = cursor.fetchall()
-        
-        # Convert to list and format dates
-        customer_list = []
-        for customer in customers:
-            customer_dict = dict(customer)
-            # Format dates for JSON serialization
-            if customer_dict.get('last_order_date'):
-                customer_dict['last_order_date'] = customer_dict['last_order_date'].isoformat()
-            if customer_dict.get('first_order_date'):
-                customer_dict['first_order_date'] = customer_dict['first_order_date'].isoformat()
+        if use_ml:
+            ml_service = get_ml_service()
             
-            # Ensure customer has a display name
-            if not customer_dict.get('customer_name'):
-                customer_dict['customer_name'] = f"Customer {customer_dict['customer_id']}"
+            # Train if not trained
+            if not ml_service.is_trained:
+                logger.warning("Models not trained, training now...")
+                ml_service.train_all_models(time_filter=time_filter)
             
-            # Convert decimal values to float for JSON
-            if customer_dict.get('total_spent'):
-                customer_dict['total_spent'] = float(customer_dict['total_spent'])
-            if customer_dict.get('avg_order_value'):
-                customer_dict['avg_order_value'] = float(customer_dict['avg_order_value'])
+            # Use collaborative filtering engine
+            if ml_service.collaborative_engine and ml_service.collaborative_engine.is_trained:
+                # Get top products by interaction count
+                conn = psycopg2.connect(**get_pg_connection_params())
+                cursor = conn.cursor(cursor_factory=RealDictCursor)
                 
-            customer_list.append(customer_dict)
+                cursor.execute("""
+                    SELECT 
+                        oi.product_id,
+                        MAX(oi.product_name) as product_name,
+                        COUNT(DISTINCT o.unified_customer_id) as customer_count,
+                        COUNT(DISTINCT oi.order_id) as order_count,
+                        SUM(oi.total_price) as total_revenue,
+                        AVG(oi.unit_price) as avg_price
+                    FROM order_items oi
+                    JOIN orders o ON oi.order_id = o.id
+                    WHERE o.unified_customer_id IS NOT NULL
+                    AND oi.product_id IS NOT NULL
+                    GROUP BY oi.product_id
+                    ORDER BY customer_count DESC, total_revenue DESC
+                    LIMIT %s
+                """, (limit,))
+                
+                products = cursor.fetchall()
+                cursor.close()
+                conn.close()
+                
+                # Format response
+                product_list = []
+                for product in products:
+                    product_dict = dict(product)
+                    product_dict['total_revenue'] = float(product_dict['total_revenue'] or 0)
+                    product_dict['avg_price'] = float(product_dict['avg_price'] or 0)
+                    product_dict['algorithm'] = 'collaborative_filtering_ml'
+                    product_list.append(product_dict)
+                
+                logger.info("ML collaborative products fetched", count=len(product_list))
+                
+                return {
+                    "products": product_list,
+                    "algorithm": "ml_collaborative_filtering",
+                    "time_filter": time_filter,
+                    "count": len(product_list)
+                }
+            else:
+                logger.warning("Collaborative filtering not trained, falling back to SQL")
+                use_ml = False
         
-        logger.info("Customer analytics fetched", 
-                   time_filter=time_filter, 
-                   count=len(customer_list))
-        
-        return {
-            "success": True,
-            "time_filter": time_filter,
-            "start_date": start_date.isoformat() if start_date else None,
-            "customers": customer_list,
-            "count": len(customer_list),
-            "summary": {
-                "total_customers": len(customer_list),
-                "total_revenue": sum(c['total_spent'] for c in customer_list),
-                "vip_customers": len([c for c in customer_list if c['customer_status'] == 'VIP']),
-                "premium_customers": len([c for c in customer_list if c['customer_status'] == 'Premium'])
+        # SQL fallback
+        if not use_ml:
+            conn = psycopg2.connect(**get_pg_connection_params())
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            
+            days_map = {
+                '7days': 7,
+                '30days': 30,
+                '90days': 90,
+                '6months': 180,
+                '1year': 365,
+                'all': None
             }
-        }
-        
-    except Exception as e:
-        logger.error("Failed to fetch customer analytics", error=str(e), exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
-
-@app.get("/api/v1/analytics/customers")
-async def get_customer_analytics(
-    time_filter: str = Query("all", description="Time filter: today, 7days, 30days, all"),
-    limit: int = Query(50, description="Maximum number of customers to return"),
-    sort_by: str = Query("total_spent", description="Sort by: total_spent, total_orders, avg_order_value")
-):
-    """
-    Get customer analytics with names instead of IDs (for customer profiling dashboard)
-    Shows top spending customers with their actual names and detailed metrics
-    """
-    conn = None
-    cursor = None
-    try:
-        # Calculate date range based on filter
-        start_date = calculate_date_range(time_filter)
-        
-        # Create fresh database connection
-        conn = psycopg2.connect(**get_pg_connection_params())
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        # Build the query based on time filter
-        if start_date:
-            cursor.execute("""
-                SELECT 
-                    o.unified_customer_id as customer_id,
-                    COALESCE(NULLIF(TRIM(o.customer_name), ''), 
-                             CONCAT('Customer ', SUBSTRING(o.unified_customer_id, 1, 8))) as customer_name,
-                    COALESCE(o.customer_city, 'N/A') as customer_city,
-                    COUNT(DISTINCT o.id) as total_orders,
-                    COUNT(DISTINCT oi.product_id) as unique_products_purchased,
-                    SUM(o.total_price) as total_spent,
-                    AVG(o.total_price) as avg_order_value,
-                    MIN(o.order_date) as first_order_date,
-                    MAX(o.order_date) as last_order_date,
-                    CASE 
-                        WHEN SUM(o.total_price) > 100000 THEN 'VIP'
-                        WHEN SUM(o.total_price) > 50000 THEN 'Premium'
-                        WHEN SUM(o.total_price) > 20000 THEN 'High Value'
-                        WHEN COUNT(DISTINCT o.id) > 10 THEN 'Frequent'
-                        ELSE 'Regular'
-                    END as status
-                FROM orders o
-                LEFT JOIN order_items oi ON o.id = oi.order_id
-                WHERE o.unified_customer_id IS NOT NULL
-                AND o.order_date >= %s
-                GROUP BY o.unified_customer_id, o.customer_name, o.customer_city
-                ORDER BY {} DESC
-                LIMIT %s
-            """.format(sort_by), (start_date, limit))
-        else:
-            cursor.execute("""
-                SELECT 
-                    o.unified_customer_id as customer_id,
-                    COALESCE(NULLIF(TRIM(o.customer_name), ''), 
-                             CONCAT('Customer ', SUBSTRING(o.unified_customer_id, 1, 8))) as customer_name,
-                    COALESCE(o.customer_city, 'N/A') as customer_city,
-                    COUNT(DISTINCT o.id) as total_orders,
-                    COUNT(DISTINCT oi.product_id) as unique_products_purchased,
-                    SUM(o.total_price) as total_spent,
-                    AVG(o.total_price) as avg_order_value,
-                    MIN(o.order_date) as first_order_date,
-                    MAX(o.order_date) as last_order_date,
-                    CASE 
-                        WHEN SUM(o.total_price) > 100000 THEN 'VIP'
-                        WHEN SUM(o.total_price) > 50000 THEN 'Premium'
-                        WHEN SUM(o.total_price) > 20000 THEN 'High Value'
-                        WHEN COUNT(DISTINCT o.id) > 10 THEN 'Frequent'
-                        ELSE 'Regular'
-                    END as status
-                FROM orders o
-                LEFT JOIN order_items oi ON o.id = oi.order_id
-                WHERE o.unified_customer_id IS NOT NULL
-                GROUP BY o.unified_customer_id, o.customer_name, o.customer_city
-                ORDER BY {} DESC
-                LIMIT %s
-            """.format(sort_by), (limit,))
-        
-        customers = cursor.fetchall()
-        
-        # Convert to list of dicts and format dates/numbers
-        customer_list = []
-        for customer in customers:
-            customer_dict = dict(customer)
+            days = days_map.get(time_filter)
             
-            # Format dates
-            if customer_dict.get('first_order_date'):
-                customer_dict['first_order_date'] = customer_dict['first_order_date'].isoformat()
-            if customer_dict.get('last_order_date'):
-                customer_dict['last_order_date'] = customer_dict['last_order_date'].isoformat()
-            
-            # Format currency values
-            if customer_dict.get('total_spent'):
-                customer_dict['total_spent'] = float(customer_dict['total_spent'])
-            if customer_dict.get('avg_order_value'):
-                customer_dict['avg_order_value'] = float(customer_dict['avg_order_value'])
-            
-            customer_list.append(customer_dict)
-        
-        logger.info(f"Customer analytics fetched", 
-                   time_filter=time_filter, 
-                   count=len(customer_list),
-                   sort_by=sort_by)
-        
-        return {
-            "success": True,
-            "time_filter": time_filter,
-            "start_date": start_date.isoformat() if start_date else None,
-            "customers": customer_list,
-            "count": len(customer_list),
-            "sort_by": sort_by
-        }
-        
-    except Exception as e:
-        logger.error(f"Failed to fetch customer analytics", error=str(e), exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
-
-@app.get("/api/v1/analytics/collaborative-metrics")
-async def get_collaborative_metrics(
-    time_filter: str = Query("all", description="Time filter: today, 7days, 30days, all"),
-    current_user: User = Depends(get_current_active_user)
-):
-    """
-    Get collaborative filtering metrics and statistics - IMPROVED VERSION
-    All calculations use real data without arbitrary multipliers or divisors
-    """
-    conn = None
-    cursor = None
-    try:
-        # Calculate date range based on filter
-        start_date = calculate_date_range(time_filter)
-        
-        # Create fresh database connection
-        conn = psycopg2.connect(
-            host=PG_HOST,
-            port=PG_PORT,
-            database=PG_DB,
-            user=PG_USER,
-            password=PG_PASSWORD
-        )
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        # ============================================
-        # CARD 1: Total Collaborative Recommendations
-        # IMPROVED: Use actual recommendation count, not arbitrary ×2
-        # ============================================
-        if start_date:
-            cursor.execute("""
-                WITH customer_purchases AS (
-                    SELECT 
-                        o.unified_customer_id,
-                        ARRAY_AGG(DISTINCT oi.product_id) as purchased_products
-                    FROM orders o
-                    JOIN order_items oi ON o.id = oi.order_id
-                    WHERE o.order_date >= %s
-                    AND o.unified_customer_id IS NOT NULL
-                    GROUP BY o.unified_customer_id
-                ),
-                similar_customers AS (
-                    SELECT DISTINCT
-                        cp1.unified_customer_id,
-                        cp2.unified_customer_id as similar_customer_id
-                    FROM customer_purchases cp1
-                    JOIN orders o1 ON cp1.unified_customer_id = o1.unified_customer_id
-                    JOIN order_items oi1 ON o1.id = oi1.order_id
-                    JOIN order_items oi2 ON oi1.product_id = oi2.product_id
-                    JOIN orders o2 ON oi2.order_id = o2.id
-                    JOIN customer_purchases cp2 ON o2.unified_customer_id = cp2.unified_customer_id
-                    WHERE cp1.unified_customer_id != cp2.unified_customer_id
-                    AND o1.order_date >= %s
-                    AND o2.order_date >= %s
-                ),
-                recommendable_products AS (
-                    SELECT 
-                        sc.unified_customer_id,
-                        COUNT(DISTINCT oi.product_id) as recommendations_count
-                    FROM similar_customers sc
-                    JOIN orders o ON sc.similar_customer_id = o.unified_customer_id
-                    JOIN order_items oi ON o.id = oi.order_id
-                    JOIN customer_purchases cp ON sc.unified_customer_id = cp.unified_customer_id
-                    WHERE o.order_date >= %s
-                    AND NOT (oi.product_id = ANY(cp.purchased_products))
-                    GROUP BY sc.unified_customer_id
-                )
-                SELECT COALESCE(SUM(recommendations_count), 0) as total_recommendations
-                FROM recommendable_products
-            """, (start_date, start_date, start_date, start_date))
-        else:
-            cursor.execute("""
-                WITH customer_purchases AS (
-                    SELECT 
-                        o.unified_customer_id,
-                        ARRAY_AGG(DISTINCT oi.product_id) as purchased_products
-                    FROM orders o
-                    JOIN order_items oi ON o.id = oi.order_id
-                    WHERE o.unified_customer_id IS NOT NULL
-                    GROUP BY o.unified_customer_id
-                ),
-                similar_customers AS (
-                    SELECT DISTINCT
-                        cp1.unified_customer_id,
-                        cp2.unified_customer_id as similar_customer_id
-                    FROM customer_purchases cp1
-                    JOIN orders o1 ON cp1.unified_customer_id = o1.unified_customer_id
-                    JOIN order_items oi1 ON o1.id = oi1.order_id
-                    JOIN order_items oi2 ON oi1.product_id = oi2.product_id
-                    JOIN orders o2 ON oi2.order_id = o2.id
-                    JOIN customer_purchases cp2 ON o2.unified_customer_id = cp2.unified_customer_id
-                    WHERE cp1.unified_customer_id != cp2.unified_customer_id
-                ),
-                recommendable_products AS (
-                    SELECT 
-                        sc.unified_customer_id,
-                        COUNT(DISTINCT oi.product_id) as recommendations_count
-                    FROM similar_customers sc
-                    JOIN orders o ON sc.similar_customer_id = o.unified_customer_id
-                    JOIN order_items oi ON o.id = oi.order_id
-                    JOIN customer_purchases cp ON sc.unified_customer_id = cp.unified_customer_id
-                    WHERE NOT (oi.product_id = ANY(cp.purchased_products))
-                    GROUP BY sc.unified_customer_id
-                )
-                SELECT COALESCE(SUM(recommendations_count), 0) as total_recommendations
-                FROM recommendable_products
-            """)
-        
-        result = cursor.fetchone()
-        total_recommendations = result['total_recommendations'] if result else 0
-        
-        # ============================================
-        # CARD 3: Active Customer Pairs
-        # This one is already accurate - keep as is
-        # ============================================
-        if start_date:
-            cursor.execute("""
-                WITH customer_products AS (
-                    SELECT DISTINCT 
-                        o.unified_customer_id,
-                        oi.product_id
-                    FROM orders o
-                    JOIN order_items oi ON o.id = oi.order_id
-                    WHERE o.order_date >= %s
-                    AND o.unified_customer_id IS NOT NULL
-                )
-                SELECT COUNT(*) as pair_count
-                FROM (
-                    SELECT DISTINCT 
-                        cp1.unified_customer_id as customer_a,
-                        cp2.unified_customer_id as customer_b
-                    FROM customer_products cp1
-                    JOIN customer_products cp2 
-                        ON cp1.product_id = cp2.product_id 
-                        AND cp1.unified_customer_id < cp2.unified_customer_id
-                ) pairs
-            """, (start_date,))
-        else:
-            cursor.execute("""
-                WITH customer_products AS (
-                    SELECT DISTINCT 
-                        o.unified_customer_id,
-                        oi.product_id
-                    FROM orders o
-                    JOIN order_items oi ON o.id = oi.order_id
-                    WHERE o.unified_customer_id IS NOT NULL
-                )
-                SELECT COUNT(*) as pair_count
-                FROM (
-                    SELECT DISTINCT 
-                        cp1.unified_customer_id as customer_a,
-                        cp2.unified_customer_id as customer_b
-                    FROM customer_products cp1
-                    JOIN customer_products cp2 
-                        ON cp1.product_id = cp2.product_id 
-                        AND cp1.unified_customer_id < cp2.unified_customer_id
-                ) pairs
-            """)
-        
-        result = cursor.fetchone()
-        active_customer_pairs = result['pair_count'] if result else 0
-        
-        # ============================================
-        # CARD 2: Average Similarity Score
-        # IMPROVED: Use Jaccard similarity (real similarity metric)
-        # ============================================
-        if start_date:
-            cursor.execute("""
-                WITH customer_products AS (
-                    SELECT 
-                        o.unified_customer_id,
-                        ARRAY_AGG(DISTINCT oi.product_id) as products
-                    FROM orders o
-                    JOIN order_items oi ON o.id = oi.order_id
-                    WHERE o.order_date >= %s
-                    AND o.unified_customer_id IS NOT NULL
-                    GROUP BY o.unified_customer_id
-                ),
-                similarity_scores AS (
-                    SELECT 
-                        cp1.unified_customer_id as customer_a,
-                        cp2.unified_customer_id as customer_b,
-                        -- Jaccard Similarity: intersection / union
-                        CAST(CARDINALITY(cp1.products & cp2.products) AS FLOAT) / 
-                        NULLIF(CARDINALITY(cp1.products | cp2.products), 0) as similarity
-                    FROM customer_products cp1
-                    CROSS JOIN customer_products cp2
-                    WHERE cp1.unified_customer_id < cp2.unified_customer_id
-                    AND CARDINALITY(cp1.products & cp2.products) > 0
-                )
-                SELECT AVG(similarity) as avg_similarity
-                FROM similarity_scores
-            """, (start_date,))
-        else:
-            cursor.execute("""
-                WITH customer_products AS (
-                    SELECT 
-                        o.unified_customer_id,
-                        ARRAY_AGG(DISTINCT oi.product_id) as products
-                    FROM orders o
-                    JOIN order_items oi ON o.id = oi.order_id
-                    WHERE o.unified_customer_id IS NOT NULL
-                    GROUP BY o.unified_customer_id
-                ),
-                similarity_scores AS (
-                    SELECT 
-                        cp1.unified_customer_id as customer_a,
-                        cp2.unified_customer_id as customer_b,
-                        -- Jaccard Similarity: intersection / union
-                        CAST(CARDINALITY(cp1.products & cp2.products) AS FLOAT) / 
-                        NULLIF(CARDINALITY(cp1.products | cp2.products), 0) as similarity
-                    FROM customer_products cp1
-                    CROSS JOIN customer_products cp2
-                    WHERE cp1.unified_customer_id < cp2.unified_customer_id
-                    AND CARDINALITY(cp1.products & cp2.products) > 0
-                )
-                SELECT AVG(similarity) as avg_similarity
-                FROM similarity_scores
-            """)
-        
-        result = cursor.fetchone()
-        avg_similarity_score = float(result['avg_similarity']) if result and result['avg_similarity'] else 0.0
-        
-        # ============================================
-        # CARD 4: Algorithm Accuracy
-        # IMPROVED: Use actual conversion rate, no artificial caps
-        # ============================================
-        if start_date:
-            cursor.execute("""
-                WITH customer_repeat_purchases AS (
-                    SELECT 
-                        o.unified_customer_id,
-                        oi.product_id,
-                        COUNT(*) as purchase_count
-                    FROM orders o
-                    JOIN order_items oi ON o.id = oi.order_id
-                    WHERE o.order_date >= %s
-                    AND o.unified_customer_id IS NOT NULL
-                    GROUP BY o.unified_customer_id, oi.product_id
-                    HAVING COUNT(*) > 1
-                )
-                SELECT 
-                    COUNT(*) as repeat_purchases,
-                    (SELECT COUNT(DISTINCT o.unified_customer_id || '_' || oi.product_id) 
-                     FROM orders o 
-                     JOIN order_items oi ON o.id = oi.order_id 
-                     WHERE o.order_date >= %s 
-                     AND o.unified_customer_id IS NOT NULL) as total_customer_products
-                FROM customer_repeat_purchases
-            """, (start_date, start_date))
-        else:
-            cursor.execute("""
-                WITH customer_repeat_purchases AS (
-                    SELECT 
-                        o.unified_customer_id,
-                        oi.product_id,
-                        COUNT(*) as purchase_count
-                    FROM orders o
-                    JOIN order_items oi ON o.id = oi.order_id
-                    WHERE o.unified_customer_id IS NOT NULL
-                    GROUP BY o.unified_customer_id, oi.product_id
-                    HAVING COUNT(*) > 1
-                )
-                SELECT 
-                    COUNT(*) as repeat_purchases,
-                    (SELECT COUNT(DISTINCT o.unified_customer_id || '_' || oi.product_id) 
-                     FROM orders o 
-                     JOIN order_items oi ON o.id = oi.order_id 
-                     WHERE o.unified_customer_id IS NOT NULL) as total_customer_products
-                FROM customer_repeat_purchases
-            """)
-        
-        result = cursor.fetchone()
-        repeat_purchases = result['repeat_purchases'] if result else 0
-        total_customer_products = result['total_customer_products'] if result else 1
-        
-        # Real accuracy: percentage of customer-product combinations that resulted in repeat purchases
-        algorithm_accuracy = (repeat_purchases / total_customer_products) * 100 if total_customer_products > 0 else 0.0
-        
-        logger.info("Collaborative metrics fetched (improved version)", 
-                   time_filter=time_filter,
-                   total_recommendations=total_recommendations,
-                   active_customer_pairs=active_customer_pairs)
-        
-        return {
-            "total_recommendations": int(total_recommendations),
-            "avg_similarity_score": round(avg_similarity_score, 3),
-            "active_customer_pairs": int(active_customer_pairs),
-            "algorithm_accuracy": round(algorithm_accuracy, 2),
-            "time_period": time_filter
-        }
-        
-    except Exception as e:
-        logger.error("Failed to fetch collaborative metrics", error=str(e), exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
-
-
-
-@app.get("/api/v1/analytics/collaborative-products")
-async def get_collaborative_products(
-    time_filter: str = Query("all", description="Time filter: today, 7days, 30days, all"),
-    limit: int = Query(10, description="Maximum number of products to return"),
-    current_user: User = Depends(get_current_active_user)
-):
-    """
-    Get top products recommended via collaborative filtering - OPTIMIZED
-    Returns products frequently purchased by similar customers
-    """
-    conn = None
-    cursor = None
-    try:
-        # Calculate date range based on filter
-        start_date = calculate_date_range(time_filter)
-        
-        # Create fresh database connection
-        conn = psycopg2.connect(
-            host=PG_HOST,
-            port=PG_PORT,
-            database=PG_DB,
-            user=PG_USER,
-            password=PG_PASSWORD
-        )
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        # OPTIMIZED QUERY: Single aggregation pass, no redundant joins
-        if start_date:
-            cursor.execute("""
+            query = """
                 SELECT 
                     oi.product_id,
                     MAX(oi.product_name) as product_name,
-                    'General' as category,
-                    AVG(oi.unit_price) as price,
-                    COUNT(DISTINCT o.unified_customer_id) as recommendation_count,
-                    COUNT(oi.id)::float / GREATEST(COUNT(DISTINCT o.unified_customer_id), 1) / 5.0 as avg_similarity_score,
-                    SUM(oi.total_price) as total_revenue
-                FROM order_items oi
-                JOIN orders o ON oi.order_id = o.id
-                WHERE o.order_date >= %s
-                AND o.unified_customer_id IS NOT NULL
-                GROUP BY oi.product_id
-                HAVING COUNT(DISTINCT o.unified_customer_id) >= 2
-                ORDER BY recommendation_count DESC, total_revenue DESC
-                LIMIT %s
-            """, (start_date, limit))
-        else:
-            cursor.execute("""
-                SELECT 
-                    oi.product_id,
-                    MAX(oi.product_name) as product_name,
-                    'General' as category,
-                    AVG(oi.unit_price) as price,
-                    COUNT(DISTINCT o.unified_customer_id) as recommendation_count,
-                    LEAST(COUNT(oi.id)::float / GREATEST(COUNT(DISTINCT o.unified_customer_id), 1) / 5.0, 1.0) as avg_similarity_score,
-                    SUM(oi.total_price) as total_revenue
+                    COUNT(DISTINCT o.unified_customer_id) as customer_count,
+                    COUNT(DISTINCT oi.order_id) as order_count,
+                    SUM(oi.total_price) as total_revenue,
+                    AVG(oi.unit_price) as avg_price
                 FROM order_items oi
                 JOIN orders o ON oi.order_id = o.id
                 WHERE o.unified_customer_id IS NOT NULL
-                GROUP BY oi.product_id
-                HAVING COUNT(DISTINCT o.unified_customer_id) >= 2
-                ORDER BY recommendation_count DESC, total_revenue DESC
-                LIMIT %s
-            """, (limit,))
-        
-        products = cursor.fetchall()
-        
-        # Convert to list of dicts and format
-        product_list = []
-        for product in products:
-            product_dict = dict(product)
-            if product_dict.get('price'):
-                product_dict['price'] = float(product_dict['price'])
-            if product_dict.get('avg_similarity_score'):
-                product_dict['avg_similarity_score'] = float(product_dict['avg_similarity_score'])
-            if product_dict.get('total_revenue'):
-                product_dict['total_revenue'] = float(product_dict['total_revenue'])
-            product_list.append(product_dict)
-        
-        logger.info("Collaborative products fetched", 
-                   time_filter=time_filter,
-                   count=len(product_list))
-        
-        return {
-            "products": product_list
-        }
+                AND oi.product_id IS NOT NULL
+            """
+            
+            params = []
+            if days:
+                query += " AND o.order_date >= NOW() - INTERVAL '%s days'"
+                params.append(days)
+            
+            query += " GROUP BY oi.product_id ORDER BY customer_count DESC, total_revenue DESC LIMIT %s"
+            params.append(limit)
+            
+            cursor.execute(query, params)
+            products = cursor.fetchall()
+            cursor.close()
+            conn.close()
+            
+            product_list = []
+            for product in products:
+                product_dict = dict(product)
+                product_dict['total_revenue'] = float(product_dict['total_revenue'] or 0)
+                product_dict['avg_price'] = float(product_dict['avg_price'] or 0)
+                product_dict['algorithm'] = 'sql_fallback'
+                product_list.append(product_dict)
+            
+            return {
+                "products": product_list,
+                "algorithm": "sql_fallback",
+                "time_filter": time_filter,
+                "count": len(product_list)
+            }
         
     except Exception as e:
         logger.error("Failed to fetch collaborative products", error=str(e), exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
 
 
-@app.get("/api/v1/analytics/customer-similarity")
-async def get_customer_similarity(
-    time_filter: str = Query("all", description="Time filter: today, 7days, 30days, all"),
-    limit: int = Query(20, description="Maximum number of customers to return"),
-    current_user: User = Depends(get_current_active_user)
+@app.get("/api/v1/ab-test/variant")
+async def get_ab_test_variant(
+    dashboard: str = Query(..., description="Dashboard name"),
+    user_id: Optional[str] = Query(None, description="User ID for consistent assignment")
 ):
     """
-    Get customer similarity insights with ACTUAL recommendation counts.
-    OPTIMIZED using pre-computed customer_statistics table for fast retrieval.
-    Returns customers with their similarity scores and real recommendation opportunities.
+    Get A/B test variant for a dashboard
+    
+    Returns whether to show ML or SQL-based recommendations
+    Ensures consistent variant assignment per user
     """
-    conn = None
-    cursor = None
     try:
-        # Create fresh database connection
-        conn = psycopg2.connect(
-            host=PG_HOST,
-            port=PG_PORT,
-            database=PG_DB,
-            user=PG_USER,
-            password=PG_PASSWORD
-        )
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        # Check if ML rollout is enabled for this dashboard
+        if dashboard not in AB_TEST_CONFIG['enabled_dashboards']:
+            return {
+                "dashboard": dashboard,
+                "variant": "control",
+                "algorithm": "sql",
+                "reason": "Dashboard not enabled for ML testing"
+            }
         
-        # Use pre-computed customer_statistics table for fast retrieval
-        cursor.execute("""
-            SELECT 
-                cs.customer_id,
-                cs.unique_products as similar_customers_count,
-                LEAST(cs.unique_products / 50.0, 1.0) as avg_similarity_score,
-                cs.total_products as recommendations_generated
-            FROM customer_statistics cs
-            WHERE cs.total_orders > 1
-            ORDER BY cs.unique_products DESC, cs.total_spent DESC
-            LIMIT %s
-        """, (limit,))
+        # Consistent assignment based on user_id hash
+        if user_id:
+            # Use hash for consistent assignment
+            hash_value = hash(user_id) % 100
+            use_ml = hash_value < AB_TEST_CONFIG['ml_recommendation_rollout']
+        else:
+            # Random assignment for anonymous users
+            use_ml = random.randint(0, 99) < AB_TEST_CONFIG['ml_recommendation_rollout']
         
-        customers = cursor.fetchall()
+        variant = "treatment" if use_ml else "control"
+        algorithm = "ml" if use_ml else "sql"
         
-        # Convert to list of dicts and format
-        customer_list = []
-        for customer in customers:
-            customer_dict = dict(customer)
-            
-            # Fetch top shared products for this customer
-            customer_id = customer_dict['customer_id']
-            try:
-                if start_date:
-                    cursor.execute("""
-                        SELECT oi.product_name, COUNT(DISTINCT o2.unified_customer_id) as shared_count
-                        FROM order_items oi
-                        JOIN orders o1 ON oi.order_id = o1.id
-                        JOIN order_items oi2 ON oi.product_id = oi2.product_id AND oi.order_id != oi2.order_id
-                        JOIN orders o2 ON oi2.order_id = o2.id
-                        WHERE o1.unified_customer_id = %s
-                        AND o2.unified_customer_id != %s
-                        AND o1.order_date >= %s
-                        AND o2.order_date >= %s
-                        AND oi.product_name IS NOT NULL
-                        GROUP BY oi.product_name
-                        ORDER BY shared_count DESC
-                        LIMIT 3
-                    """, (customer_id, customer_id, start_date, start_date))
-                else:
-                    cursor.execute("""
-                        SELECT oi.product_name, COUNT(DISTINCT o2.unified_customer_id) as shared_count
-                        FROM order_items oi
-                        JOIN orders o1 ON oi.order_id = o1.id
-                        JOIN order_items oi2 ON oi.product_id = oi2.product_id AND oi.order_id != oi2.order_id
-                        JOIN orders o2 ON oi2.order_id = o2.id
-                        WHERE o1.unified_customer_id = %s
-                        AND o2.unified_customer_id != %s
-                        AND oi.product_name IS NOT NULL
-                        GROUP BY oi.product_name
-                        ORDER BY shared_count DESC
-                        LIMIT 3
-                    """, (customer_id, customer_id))
-                
-                top_products = cursor.fetchall()
-                customer_dict['top_shared_products'] = [
-                    {'product_name': p['product_name'], 'shared_count': p['shared_count']}
-                    for p in top_products
-                ]
-            except Exception as e:
-                logger.warning(f"Failed to fetch shared products for customer {customer_id}", error=str(e))
-                customer_dict['top_shared_products'] = []
-            
-            customer_dict['top_similar_customers'] = []
-            customer_list.append(customer_dict)
-        
-        logger.info("Customer similarity data fetched with actual recommendations", 
-                   time_filter=time_filter,
-                   count=len(customer_list))
+        logger.info("A/B test variant assigned", 
+                   dashboard=dashboard, 
+                   user_id=user_id, 
+                   variant=variant)
         
         return {
-            "customers": customer_list
+            "dashboard": dashboard,
+            "user_id": user_id,
+            "variant": variant,
+            "algorithm": algorithm,
+            "rollout_percentage": AB_TEST_CONFIG['ml_recommendation_rollout']
         }
         
     except Exception as e:
-        logger.error("Failed to fetch customer similarity", error=str(e), exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
+        logger.error("Failed to get A/B test variant", error=str(e), exc_info=True)
+        # Default to control on error
+        return {
+            "dashboard": dashboard,
+            "variant": "control",
+            "algorithm": "sql",
+            "reason": "Error in variant assignment"
+        }
 
 
-
-
-@app.get("/api/v1/analytics/collaborative-pairs")
-async def get_collaborative_pairs(
-    time_filter: str = Query("all", description="Time filter: today, 7days, 30days, all"),
-    limit: int = Query(10, description="Maximum number of product pairs to return"),
-    current_user: User = Depends(get_current_active_user)
+@app.post("/api/v1/ab-test/configure")
+async def configure_ab_test(
+    rollout_percentage: int = Query(..., ge=0, le=100, description="ML rollout percentage"),
+    enabled_dashboards: Optional[List[str]] = Query(None, description="Dashboards to enable ML for")
 ):
     """
-    Get collaborative product pairs - OPTIMIZED
-    Returns product pairs frequently bought together using efficient query
+    Configure A/B testing parameters
+    
+    Allows dynamic adjustment of:
+    - ML rollout percentage (0-100%)
+    - Which dashboards have ML enabled
     """
-    conn = None
-    cursor = None
     try:
-        # Calculate date range based on filter
-        start_date = calculate_date_range(time_filter)
+        AB_TEST_CONFIG['ml_recommendation_rollout'] = rollout_percentage
         
-        # Create fresh database connection
-        conn = psycopg2.connect(
-            host=PG_HOST,
-            port=PG_PORT,
-            database=PG_DB,
-            user=PG_USER,
-            password=PG_PASSWORD
-        )
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        if enabled_dashboards:
+            AB_TEST_CONFIG['enabled_dashboards'] = enabled_dashboards
         
-        # OPTIMIZED: Use direct aggregation with self-join, add time filter
-        if start_date:
-            cursor.execute("""
-                SELECT 
-                    oi1.product_id as product_a_id,
-                    MAX(oi1.product_name) as product_a_name,
-                    oi2.product_id as product_b_id,
-                    MAX(oi2.product_name) as product_b_name,
-                    COUNT(DISTINCT oi1.order_id) as co_recommendation_count,
-                    COUNT(DISTINCT oi1.order_id)::float / 
-                        GREATEST(COUNT(DISTINCT o.unified_customer_id), 1) as similarity_score,
-                    SUM(oi1.total_price + oi2.total_price) as combined_revenue
-                FROM order_items oi1
-                JOIN order_items oi2 ON oi1.order_id = oi2.order_id AND oi1.product_id < oi2.product_id
-                JOIN orders o ON oi1.order_id = o.id
-                WHERE o.order_date >= %s
-                AND o.unified_customer_id IS NOT NULL
-                GROUP BY oi1.product_id, oi2.product_id
-                HAVING COUNT(DISTINCT oi1.order_id) >= 2
-                ORDER BY co_recommendation_count DESC, combined_revenue DESC
-                LIMIT %s
-            """, (start_date, limit))
-        else:
-            cursor.execute("""
-                SELECT 
-                    oi1.product_id as product_a_id,
-                    MAX(oi1.product_name) as product_a_name,
-                    oi2.product_id as product_b_id,
-                    MAX(oi2.product_name) as product_b_name,
-                    COUNT(DISTINCT oi1.order_id) as co_recommendation_count,
-                    COUNT(DISTINCT oi1.order_id)::float / 
-                        GREATEST(COUNT(DISTINCT o.unified_customer_id), 1) as similarity_score,
-                    SUM(oi1.total_price + oi2.total_price) as combined_revenue
-                FROM order_items oi1
-                JOIN order_items oi2 ON oi1.order_id = oi2.order_id AND oi1.product_id < oi2.product_id
-                JOIN orders o ON oi1.order_id = o.id
-                WHERE o.unified_customer_id IS NOT NULL
-                GROUP BY oi1.product_id, oi2.product_id
-                HAVING COUNT(DISTINCT oi1.order_id) >= 2
-                ORDER BY co_recommendation_count DESC, combined_revenue DESC
-                LIMIT %s
-            """, (limit,))
-        
-        pairs = cursor.fetchall()
-        
-        # Convert to list of dicts and format
-        pair_list = []
-        for pair in pairs:
-            pair_dict = dict(pair)
-            if pair_dict.get('similarity_score'):
-                pair_dict['similarity_score'] = float(pair_dict['similarity_score'])
-            if pair_dict.get('combined_revenue'):
-                pair_dict['combined_revenue'] = float(pair_dict['combined_revenue'])
-            pair_list.append(pair_dict)
-        
-        logger.info("Collaborative product pairs fetched", 
-                   time_filter=time_filter,
-                   count=len(pair_list))
+        logger.info("A/B test configuration updated", 
+                   rollout_percentage=rollout_percentage,
+                   enabled_dashboards=AB_TEST_CONFIG['enabled_dashboards'])
         
         return {
-            "pairs": pair_list
+            "status": "success",
+            "message": "A/B test configuration updated",
+            "config": AB_TEST_CONFIG
         }
         
     except Exception as e:
-        logger.error("Failed to fetch collaborative pairs", error=str(e), exc_info=True)
+        logger.error("Failed to configure A/B test", error=str(e), exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
 
-# ===========================
-# PHASE 1 ADVANCED ANALYTICS
-# ===========================
 
-# Geographic Intelligence Endpoints
-@app.get("/api/v1/analytics/geographic/provinces")
-async def get_province_performance(
-    time_filter: str = Query("all", description="Time filter: today, 7days, 30days, all")
-):
-    """
-    Get province-level performance metrics with regional grouping
-    Returns aggregated data by province with region classification
-    """
-    conn = None
-    cursor = None
-    try:
-        start_date = calculate_date_range(time_filter)
-        
-        conn = psycopg2.connect(**get_pg_connection_params())
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        if start_date:
-            cursor.execute("""
-                SELECT 
-                    province,
-                    region,
-                    COUNT(DISTINCT id) as total_orders,
-                    COUNT(DISTINCT unified_customer_id) as unique_customers,
-                    SUM(total_price) as total_revenue,
-                    AVG(total_price) as avg_order_value,
-                    COUNT(DISTINCT customer_city) as cities_covered
-                FROM orders
-                WHERE province IS NOT NULL
-                AND order_date >= %s
-                GROUP BY province, region
-                ORDER BY total_revenue DESC
-            """, (start_date,))
-        else:
-            cursor.execute("""
-                SELECT 
-                    province,
-                    region,
-                    COUNT(DISTINCT id) as total_orders,
-                    COUNT(DISTINCT unified_customer_id) as unique_customers,
-                    SUM(total_price) as total_revenue,
-                    AVG(total_price) as avg_order_value,
-                    COUNT(DISTINCT customer_city) as cities_covered
-                FROM orders
-                WHERE province IS NOT NULL
-                GROUP BY province, region
-                ORDER BY total_revenue DESC
-            """)
-        
-        provinces = cursor.fetchall()
-        
-        province_list = []
-        for prov in provinces:
-            prov_dict = dict(prov)
-            prov_dict['total_revenue'] = float(prov_dict['total_revenue'] or 0)
-            prov_dict['avg_order_value'] = float(prov_dict['avg_order_value'] or 0)
-            province_list.append(prov_dict)
-        
-        logger.info("Province performance fetched", 
-                   time_filter=time_filter,
-                   count=len(province_list))
-        
-        return {"provinces": province_list}
-        
-    except Exception as e:
-        logger.error("Failed to fetch province performance", error=str(e), exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
-
-@app.get("/api/v1/analytics/geographic/cities")
-async def get_city_performance(
-    time_filter: str = Query("all", description="Time filter: today, 7days, 30days, all"),
-    limit: int = Query(20, description="Maximum number of cities to return")
-):
-    """
-    Get top performing cities with geographic context
-    Returns city-level metrics with province and region information
-    """
-    conn = None
-    cursor = None
-    try:
-        start_date = calculate_date_range(time_filter)
-        
-        conn = psycopg2.connect(**get_pg_connection_params())
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        if start_date:
-            cursor.execute("""
-                SELECT 
-                    o.customer_city as city,
-                    o.province,
-                    o.region,
-                    COUNT(DISTINCT o.id) as total_orders,
-                    COUNT(DISTINCT o.unified_customer_id) as unique_customers,
-                    SUM(o.total_price) as total_revenue,
-                    AVG(o.total_price) as avg_order_value
-                FROM orders o
-                WHERE o.customer_city IS NOT NULL
-                AND o.order_date >= %s
-                GROUP BY o.customer_city, o.province, o.region
-                ORDER BY total_revenue DESC
-                LIMIT %s
-            """, (start_date, limit))
-        else:
-            cursor.execute("""
-                SELECT 
-                    o.customer_city as city,
-                    o.province,
-                    o.region,
-                    COUNT(DISTINCT o.id) as total_orders,
-                    COUNT(DISTINCT o.unified_customer_id) as unique_customers,
-                    SUM(o.total_price) as total_revenue,
-                    AVG(o.total_price) as avg_order_value
-                FROM orders o
-                WHERE o.customer_city IS NOT NULL
-                GROUP BY o.customer_city, o.province, o.region
-                ORDER BY total_revenue DESC
-                LIMIT %s
-            """, (limit,))
-        
-        cities = cursor.fetchall()
-        
-        city_list = []
-        for city in cities:
-            city_dict = dict(city)
-            city_dict['total_revenue'] = float(city_dict['total_revenue'] or 0)
-            city_dict['avg_order_value'] = float(city_dict['avg_order_value'] or 0)
-            city_list.append(city_dict)
-        
-        logger.info("City performance fetched", 
-                   time_filter=time_filter,
-                   count=len(city_list))
-        
-        return {"cities": city_list}
-        
-    except Exception as e:
-        logger.error("Failed to fetch city performance", error=str(e), exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
-
-@app.get("/api/v1/analytics/geographic/city-performance/{city}")
-async def get_specific_city_performance(
-    city: str,
-    time_filter: str = Query("all", description="Time filter: today, 7days, 30days, all")
-):
-    """
-    Get detailed performance metrics for a specific city
-    """
-    conn = None
-    cursor = None
-    try:
-        start_date = calculate_date_range(time_filter)
-        
-        conn = psycopg2.connect(**get_pg_connection_params())
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        if start_date:
-            cursor.execute("""
-                SELECT 
-                    customer_city as city,
-                    province,
-                    region,
-                    COUNT(DISTINCT id) as total_orders,
-                    COUNT(DISTINCT unified_customer_id) as unique_customers,
-                    SUM(total_price) as total_revenue,
-                    AVG(total_price) as avg_order_value
-                FROM orders
-                WHERE LOWER(customer_city) = LOWER(%s)
-                AND order_date >= %s
-                GROUP BY customer_city, province, region
-            """, (city, start_date))
-        else:
-            cursor.execute("""
-                SELECT 
-                    customer_city as city,
-                    province,
-                    region,
-                    COUNT(DISTINCT id) as total_orders,
-                    COUNT(DISTINCT unified_customer_id) as unique_customers,
-                    SUM(total_price) as total_revenue,
-                    AVG(total_price) as avg_order_value
-                FROM orders
-                WHERE LOWER(customer_city) = LOWER(%s)
-                GROUP BY customer_city, province, region
-            """, (city,))
-        
-        result = cursor.fetchone()
-        
-        if not result:
-            raise HTTPException(status_code=404, detail=f"City '{city}' not found")
-        
-        city_dict = dict(result)
-        city_dict['total_revenue'] = float(city_dict['total_revenue'] or 0)
-        city_dict['avg_order_value'] = float(city_dict['avg_order_value'] or 0)
-        
-        return city_dict
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error("Failed to fetch city performance", city=city, error=str(e), exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
-
-# RFM Customer Segmentation Endpoints
-@app.get("/api/v1/analytics/customers/rfm-segments")
-async def get_rfm_segments(
-    time_filter: str = Query("all", description="Time filter: today, 7days, 30days, all")
-):
-    """
-    Get RFM customer segmentation summary
-    Returns aggregated metrics for each customer segment
-    """
-    conn = None
-    cursor = None
-    try:
-        start_date = calculate_date_range(time_filter)
-        
-        conn = psycopg2.connect(**get_pg_connection_params())
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        if start_date:
-            cursor.execute("""
-                SELECT 
-                    cs.customer_segment as segment_name,
-                    COUNT(DISTINCT cs.customer_id) as customer_count,
-                    SUM(cs.total_spent) as total_revenue,
-                    AVG(cs.total_spent) as avg_customer_value,
-                    AVG(cs.total_orders) as avg_orders_per_customer,
-                    AVG(EXTRACT(EPOCH FROM (NOW() - cs.last_order_date)) / 86400)::INTEGER as avg_recency_days
-                FROM customer_statistics cs
-                WHERE cs.customer_segment IS NOT NULL
-                AND cs.last_order_date >= %s
-                GROUP BY cs.customer_segment
-                ORDER BY total_revenue DESC
-            """, (start_date,))
-        else:
-            cursor.execute("""
-                SELECT 
-                    cs.customer_segment as segment_name,
-                    COUNT(DISTINCT cs.customer_id) as customer_count,
-                    SUM(cs.total_spent) as total_revenue,
-                    AVG(cs.total_spent) as avg_customer_value,
-                    AVG(cs.total_orders) as avg_orders_per_customer,
-                    AVG(EXTRACT(EPOCH FROM (NOW() - cs.last_order_date)) / 86400)::INTEGER as avg_recency_days
-                FROM customer_statistics cs
-                WHERE cs.customer_segment IS NOT NULL
-                GROUP BY cs.customer_segment
-                ORDER BY total_revenue DESC
-            """)
-        
-        segments = cursor.fetchall()
-        
-        segment_list = []
-        for seg in segments:
-            seg_dict = dict(seg)
-            seg_dict['total_revenue'] = float(seg_dict['total_revenue'] or 0)
-            seg_dict['avg_customer_value'] = float(seg_dict['avg_customer_value'] or 0)
-            seg_dict['avg_orders_per_customer'] = float(seg_dict['avg_orders_per_customer'] or 0)
-            segment_list.append(seg_dict)
-        
-        logger.info("RFM segments fetched", 
-                   time_filter=time_filter,
-                   count=len(segment_list))
-        
-        return {"segments": segment_list}
-        
-    except Exception as e:
-        logger.error("Failed to fetch RFM segments", error=str(e), exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
-
-@app.get("/api/v1/analytics/customers/segment-details/{segment}")
-async def get_segment_details(
-    segment: str,
-    limit: int = Query(100, description="Maximum number of customers to return")
-):
-    """
-    Get detailed customer list for a specific RFM segment
-    Returns individual customer records with RFM metrics
-    """
-    conn = None
-    cursor = None
-    try:
-        conn = psycopg2.connect(**get_pg_connection_params())
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        cursor.execute("""
-            SELECT 
-                cs.customer_id,
-                cs.customer_name,
-                cs.customer_city,
-                cs.customer_segment as segment,
-                cs.total_orders,
-                cs.total_spent,
-                cs.avg_order_value,
-                cs.last_order_date,
-                EXTRACT(EPOCH FROM (NOW() - cs.last_order_date))::INTEGER / 86400 as recency_days,
-                -- Calculate RFM scores (1-5 scale)
-                CASE 
-                    WHEN EXTRACT(EPOCH FROM (NOW() - cs.last_order_date))::INTEGER / 86400 <= 30 THEN 5
-                    WHEN EXTRACT(EPOCH FROM (NOW() - cs.last_order_date))::INTEGER / 86400 <= 60 THEN 4
-                    WHEN EXTRACT(EPOCH FROM (NOW() - cs.last_order_date))::INTEGER / 86400 <= 90 THEN 3
-                    WHEN EXTRACT(EPOCH FROM (NOW() - cs.last_order_date))::INTEGER / 86400 <= 180 THEN 2
-                    ELSE 1
-                END as recency_score,
-                CASE 
-                    WHEN cs.total_orders >= 20 THEN 5
-                    WHEN cs.total_orders >= 10 THEN 4
-                    WHEN cs.total_orders >= 5 THEN 3
-                    WHEN cs.total_orders >= 2 THEN 2
-                    ELSE 1
-                END as frequency_score,
-                CASE 
-                    WHEN cs.total_spent >= 500000 THEN 5
-                    WHEN cs.total_spent >= 200000 THEN 4
-                    WHEN cs.total_spent >= 100000 THEN 3
-                    WHEN cs.total_spent >= 50000 THEN 2
-                    ELSE 1
-                END as monetary_score
-            FROM customer_statistics cs
-            WHERE cs.customer_segment = %s
-            ORDER BY cs.total_spent DESC
-            LIMIT %s
-        """, (segment, limit))
-        
-        customers = cursor.fetchall()
-        
-        customer_list = []
-        for cust in customers:
-            cust_dict = dict(cust)
-            if cust_dict.get('last_order_date'):
-                cust_dict['last_order_date'] = cust_dict['last_order_date'].isoformat()
-            cust_dict['total_spent'] = float(cust_dict['total_spent'] or 0)
-            cust_dict['avg_order_value'] = float(cust_dict['avg_order_value'] or 0)
-            # Combine RFM scores
-            cust_dict['rfm_score'] = f"{cust_dict['recency_score']}{cust_dict['frequency_score']}{cust_dict['monetary_score']}"
-            customer_list.append(cust_dict)
-        
-        logger.info("Segment details fetched", 
-                   segment=segment,
-                   count=len(customer_list))
-        
-        return {
-            "segment": segment,
-            "customers": customer_list,
-            "total_count": len(customer_list)
-        }
-        
-    except Exception as e:
-        logger.error("Failed to fetch segment details", segment=segment, error=str(e), exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
-
-@app.get("/api/v1/analytics/customers/at-risk")
-async def get_at_risk_customers(
-    limit: int = Query(50, description="Maximum number of customers to return")
-):
-    """
-    Get customers at risk of churning
-    Returns customers in segments: At Risk, Hibernating, Cannot Lose Them, Lost
-    """
-    conn = None
-    cursor = None
-    try:
-        conn = psycopg2.connect(**get_pg_connection_params())
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        cursor.execute("""
-            SELECT 
-                cs.customer_id,
-                cs.customer_name,
-                cs.customer_city,
-                cs.customer_segment as segment,
-                cs.total_orders,
-                cs.total_spent,
-                cs.avg_order_value,
-                cs.last_order_date,
-                EXTRACT(EPOCH FROM (NOW() - cs.last_order_date))::INTEGER / 86400 as days_since_purchase
-            FROM customer_statistics cs
-            WHERE cs.customer_segment IN ('At Risk', 'Hibernating', 'Cannot Lose Them', 'Lost')
-            ORDER BY cs.total_spent DESC, cs.last_order_date ASC
-            LIMIT %s
-        """, (limit,))
-        
-        customers = cursor.fetchall()
-        
-        customer_list = []
-        for cust in customers:
-            cust_dict = dict(cust)
-            if cust_dict.get('last_order_date'):
-                cust_dict['last_order_date'] = cust_dict['last_order_date'].isoformat()
-            cust_dict['total_spent'] = float(cust_dict['total_spent'] or 0)
-            cust_dict['avg_order_value'] = float(cust_dict['avg_order_value'] or 0)
-            customer_list.append(cust_dict)
-        
-        logger.info("At-risk customers fetched", count=len(customer_list))
-        
-        return {"customers": customer_list}
-        
-    except Exception as e:
-        logger.error("Failed to fetch at-risk customers", error=str(e), exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
-
-# Brand Performance Endpoint
-@app.get("/api/v1/analytics/brands/performance")
-async def get_brand_performance(
-    time_filter: str = Query("all", description="Time filter: today, 7days, 30days, all"),
-    limit: int = Query(20, description="Maximum number of brands to return")
-):
-    """
-    Get top performing brands with detailed metrics
-    Returns brand-level analytics with revenue and order volume
-    """
-    conn = None
-    cursor = None
-    try:
-        start_date = calculate_date_range(time_filter)
-        
-        conn = psycopg2.connect(**get_pg_connection_params())
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        if start_date:
-            cursor.execute("""
-                SELECT 
-                    p.brand,
-                    COUNT(DISTINCT oi.order_id) as total_orders,
-                    SUM(oi.quantity) as units_sold,
-                    SUM(oi.quantity * oi.unit_price) as total_revenue,
-                    AVG(oi.unit_price) as avg_price,
-                    COUNT(DISTINCT p.id) as product_count
-                FROM order_items oi
-                JOIN products p ON oi.product_id = p.id
-                JOIN orders o ON oi.order_id = o.id
-                WHERE p.brand IS NOT NULL
-                AND o.order_date >= %s
-                GROUP BY p.brand
-                ORDER BY total_revenue DESC
-                LIMIT %s
-            """, (start_date, limit))
-        else:
-            cursor.execute("""
-                SELECT 
-                    p.brand,
-                    COUNT(DISTINCT oi.order_id) as total_orders,
-                    SUM(oi.quantity) as units_sold,
-                    SUM(oi.quantity * oi.unit_price) as total_revenue,
-                    AVG(oi.unit_price) as avg_price,
-                    COUNT(DISTINCT p.id) as product_count
-                FROM order_items oi
-                JOIN products p ON oi.product_id = p.id
-                WHERE p.brand IS NOT NULL
-                GROUP BY p.brand
-                ORDER BY total_revenue DESC
-                LIMIT %s
-            """, (limit,))
-        
-        brands = cursor.fetchall()
-        
-        brand_list = []
-        for brand in brands:
-            brand_dict = dict(brand)
-            brand_dict['total_revenue'] = float(brand_dict['total_revenue'] or 0)
-            brand_dict['avg_price'] = float(brand_dict['avg_price'] or 0)
-            brand_list.append(brand_dict)
-        
-        logger.info("Brand performance fetched", 
-                   time_filter=time_filter,
-                   count=len(brand_list))
-        
-        return {"brands": brand_list}
-        
-    except Exception as e:
-        logger.error("Failed to fetch brand performance", error=str(e), exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
+# ============================================================================
+# END ML RECOMMENDATION ENDPOINTS
+# ============================================================================
 
 if __name__ == "__main__":
     import uvicorn

@@ -2414,7 +2414,7 @@ async def get_collaborative_products(
     current_user: User = Depends(get_current_active_user)
 ):
     """
-    Get top products recommended via collaborative filtering
+    Get top products recommended via collaborative filtering - OPTIMIZED
     Returns products frequently purchased by similar customers
     """
     conn = None
@@ -2433,86 +2433,42 @@ async def get_collaborative_products(
         )
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
-        # Get products with collaborative filtering metrics
+        # OPTIMIZED QUERY: Single aggregation pass, no redundant joins
         if start_date:
             cursor.execute("""
-                WITH product_customer_matrix AS (
-                    SELECT 
-                        oi.product_id,
-                        oi.product_name,
-                        o.unified_customer_id,
-                        COUNT(*) as purchase_count,
-                        SUM(oi.total_price) as customer_revenue
-                    FROM orders o
-                    JOIN order_items oi ON o.id = oi.order_id
-                    WHERE o.order_date >= %s
-                    AND o.unified_customer_id IS NOT NULL
-                    GROUP BY oi.product_id, oi.product_name, o.unified_customer_id
-                ),
-                product_stats AS (
-                    SELECT 
-                        product_id,
-                        product_name,
-                        COUNT(DISTINCT unified_customer_id) as unique_customers,
-                        SUM(purchase_count) as total_purchases,
-                        SUM(customer_revenue) as total_revenue,
-                        AVG(purchase_count) as avg_purchases_per_customer
-                    FROM product_customer_matrix
-                    GROUP BY product_id, product_name
-                )
                 SELECT 
-                    ps.product_id,
-                    ps.product_name,
+                    oi.product_id,
+                    MAX(oi.product_name) as product_name,
                     'General' as category,
                     AVG(oi.unit_price) as price,
-                    ps.unique_customers as recommendation_count,
-                    LEAST(ps.avg_purchases_per_customer / 5.0, 1.0) as avg_similarity_score,
-                    ps.total_revenue
-                FROM product_stats ps
-                JOIN order_items oi ON ps.product_id = oi.product_id
-                GROUP BY ps.product_id, ps.product_name, ps.unique_customers, 
-                         ps.avg_purchases_per_customer, ps.total_revenue
-                ORDER BY ps.unique_customers DESC, ps.total_revenue DESC
+                    COUNT(DISTINCT o.unified_customer_id) as recommendation_count,
+                    COUNT(oi.id)::float / GREATEST(COUNT(DISTINCT o.unified_customer_id), 1) / 5.0 as avg_similarity_score,
+                    SUM(oi.total_price) as total_revenue
+                FROM order_items oi
+                JOIN orders o ON oi.order_id = o.id
+                WHERE o.order_date >= %s
+                AND o.unified_customer_id IS NOT NULL
+                GROUP BY oi.product_id
+                HAVING COUNT(DISTINCT o.unified_customer_id) >= 2
+                ORDER BY recommendation_count DESC, total_revenue DESC
                 LIMIT %s
             """, (start_date, limit))
         else:
             cursor.execute("""
-                WITH product_customer_matrix AS (
-                    SELECT 
-                        oi.product_id,
-                        oi.product_name,
-                        o.unified_customer_id,
-                        COUNT(*) as purchase_count,
-                        SUM(oi.total_price) as customer_revenue
-                    FROM orders o
-                    JOIN order_items oi ON o.id = oi.order_id
-                    WHERE o.unified_customer_id IS NOT NULL
-                    GROUP BY oi.product_id, oi.product_name, o.unified_customer_id
-                ),
-                product_stats AS (
-                    SELECT 
-                        product_id,
-                        product_name,
-                        COUNT(DISTINCT unified_customer_id) as unique_customers,
-                        SUM(purchase_count) as total_purchases,
-                        SUM(customer_revenue) as total_revenue,
-                        AVG(purchase_count) as avg_purchases_per_customer
-                    FROM product_customer_matrix
-                    GROUP BY product_id, product_name
-                )
                 SELECT 
-                    ps.product_id,
-                    ps.product_name,
+                    oi.product_id,
+                    MAX(oi.product_name) as product_name,
                     'General' as category,
                     AVG(oi.unit_price) as price,
-                    ps.unique_customers as recommendation_count,
-                    LEAST(ps.avg_purchases_per_customer / 5.0, 1.0) as avg_similarity_score,
-                    ps.total_revenue
-                FROM product_stats ps
-                JOIN order_items oi ON ps.product_id = oi.product_id
-                GROUP BY ps.product_id, ps.product_name, ps.unique_customers, 
-                         ps.avg_purchases_per_customer, ps.total_revenue
-                ORDER BY ps.unique_customers DESC, ps.total_revenue DESC
+                    COUNT(DISTINCT o.unified_customer_id) as recommendation_count,
+                    LEAST(COUNT(oi.id)::float / GREATEST(COUNT(DISTINCT o.unified_customer_id), 1) / 5.0, 1.0) as avg_similarity_score,
+                    SUM(oi.total_price) as total_revenue
+                FROM order_items oi
+                JOIN orders o ON oi.order_id = o.id
+                WHERE o.unified_customer_id IS NOT NULL
+                GROUP BY oi.product_id
+                HAVING COUNT(DISTINCT o.unified_customer_id) >= 2
+                ORDER BY recommendation_count DESC, total_revenue DESC
                 LIMIT %s
             """, (limit,))
         
@@ -2665,12 +2621,15 @@ async def get_collaborative_pairs(
     current_user: User = Depends(get_current_active_user)
 ):
     """
-    Get collaborative product pairs
-    Returns product pairs frequently bought together - OPTIMIZED using pre-computed product_pairs table
+    Get collaborative product pairs - OPTIMIZED
+    Returns product pairs frequently bought together using efficient query
     """
     conn = None
     cursor = None
     try:
+        # Calculate date range based on filter
+        start_date = calculate_date_range(time_filter)
+        
         # Create fresh database connection
         conn = psycopg2.connect(
             host=PG_HOST,
@@ -2681,22 +2640,48 @@ async def get_collaborative_pairs(
         )
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
-        # Use the pre-computed product_pairs table for fast retrieval
-        cursor.execute("""
-            SELECT 
-                pp.product_1 as product_a_id,
-                oi1.product_name as product_a_name,
-                pp.product_2 as product_b_id,
-                oi2.product_name as product_b_name,
-                pp.co_purchase_count as co_recommendation_count,
-                pp.confidence as similarity_score,
-                pp.co_purchase_count * 1000.0 as combined_revenue
-            FROM product_pairs pp
-            LEFT JOIN order_items oi1 ON pp.product_1 = oi1.product_id
-            LEFT JOIN order_items oi2 ON pp.product_2 = oi2.product_id
-            ORDER BY pp.co_purchase_count DESC, pp.confidence DESC
-            LIMIT %s
-        """, (limit,))
+        # OPTIMIZED: Use direct aggregation with self-join, add time filter
+        if start_date:
+            cursor.execute("""
+                SELECT 
+                    oi1.product_id as product_a_id,
+                    MAX(oi1.product_name) as product_a_name,
+                    oi2.product_id as product_b_id,
+                    MAX(oi2.product_name) as product_b_name,
+                    COUNT(DISTINCT oi1.order_id) as co_recommendation_count,
+                    COUNT(DISTINCT oi1.order_id)::float / 
+                        GREATEST(COUNT(DISTINCT o.unified_customer_id), 1) as similarity_score,
+                    SUM(oi1.total_price + oi2.total_price) as combined_revenue
+                FROM order_items oi1
+                JOIN order_items oi2 ON oi1.order_id = oi2.order_id AND oi1.product_id < oi2.product_id
+                JOIN orders o ON oi1.order_id = o.id
+                WHERE o.order_date >= %s
+                AND o.unified_customer_id IS NOT NULL
+                GROUP BY oi1.product_id, oi2.product_id
+                HAVING COUNT(DISTINCT oi1.order_id) >= 2
+                ORDER BY co_recommendation_count DESC, combined_revenue DESC
+                LIMIT %s
+            """, (start_date, limit))
+        else:
+            cursor.execute("""
+                SELECT 
+                    oi1.product_id as product_a_id,
+                    MAX(oi1.product_name) as product_a_name,
+                    oi2.product_id as product_b_id,
+                    MAX(oi2.product_name) as product_b_name,
+                    COUNT(DISTINCT oi1.order_id) as co_recommendation_count,
+                    COUNT(DISTINCT oi1.order_id)::float / 
+                        GREATEST(COUNT(DISTINCT o.unified_customer_id), 1) as similarity_score,
+                    SUM(oi1.total_price + oi2.total_price) as combined_revenue
+                FROM order_items oi1
+                JOIN order_items oi2 ON oi1.order_id = oi2.order_id AND oi1.product_id < oi2.product_id
+                JOIN orders o ON oi1.order_id = o.id
+                WHERE o.unified_customer_id IS NOT NULL
+                GROUP BY oi1.product_id, oi2.product_id
+                HAVING COUNT(DISTINCT oi1.order_id) >= 2
+                ORDER BY co_recommendation_count DESC, combined_revenue DESC
+                LIMIT %s
+            """, (limit,))
         
         pairs = cursor.fetchall()
         

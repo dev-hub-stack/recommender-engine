@@ -286,40 +286,48 @@ class SyncService:
         return orders_inserted, items_inserted
     
     def rebuild_recommendation_tables(self):
-        """Rebuild recommendation tables after sync"""
-        try:
-            self.connect_db()
-            cursor = self.pg_conn.cursor()
-            
-            logger.info("Rebuilding recommendation tables...")
-            
-            # Rebuild customer purchases
-            cursor.execute("SELECT rebuild_customer_purchases()")
-            customer_purchases = cursor.fetchone()[0]
-            logger.info(f"Rebuilt {customer_purchases} customer purchase records")
-            
-            # Rebuild product pairs
-            cursor.execute("SELECT rebuild_product_pairs()")
-            product_pairs = cursor.fetchone()[0]
-            logger.info(f"Rebuilt {product_pairs} product pair records")
-            
-            # Rebuild product statistics
-            cursor.execute("SELECT rebuild_product_statistics()")
-            product_stats = cursor.fetchone()[0]
-            logger.info(f"Rebuilt {product_stats} product statistics records")
-            
-            # Rebuild customer statistics
-            cursor.execute("SELECT rebuild_customer_statistics()")
-            customer_stats = cursor.fetchone()[0]
-            logger.info(f"Rebuilt {customer_stats} customer statistics records")
-            
-            self.pg_conn.commit()
-            cursor.close()
-            
-        except Exception as e:
-            logger.error(f"Error rebuilding recommendation tables: {e}")
-            if self.pg_conn:
-                self.pg_conn.rollback()
+        """Rebuild recommendation tables after sync - DISABLED to prevent table locks"""
+        # OPTIMIZATION: Disabled table rebuilds as they cause AccessExclusiveLock 
+        # that blocks all API queries for 5+ minutes.
+        # New optimized queries work directly on orders/order_items without needing
+        # pre-computed tables.
+        logger.info("Skipping recommendation table rebuild (optimized queries don't need it)")
+        return
+        
+        # OLD CODE BELOW - CAUSES LOCKS - DO NOT ENABLE
+        # try:
+        #     self.connect_db()
+        #     cursor = self.pg_conn.cursor()
+        #     
+        #     logger.info("Rebuilding recommendation tables...")
+        #     
+        #     # Rebuild customer purchases
+        #     cursor.execute("SELECT rebuild_customer_purchases()")
+        #     customer_purchases = cursor.fetchone()[0]
+        #     logger.info(f"Rebuilt {customer_purchases} customer purchase records")
+        #     
+        #     # Rebuild product pairs
+        #     cursor.execute("SELECT rebuild_product_pairs()")
+        #     product_pairs = cursor.fetchone()[0]
+        #     logger.info(f"Rebuilt {product_pairs} product pair records")
+        #     
+        #     # Rebuild product statistics
+        #     cursor.execute("SELECT rebuild_product_statistics()")
+        #     product_stats = cursor.fetchone()[0]
+        #     logger.info(f"Rebuilt {product_stats} product statistics records")
+        #     
+        #     # Rebuild customer statistics
+        #     cursor.execute("SELECT rebuild_customer_statistics()")
+        #     customer_stats = cursor.fetchone()[0]
+        #     logger.info(f"Rebuilt {customer_stats} customer statistics records")
+        #     
+        #     self.pg_conn.commit()
+        #     cursor.close()
+        #     
+        # except Exception as e:
+        #     logger.error(f"Error rebuilding recommendation tables: {e}")
+        #     if self.pg_conn:
+        #         self.pg_conn.rollback()
     
     def sync_incremental(self) -> Dict:
         """Perform incremental sync (only new orders since last sync)"""

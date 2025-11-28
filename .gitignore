@@ -167,3 +167,4 @@ yarn-error.log*
 # Production secrets
 .env.production
 secrets/
+upload_to_s3.sh

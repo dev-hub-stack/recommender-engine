@@ -46,24 +46,40 @@ class SchedulerService:
             logger.error(f"❌ Sync job error: {e}")
     
     def train_models_job(self):
-        """Job that runs daily to retrain ML models (Auto-Pilot Learning)"""
+        """
+        Job that runs daily to retrain ALL ML models (Auto-Pilot Learning)
+        
+        Trains all 4 unified models:
+        1. Collaborative Filtering (user-based & item-based)
+        2. Content-Based Filtering (product features)
+        3. Matrix Factorization (SVD)
+        4. Popularity-Based (trending products)
+        
+        Models are saved to PostgreSQL for persistence across Heroku restarts.
+        """
         try:
             logger.info("🤖 Starting automatic model training (Auto-Pilot)...")
+            logger.info("=" * 60)
+            logger.info("Training ALL 4 unified ML models...")
+            logger.info("=" * 60)
             start_time = datetime.now()
             
-            # Get database connection from sync service
-            pg_conn = self.sync_service.pg_conn
-            
-            training_results = {
-                'timestamp': start_time.isoformat(),
-                'models_trained': [],
-                'errors': []
-            }
-            
-            # 1. Clear Matrix Factorization cache
+            # Import the ML service
             try:
-                logger.info("📊 Clearing Matrix Factorization cache...")
-                # Import Redis directly
+                from src.algorithms.ml_recommendation_service import get_ml_service
+            except ImportError:
+                from algorithms.ml_recommendation_service import get_ml_service
+            
+            ml_service = get_ml_service()
+            
+            # Train all models with 30 days of data (or full dataset)
+            training_results = ml_service.train_all_models(
+                time_filter='30days',  # Use recent data for daily training
+                force_retrain=True     # Always retrain on schedule
+            )
+            
+            # Also clear Redis cache
+            try:
                 import redis as redis_module
                 redis_host = os.getenv("REDIS_HOST", "localhost")
                 redis_port = int(os.getenv("REDIS_PORT", "6379"))
@@ -71,52 +87,31 @@ class SchedulerService:
                 
                 redis_client = redis_module.Redis(host=redis_host, port=redis_port, db=redis_db)
                 
-                # Clear all matrix factorization cache keys
-                keys = list(redis_client.scan_iter("recommendations:matrix-factorization:*"))
-                if keys:
-                    redis_client.delete(*keys)
-                    logger.info(f"🗑️  Cleared {len(keys)} Matrix Factorization cache entries")
-                else:
-                    logger.info("ℹ️  No Matrix Factorization cache to clear")
-                
-                training_results['models_trained'].append('MatrixFactorization')
-                logger.info("✅ Matrix Factorization cache cleared (will retrain on next request)")
+                # Clear all ML cache keys
+                for pattern in ["ml:*", "recommendations:*"]:
+                    keys = list(redis_client.scan_iter(pattern))
+                    if keys:
+                        redis_client.delete(*keys)
+                        logger.info(f"🗑️  Cleared {len(keys)} cache entries for pattern: {pattern}")
                 
             except Exception as e:
-                error_msg = f"Matrix Factorization cache clear failed: {e}"
-                logger.error(f"❌ {error_msg}")
-                training_results['errors'].append(error_msg)
-            
-            # 2. Clear Content-Based cache
-            try:
-                logger.info("📝 Clearing Content-Based cache...")
-                # Clear content-based cache
-                keys = list(redis_client.scan_iter("recommendations:content-based:*"))
-                if keys:
-                    redis_client.delete(*keys)
-                    logger.info(f"🗑️  Cleared {len(keys)} Content-Based cache entries")
-                else:
-                    logger.info("ℹ️  No Content-Based cache to clear")
-                
-                training_results['models_trained'].append('ContentBasedFiltering')
-                logger.info("✅ Content-Based cache cleared (will rebuild on next request)")
-                
-            except Exception as e:
-                error_msg = f"Content-Based cache clear failed: {e}"
-                logger.error(f"❌ {error_msg}")
-                training_results['errors'].append(error_msg)
+                logger.warning(f"⚠️  Could not clear Redis cache: {e}")
             
             # Calculate training time
             end_time = datetime.now()
             training_duration = (end_time - start_time).total_seconds()
-            training_results['duration_seconds'] = training_duration
             
             # Log summary
-            if training_results['errors']:
-                logger.warning(f"⚠️  Model training completed with {len(training_results['errors'])} errors in {training_duration:.2f}s")
-            else:
-                logger.info(f"✅ All models trained successfully in {training_duration:.2f}s")
-                logger.info(f"📊 Models trained: {', '.join(training_results['models_trained'])}")
+            successful = training_results.get('successful_models', 0)
+            total = training_results.get('total_models', 4)
+            
+            logger.info("=" * 60)
+            logger.info(f"✅ AUTO-PILOT TRAINING COMPLETE: {successful}/{total} models in {training_duration:.2f}s")
+            logger.info("Models trained:")
+            for model_name, model_info in training_results.get('models', {}).items():
+                status = "✅" if model_info.get('status') == 'success' else "❌"
+                logger.info(f"  {status} {model_name}")
+            logger.info("=" * 60)
             
             return training_results
             
@@ -136,12 +131,12 @@ class SchedulerService:
         
         interval_minutes = SYNC_CONFIG['interval_minutes']
         
-        # Add the sync job (every 15 minutes)
+        # Add the sync job (daily at 2:00 AM - before model training at 3 AM)
         self.scheduler.add_job(
             func=self.sync_job,
-            trigger=IntervalTrigger(minutes=interval_minutes),
+            trigger=CronTrigger(hour=2, minute=0),  # 2:00 AM daily
             id='master_group_sync',
-            name='Master Group API Sync',
+            name='Master Group API Sync (Daily)',
             replace_existing=True,
             max_instances=1  # Prevent overlapping syncs
         )
@@ -162,7 +157,7 @@ class SchedulerService:
         self.scheduler.start()
         self.is_running = True
         
-        logger.info(f"✅ Scheduler started - Syncing every {interval_minutes} minutes")
+        logger.info(f"✅ Scheduler started - Daily sync at 2:00 AM, Training at 3:00 AM")
         logger.info(f"📅 Next sync scheduled for: {self.get_next_sync_time()}")
         
         if self.training_enabled:

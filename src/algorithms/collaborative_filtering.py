@@ -18,10 +18,16 @@ import sys
 import os
 # Removed shared dependency for local execution
 
-from models.recommendation import (
-    Recommendation, RecommendationAlgorithm, RecommendationContext, 
-    RecommendationMetadata, RecommendationRequest, RecommendationResponse
-)
+try:
+    from models.recommendation import (
+        Recommendation, RecommendationAlgorithm, RecommendationContext, 
+        RecommendationMetadata, RecommendationRequest, RecommendationResponse
+    )
+except ModuleNotFoundError:
+    from src.models.recommendation import (
+        Recommendation, RecommendationAlgorithm, RecommendationContext, 
+        RecommendationMetadata, RecommendationRequest, RecommendationResponse
+    )
 
 logger = structlog.get_logger()
 
@@ -395,8 +401,19 @@ class CollaborativeFilteringEngine:
         # Prepare data
         clean_data = self.prepare_training_data(interactions_df)
         
-        # Split for validation
-        train_data, test_data = train_test_split(clean_data, test_size=0.2, random_state=42)
+        # Handle empty or insufficient data
+        if len(clean_data) < 5:
+            logger.warning("Insufficient data for training", n_interactions=len(clean_data))
+            return {
+                "error": "insufficient_data",
+                "n_interactions": len(clean_data),
+                "rmse_accuracy": 0.0,
+                "coverage": 0.0
+            }
+        
+        # Split for validation - ensure minimum samples for test set
+        test_size = min(0.2, max(0.1, 2 / len(clean_data)))
+        train_data, test_data = train_test_split(clean_data, test_size=test_size, random_state=42)
         
         # Build matrix
         self.matrix_handler.build_matrix(train_data)

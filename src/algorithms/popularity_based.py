@@ -14,11 +14,18 @@ import sys
 import os
 # Removed shared dependency for local execution
 
-from models.recommendation import (
-    Recommendation, RecommendationAlgorithm, RecommendationContext, 
-    RecommendationMetadata, RecommendationRequest, RecommendationResponse
-)
-from models.customer import CustomerSegment
+try:
+    from models.recommendation import (
+        Recommendation, RecommendationAlgorithm, RecommendationContext, 
+        RecommendationMetadata, RecommendationRequest, RecommendationResponse
+    )
+    from models.customer import CustomerSegment
+except ModuleNotFoundError:
+    from src.models.recommendation import (
+        Recommendation, RecommendationAlgorithm, RecommendationContext, 
+        RecommendationMetadata, RecommendationRequest, RecommendationResponse
+    )
+    from src.models.customer import CustomerSegment
 
 logger = structlog.get_logger()
 

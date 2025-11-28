@@ -25,12 +25,12 @@ MASTER_GROUP_CONFIG = {
     }
 }
 
-# Sync Configuration
+# Sync Configuration - Changed to once per day (1440 minutes) to reduce load
 SYNC_CONFIG = {
-    'interval_minutes': int(os.getenv('SYNC_INTERVAL_MINUTES', '15')),
+    'interval_minutes': int(os.getenv('SYNC_INTERVAL_MINUTES', '1440')),  # Default: once per day
     'batch_size': int(os.getenv('SYNC_BATCH_SIZE', '1000')),
-    'lookback_minutes': int(os.getenv('SYNC_LOOKBACK_MINUTES', '30')),
-    'enable_auto_sync': os.getenv('ENABLE_AUTO_SYNC', 'true').lower() == 'true',
+    'lookback_minutes': int(os.getenv('SYNC_LOOKBACK_MINUTES', '1440')),  # Look back 24 hours
+    'enable_auto_sync': os.getenv('ENABLE_AUTO_SYNC', 'false').lower() == 'true',  # Disabled by default
     'incremental': True  # Only fetch new orders
 }
 
@@ -60,7 +60,8 @@ def get_database_config():
             'port': int(os.getenv('PG_PORT', '5432')),
             'database': os.getenv('PG_DB', 'mastergroup_recommendations'),
             'user': os.getenv('PG_USER', 'postgres'),
-            'password': os.getenv('PG_PASSWORD', 'postgres')
+            'password': os.getenv('PG_PASSWORD', 'postgres'),
+            'sslmode': 'disable'  # Disable SSL for local development
         }
 
 def get_redis_config():

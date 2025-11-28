@@ -1,0 +1,246 @@
+[
+  {
+    "test_name": "Import Collaborative Filtering",
+    "passed": true,
+    "details": "",
+    "metrics": {},
+    "timestamp": "2025-11-26T21:23:39.617986"
+  },
+  {
+    "test_name": "UserItemMatrix Build",
+    "passed": true,
+    "details": "",
+    "metrics": {
+      "n_users": 5,
+      "n_items": 5,
+      "sparsity": "60.00%"
+    },
+    "timestamp": "2025-11-26T21:23:39.622878"
+  },
+  {
+    "test_name": "User-Based CF Training",
+    "passed": true,
+    "details": "",
+    "metrics": {
+      "similarity_matrix_shape": "(5, 5)",
+      "sample_prediction": "5.000",
+      "recommendations_count": 2
+    },
+    "timestamp": "2025-11-26T21:23:39.625485"
+  },
+  {
+    "test_name": "Item-Based CF Training",
+    "passed": true,
+    "details": "",
+    "metrics": {
+      "similarity_matrix_shape": "(5, 5)",
+      "recommendations_count": 2
+    },
+    "timestamp": "2025-11-26T21:23:39.627023"
+  },
+  {
+    "test_name": "CF Engine Training",
+    "passed": false,
+    "details": "Training should complete",
+    "metrics": {},
+    "timestamp": "2025-11-26T21:23:39.644608"
+  },
+  {
+    "test_name": "CF with Real Data",
+    "passed": true,
+    "details": "",
+    "metrics": {
+      "interactions": 5000,
+      "unique_users": 1923,
+      "unique_items": 974,
+      "accuracy": "0.00%"
+    },
+    "timestamp": "2025-11-26T21:23:40.274589"
+  },
+  {
+    "test_name": "Import Content-Based Filtering",
+    "passed": true,
+    "details": "",
+    "metrics": {},
+    "timestamp": "2025-11-26T21:23:40.276468"
+  },
+  {
+    "test_name": "CBF Feature Building",
+    "passed": true,
+    "details": "",
+    "metrics": {
+      "n_products": 4269,
+      "build_time": "39.63s"
+    },
+    "timestamp": "2025-11-26T21:24:19.913813"
+  },
+  {
+    "test_name": "CBF Recommendations",
+    "passed": true,
+    "details": "",
+    "metrics": {
+      "customer_id": "...",
+      "recommendations_count": 10,
+      "top_score": "0.747"
+    },
+    "timestamp": "2025-11-26T21:24:20.082252"
+  },
+  {
+    "test_name": "Import Matrix Factorization",
+    "passed": true,
+    "details": "",
+    "metrics": {},
+    "timestamp": "2025-11-26T21:24:20.083413"
+  },
+  {
+    "test_name": "MF Matrix Building",
+    "passed": true,
+    "details": "",
+    "metrics": {
+      "n_users": 74773,
+      "n_items": 4140,
+      "build_time": "12.83s"
+    },
+    "timestamp": "2025-11-26T21:24:32.937157"
+  },
+  {
+    "test_name": "MF SVD Training",
+    "passed": true,
+    "details": "",
+    "metrics": {
+      "n_factors": 30,
+      "user_factors_shape": "(74773, 30)",
+      "item_factors_shape": "(4140, 30)",
+      "train_time": "10.25s"
+    },
+    "timestamp": "2025-11-26T21:24:43.188199"
+  },
+  {
+    "test_name": "MF Recommendations",
+    "passed": true,
+    "details": "",
+    "metrics": {
+      "customer_id": "...",
+      "recommendations_count": 0,
+      "top_score": "N/A"
+    },
+    "timestamp": "2025-11-26T21:24:43.196042"
+  },
+  {
+    "test_name": "Import Popularity-Based",
+    "passed": true,
+    "details": "",
+    "metrics": {},
+    "timestamp": "2025-11-26T21:24:43.230231"
+  },
+  {
+    "test_name": "Customer Segmentation",
+    "passed": false,
+    "details": "CustomerSegment.__init__() got an unexpected keyword argument 'segment_name'",
+    "metrics": {},
+    "timestamp": "2025-11-26T21:24:43.230389"
+  },
+  {
+    "test_name": "Popularity Engine Training",
+    "passed": false,
+    "details": "CustomerSegment.__init__() got an unexpected keyword argument 'segment_name'",
+    "metrics": {},
+    "timestamp": "2025-11-26T21:24:43.233738"
+  },
+  {
+    "test_name": "Import ML Service",
+    "passed": true,
+    "details": "",
+    "metrics": {},
+    "timestamp": "2025-11-26T21:24:43.239754"
+  },
+  {
+    "test_name": "ML Service Initialization",
+    "passed": true,
+    "details": "",
+    "metrics": {},
+    "timestamp": "2025-11-26T21:24:43.239993"
+  },
+  {
+    "test_name": "ML Service Data Loading",
+    "passed": true,
+    "details": "",
+    "metrics": {
+      "interactions_loaded": 1000,
+      "unique_users": 737,
+      "unique_items": 577
+    },
+    "timestamp": "2025-11-26T21:24:43.429957"
+  },
+  {
+    "test_name": "ML Service Full Training",
+    "passed": true,
+    "details": "",
+    "metrics": {
+      "total_time": "88.10s",
+      "successful_models": 4,
+      "total_models": 4
+    },
+    "timestamp": "2025-11-26T21:26:11.532239"
+  },
+  {
+    "test_name": "Hybrid Recommendations",
+    "passed": true,
+    "details": "",
+    "metrics": {
+      "customer_id": "...",
+      "recommendations_count": 0,
+      "inference_time": "18.78ms",
+      "top_score": "N/A"
+    },
+    "timestamp": "2025-11-26T21:26:11.576679"
+  },
+  {
+    "test_name": "Health Endpoint",
+    "passed": false,
+    "details": "Server not running (this is OK for unit tests)",
+    "metrics": {},
+    "timestamp": "2025-11-26T21:26:12.144127"
+  },
+  {
+    "test_name": "Popular Products API",
+    "passed": false,
+    "details": "Server not running",
+    "metrics": {},
+    "timestamp": "2025-11-26T21:26:12.147629"
+  },
+  {
+    "test_name": "Empty Data Handling",
+    "passed": false,
+    "details": "With n_samples=0, test_size=0.2 and train_size=None, the resulting train set will be empty. Adjust any of the aforementioned parameters.",
+    "metrics": {},
+    "timestamp": "2025-11-26T21:26:12.155406"
+  },
+  {
+    "test_name": "Single User Handling",
+    "passed": true,
+    "details": "",
+    "metrics": {},
+    "timestamp": "2025-11-26T21:26:12.172446"
+  },
+  {
+    "test_name": "Large Dataset Performance",
+    "passed": true,
+    "details": "",
+    "metrics": {
+      "n_interactions": 10000,
+      "matrix_build_time": "0.015s",
+      "matrix_shape": "(1000, 500)"
+    },
+    "timestamp": "2025-11-26T21:26:12.355617"
+  },
+  {
+    "test_name": "Cold Start Handling",
+    "passed": true,
+    "details": "",
+    "metrics": {
+      "fallback_recommendations": 10
+    },
+    "timestamp": "2025-11-26T21:26:58.763624"
+  }
+]

@@ -3064,6 +3064,316 @@ async def load_models_from_s3(
 
 
 # ============================================================================
+# AWS PERSONALIZE ENDPOINTS
+# ============================================================================
+
+@app.get("/api/v1/personalize/recommendations/{user_id}")
+async def get_personalize_recommendations(
+    user_id: str = Path(..., description="User/Customer ID"),
+    num_results: int = Query(10, description="Number of recommendations")
+):
+    """
+    Get personalized recommendations from AWS Personalize for a specific user.
+    """
+    try:
+        from aws_personalize.personalize_service import get_personalize_service
+        
+        personalize = get_personalize_service()
+        recommendations = personalize.get_recommendations_for_user(user_id, num_results)
+        
+        # Enrich with product names from database
+        if recommendations and pg_pool:
+            product_ids = [r['product_id'] for r in recommendations]
+            conn = pg_pool.getconn()
+            try:
+                cursor = conn.cursor(cursor_factory=RealDictCursor)
+                placeholders = ','.join(['%s'] * len(product_ids))
+                cursor.execute(f"""
+                    SELECT DISTINCT product_id, product_name 
+                    FROM order_items 
+                    WHERE product_id IN ({placeholders})
+                """, product_ids)
+                product_names = {str(r['product_id']): r['product_name'] for r in cursor.fetchall()}
+                cursor.close()
+                
+                for rec in recommendations:
+                    rec['product_name'] = product_names.get(rec['product_id'], f"Product {rec['product_id']}")
+            finally:
+                pg_pool.putconn(conn)
+        
+        return {
+            "user_id": user_id,
+            "recommendations": recommendations,
+            "count": len(recommendations),
+            "source": "aws_personalize"
+        }
+    except Exception as e:
+        logger.error(f"Failed to get Personalize recommendations: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/personalize/recommendations/by-location")
+async def get_personalize_recommendations_by_location(
+    province: Optional[str] = Query(None, description="Filter by province"),
+    city: Optional[str] = Query(None, description="Filter by city"),
+    num_results: int = Query(10, description="Number of recommendations per user"),
+    limit_users: int = Query(5, description="Number of users to get recommendations for")
+):
+    """
+    Get AWS Personalize recommendations for users in a specific province/city.
+    Returns aggregated recommendations for users in that location.
+    """
+    try:
+        from aws_personalize.personalize_service import get_personalize_service
+        
+        if not pg_pool:
+            raise HTTPException(status_code=500, detail="Database not connected")
+        
+        conn = pg_pool.getconn()
+        try:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            
+            # Build query to get users from location
+            query = """
+                SELECT DISTINCT o.customer_id, o.customer_name, o.city, o.province
+                FROM orders o
+                WHERE o.customer_id IS NOT NULL
+            """
+            params = []
+            
+            if province:
+                query += " AND LOWER(o.province) = LOWER(%s)"
+                params.append(province)
+            
+            if city:
+                query += " AND LOWER(o.city) = LOWER(%s)"
+                params.append(city)
+            
+            query += f" ORDER BY o.customer_id LIMIT {limit_users}"
+            
+            cursor.execute(query, params)
+            users = cursor.fetchall()
+            
+            if not users:
+                return {
+                    "province": province,
+                    "city": city,
+                    "users": [],
+                    "aggregated_recommendations": [],
+                    "message": "No users found in this location"
+                }
+            
+            # Get recommendations for each user
+            personalize = get_personalize_service()
+            user_recommendations = []
+            all_product_scores = defaultdict(lambda: {"score": 0, "count": 0})
+            
+            for user in users:
+                recs = personalize.get_recommendations_for_user(
+                    str(user['customer_id']), 
+                    num_results
+                )
+                
+                user_recommendations.append({
+                    "customer_id": user['customer_id'],
+                    "customer_name": user['customer_name'],
+                    "city": user['city'],
+                    "province": user['province'],
+                    "recommendations": recs
+                })
+                
+                # Aggregate scores
+                for rec in recs:
+                    all_product_scores[rec['product_id']]['score'] += rec['score']
+                    all_product_scores[rec['product_id']]['count'] += 1
+            
+            # Calculate average scores and sort
+            aggregated = []
+            for product_id, data in all_product_scores.items():
+                aggregated.append({
+                    "product_id": product_id,
+                    "avg_score": data['score'] / data['count'],
+                    "recommended_to_users": data['count']
+                })
+            
+            aggregated.sort(key=lambda x: x['avg_score'], reverse=True)
+            
+            # Enrich with product names
+            if aggregated:
+                product_ids = [a['product_id'] for a in aggregated[:20]]
+                placeholders = ','.join(['%s'] * len(product_ids))
+                cursor.execute(f"""
+                    SELECT DISTINCT product_id, product_name 
+                    FROM order_items 
+                    WHERE product_id IN ({placeholders})
+                """, product_ids)
+                product_names = {str(r['product_id']): r['product_name'] for r in cursor.fetchall()}
+                
+                for agg in aggregated:
+                    agg['product_name'] = product_names.get(agg['product_id'], f"Product {agg['product_id']}")
+            
+            cursor.close()
+            
+            return {
+                "province": province,
+                "city": city,
+                "total_users": len(users),
+                "users": user_recommendations,
+                "aggregated_recommendations": aggregated[:20],
+                "source": "aws_personalize"
+            }
+            
+        finally:
+            pg_pool.putconn(conn)
+            
+    except Exception as e:
+        logger.error(f"Failed to get location-based recommendations: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/personalize/status")
+async def get_personalize_status():
+    """
+    Get AWS Personalize configuration status.
+    """
+    try:
+        from aws_personalize.personalize_service import get_personalize_service
+        
+        personalize = get_personalize_service()
+        
+        return {
+            "is_configured": personalize.is_configured,
+            "region": personalize.region,
+            "campaign_arn": personalize.campaign_arn[:50] + "..." if personalize.campaign_arn else None,
+            "similar_items_configured": bool(personalize.similar_items_campaign_arn)
+        }
+    except Exception as e:
+        logger.error(f"Failed to get Personalize status: {e}")
+        return {
+            "is_configured": False,
+            "error": str(e)
+        }
+
+
+@app.get("/api/v1/locations/provinces")
+async def get_provinces():
+    """Get list of all provinces with order counts."""
+    try:
+        if not pg_pool:
+            raise HTTPException(status_code=500, detail="Database not connected")
+        
+        conn = pg_pool.getconn()
+        try:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            cursor.execute("""
+                SELECT 
+                    province,
+                    COUNT(DISTINCT order_id) as order_count,
+                    COUNT(DISTINCT customer_id) as customer_count
+                FROM orders
+                WHERE province IS NOT NULL AND province != ''
+                GROUP BY province
+                ORDER BY order_count DESC
+            """)
+            provinces = cursor.fetchall()
+            cursor.close()
+            return {"provinces": provinces}
+        finally:
+            pg_pool.putconn(conn)
+    except Exception as e:
+        logger.error(f"Failed to get provinces: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/locations/cities")
+async def get_cities(province: Optional[str] = Query(None, description="Filter by province")):
+    """Get list of cities, optionally filtered by province."""
+    try:
+        if not pg_pool:
+            raise HTTPException(status_code=500, detail="Database not connected")
+        
+        conn = pg_pool.getconn()
+        try:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            
+            query = """
+                SELECT 
+                    city,
+                    province,
+                    COUNT(DISTINCT order_id) as order_count,
+                    COUNT(DISTINCT customer_id) as customer_count
+                FROM orders
+                WHERE city IS NOT NULL AND city != ''
+            """
+            params = []
+            
+            if province:
+                query += " AND LOWER(province) = LOWER(%s)"
+                params.append(province)
+            
+            query += " GROUP BY city, province ORDER BY order_count DESC LIMIT 100"
+            
+            cursor.execute(query, params)
+            cities = cursor.fetchall()
+            cursor.close()
+            return {"cities": cities}
+        finally:
+            pg_pool.putconn(conn)
+    except Exception as e:
+        logger.error(f"Failed to get cities: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/locations/users")
+async def get_users_by_location(
+    province: Optional[str] = Query(None, description="Filter by province"),
+    city: Optional[str] = Query(None, description="Filter by city"),
+    limit: int = Query(50, description="Max users to return")
+):
+    """Get list of users in a specific location."""
+    try:
+        if not pg_pool:
+            raise HTTPException(status_code=500, detail="Database not connected")
+        
+        conn = pg_pool.getconn()
+        try:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            
+            query = """
+                SELECT 
+                    customer_id,
+                    customer_name,
+                    city,
+                    province,
+                    COUNT(DISTINCT order_id) as order_count,
+                    SUM(total_amount) as total_spent
+                FROM orders
+                WHERE customer_id IS NOT NULL
+            """
+            params = []
+            
+            if province:
+                query += " AND LOWER(province) = LOWER(%s)"
+                params.append(province)
+            
+            if city:
+                query += " AND LOWER(city) = LOWER(%s)"
+                params.append(city)
+            
+            query += f" GROUP BY customer_id, customer_name, city, province ORDER BY order_count DESC LIMIT {limit}"
+            
+            cursor.execute(query, params)
+            users = cursor.fetchall()
+            cursor.close()
+            return {"users": users, "count": len(users)}
+        finally:
+            pg_pool.putconn(conn)
+    except Exception as e:
+        logger.error(f"Failed to get users: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
 # END ML-POWERED ANALYTICS ENDPOINTS
 # ============================================================================
 

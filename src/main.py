@@ -3148,9 +3148,9 @@ async def get_personalize_recommendations_by_location(
             
             # Build query to get users from location
             query = """
-                SELECT DISTINCT o.customer_id, o.customer_name, o.city, o.province
+                SELECT DISTINCT o.unified_customer_id as customer_id, o.customer_name, o.customer_city as city, o.province
                 FROM orders o
-                WHERE o.customer_id IS NOT NULL
+                WHERE o.unified_customer_id IS NOT NULL
             """
             params = []
             
@@ -3159,10 +3159,10 @@ async def get_personalize_recommendations_by_location(
                 params.append(province)
             
             if city:
-                query += " AND LOWER(o.city) = LOWER(%s)"
+                query += " AND LOWER(o.customer_city) = LOWER(%s)"
                 params.append(city)
             
-            query += f" ORDER BY o.customer_id LIMIT {limit_users}"
+            query += f" ORDER BY o.unified_customer_id LIMIT {limit_users}"
             
             cursor.execute(query, params)
             users = cursor.fetchall()
@@ -3281,8 +3281,8 @@ async def get_provinces():
             cursor.execute("""
                 SELECT 
                     province,
-                    COUNT(DISTINCT order_id) as order_count,
-                    COUNT(DISTINCT customer_id) as customer_count
+                    COUNT(DISTINCT id) as order_count,
+                    COUNT(DISTINCT unified_customer_id) as customer_count
                 FROM orders
                 WHERE province IS NOT NULL AND province != ''
                 GROUP BY province
@@ -3311,12 +3311,12 @@ async def get_cities(province: Optional[str] = Query(None, description="Filter b
             
             query = """
                 SELECT 
-                    city,
+                    customer_city as city,
                     province,
-                    COUNT(DISTINCT order_id) as order_count,
-                    COUNT(DISTINCT customer_id) as customer_count
+                    COUNT(DISTINCT id) as order_count,
+                    COUNT(DISTINCT unified_customer_id) as customer_count
                 FROM orders
-                WHERE city IS NOT NULL AND city != ''
+                WHERE customer_city IS NOT NULL AND customer_city != ''
             """
             params = []
             
@@ -3324,7 +3324,7 @@ async def get_cities(province: Optional[str] = Query(None, description="Filter b
                 query += " AND LOWER(province) = LOWER(%s)"
                 params.append(province)
             
-            query += " GROUP BY city, province ORDER BY order_count DESC LIMIT 100"
+            query += " GROUP BY customer_city, province ORDER BY order_count DESC LIMIT 100"
             
             cursor.execute(query, params)
             cities = cursor.fetchall()
@@ -3354,14 +3354,14 @@ async def get_users_by_location(
             
             query = """
                 SELECT 
-                    customer_id,
+                    unified_customer_id as customer_id,
                     customer_name,
-                    city,
+                    customer_city as city,
                     province,
-                    COUNT(DISTINCT order_id) as order_count,
-                    SUM(total_amount) as total_spent
+                    COUNT(DISTINCT id) as order_count,
+                    SUM(total_price) as total_spent
                 FROM orders
-                WHERE customer_id IS NOT NULL
+                WHERE unified_customer_id IS NOT NULL
             """
             params = []
             
@@ -3370,10 +3370,10 @@ async def get_users_by_location(
                 params.append(province)
             
             if city:
-                query += " AND LOWER(city) = LOWER(%s)"
+                query += " AND LOWER(customer_city) = LOWER(%s)"
                 params.append(city)
             
-            query += f" GROUP BY customer_id, customer_name, city, province ORDER BY order_count DESC LIMIT {limit}"
+            query += f" GROUP BY unified_customer_id, customer_name, customer_city, province ORDER BY order_count DESC LIMIT {limit}"
             
             cursor.execute(query, params)
             users = cursor.fetchall()

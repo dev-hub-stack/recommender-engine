@@ -3080,51 +3080,7 @@ async def load_models_from_s3(
 # AWS PERSONALIZE ENDPOINTS
 # ============================================================================
 
-@app.get("/api/v1/personalize/recommendations/{user_id}")
-async def get_personalize_recommendations(
-    user_id: str = Path(..., description="User/Customer ID"),
-    num_results: int = Query(10, description="Number of recommendations")
-):
-    """
-    Get personalized recommendations from AWS Personalize for a specific user.
-    """
-    try:
-        from aws_personalize.personalize_service import get_personalize_service
-        
-        personalize = get_personalize_service()
-        recommendations = personalize.get_recommendations_for_user(user_id, num_results)
-        
-        # Enrich with product names from database
-        if recommendations and pg_pool:
-            product_ids = [r['product_id'] for r in recommendations]
-            conn = pg_pool.getconn()
-            try:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
-                placeholders = ','.join(['%s'] * len(product_ids))
-                cursor.execute(f"""
-                    SELECT DISTINCT product_id, product_name 
-                    FROM order_items 
-                    WHERE product_id IN ({placeholders})
-                """, product_ids)
-                product_names = {str(r['product_id']): r['product_name'] for r in cursor.fetchall()}
-                cursor.close()
-                
-                for rec in recommendations:
-                    rec['product_name'] = product_names.get(rec['product_id'], f"Product {rec['product_id']}")
-            finally:
-                pg_pool.putconn(conn)
-        
-        return {
-            "user_id": user_id,
-            "recommendations": recommendations,
-            "count": len(recommendations),
-            "source": "aws_personalize"
-        }
-    except Exception as e:
-        logger.error(f"Failed to get Personalize recommendations: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
+# NOTE: /by-location must come BEFORE /{user_id} to avoid route conflicts
 @app.get("/api/v1/personalize/recommendations/by-location")
 async def get_personalize_recommendations_by_location(
     province: Optional[str] = Query(None, description="Filter by province"),
@@ -3241,6 +3197,51 @@ async def get_personalize_recommendations_by_location(
             
     except Exception as e:
         logger.error(f"Failed to get location-based recommendations: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/personalize/recommendations/{user_id}")
+async def get_personalize_recommendations(
+    user_id: str = Path(..., description="User/Customer ID"),
+    num_results: int = Query(10, description="Number of recommendations")
+):
+    """
+    Get personalized recommendations from AWS Personalize for a specific user.
+    """
+    try:
+        from aws_personalize.personalize_service import get_personalize_service
+        
+        personalize = get_personalize_service()
+        recommendations = personalize.get_recommendations_for_user(user_id, num_results)
+        
+        # Enrich with product names from database
+        if recommendations and pg_pool:
+            product_ids = [r['product_id'] for r in recommendations]
+            conn = pg_pool.getconn()
+            try:
+                cursor = conn.cursor(cursor_factory=RealDictCursor)
+                placeholders = ','.join(['%s'] * len(product_ids))
+                cursor.execute(f"""
+                    SELECT DISTINCT product_id, product_name 
+                    FROM order_items 
+                    WHERE product_id IN ({placeholders})
+                """, product_ids)
+                product_names = {str(r['product_id']): r['product_name'] for r in cursor.fetchall()}
+                cursor.close()
+                
+                for rec in recommendations:
+                    rec['product_name'] = product_names.get(rec['product_id'], f"Product {rec['product_id']}")
+            finally:
+                pg_pool.putconn(conn)
+        
+        return {
+            "user_id": user_id,
+            "recommendations": recommendations,
+            "count": len(recommendations),
+            "source": "aws_personalize"
+        }
+    except Exception as e:
+        logger.error(f"Failed to get Personalize recommendations: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

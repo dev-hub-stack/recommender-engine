@@ -1,0 +1,228 @@
+"""
+AWS Personalize Service
+Replaces local ML models with AWS Personalize API calls
+"""
+
+import boto3
+import os
+from typing import List, Dict, Optional
+import logging
+
+logger = logging.getLogger(__name__)
+
+class AWSPersonalizeService:
+    """
+    Service to get recommendations from AWS Personalize
+    Drop-in replacement for local ML recommendation service
+    """
+    
+    def __init__(self):
+        self.region = os.environ.get('AWS_REGION', 'us-east-1')
+        self.campaign_arn = os.environ.get('PERSONALIZE_CAMPAIGN_ARN', '')
+        self.similar_items_campaign_arn = os.environ.get('PERSONALIZE_SIMILAR_ITEMS_CAMPAIGN_ARN', '')
+        
+        # Initialize Personalize Runtime client
+        self.personalize_runtime = boto3.client(
+            'personalize-runtime',
+            region_name=self.region
+        )
+        
+        # Check if configured
+        self.is_configured = bool(self.campaign_arn)
+        
+        if not self.is_configured:
+            logger.warning("AWS Personalize not configured. Set PERSONALIZE_CAMPAIGN_ARN")
+    
+    def get_recommendations_for_user(
+        self, 
+        user_id: str, 
+        num_results: int = 10,
+        filter_arn: Optional[str] = None
+    ) -> List[Dict]:
+        """
+        Get personalized recommendations for a user
+        
+        Args:
+            user_id: Customer ID
+            num_results: Number of recommendations to return
+            filter_arn: Optional filter ARN
+            
+        Returns:
+            List of recommended items with scores
+        """
+        if not self.is_configured:
+            logger.error("Personalize not configured")
+            return []
+        
+        try:
+            params = {
+                'campaignArn': self.campaign_arn,
+                'userId': str(user_id),
+                'numResults': num_results
+            }
+            
+            if filter_arn:
+                params['filterArn'] = filter_arn
+            
+            response = self.personalize_runtime.get_recommendations(**params)
+            
+            recommendations = []
+            for item in response.get('itemList', []):
+                recommendations.append({
+                    'product_id': item['itemId'],
+                    'score': float(item.get('score', 0)),
+                    'algorithm': 'aws_personalize'
+                })
+            
+            logger.info(f"Got {len(recommendations)} recommendations for user {user_id}")
+            return recommendations
+            
+        except Exception as e:
+            logger.error(f"Error getting recommendations: {e}")
+            return []
+    
+    def get_similar_items(
+        self, 
+        item_id: str, 
+        num_results: int = 10
+    ) -> List[Dict]:
+        """
+        Get similar items for cross-selling
+        
+        Args:
+            item_id: Product ID
+            num_results: Number of similar items
+            
+        Returns:
+            List of similar items with scores
+        """
+        if not self.similar_items_campaign_arn:
+            logger.warning("Similar items campaign not configured")
+            return []
+        
+        try:
+            response = self.personalize_runtime.get_recommendations(
+                campaignArn=self.similar_items_campaign_arn,
+                itemId=str(item_id),
+                numResults=num_results
+            )
+            
+            similar_items = []
+            for item in response.get('itemList', []):
+                similar_items.append({
+                    'product_id': item['itemId'],
+                    'similarity_score': float(item.get('score', 0)),
+                    'algorithm': 'aws_personalize_similar_items'
+                })
+            
+            return similar_items
+            
+        except Exception as e:
+            logger.error(f"Error getting similar items: {e}")
+            return []
+    
+    def record_event(
+        self,
+        user_id: str,
+        item_id: str,
+        event_type: str = 'purchase',
+        event_value: float = 1.0
+    ) -> bool:
+        """
+        Record a real-time event for model updates
+        
+        Args:
+            user_id: Customer ID
+            item_id: Product ID
+            event_type: Type of event (purchase, view, etc.)
+            event_value: Value of the event
+            
+        Returns:
+            Success status
+        """
+        tracking_id = os.environ.get('PERSONALIZE_TRACKING_ID', '')
+        
+        if not tracking_id:
+            logger.warning("Event tracking not configured")
+            return False
+        
+        try:
+            personalize_events = boto3.client(
+                'personalize-events',
+                region_name=self.region
+            )
+            
+            import time
+            
+            personalize_events.put_events(
+                trackingId=tracking_id,
+                userId=str(user_id),
+                sessionId=f"session-{user_id}-{int(time.time())}",
+                eventList=[{
+                    'eventType': event_type,
+                    'eventValue': event_value,
+                    'itemId': str(item_id),
+                    'sentAt': int(time.time())
+                }]
+            )
+            
+            logger.info(f"Recorded event: {event_type} for user {user_id}, item {item_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error recording event: {e}")
+            return False
+    
+    def get_personalized_ranking(
+        self,
+        user_id: str,
+        item_ids: List[str]
+    ) -> List[Dict]:
+        """
+        Re-rank a list of items for a specific user
+        
+        Args:
+            user_id: Customer ID
+            item_ids: List of product IDs to rank
+            
+        Returns:
+            Ranked list of items
+        """
+        ranking_campaign_arn = os.environ.get('PERSONALIZE_RANKING_CAMPAIGN_ARN', '')
+        
+        if not ranking_campaign_arn:
+            logger.warning("Ranking campaign not configured")
+            return [{'product_id': id, 'rank': i+1} for i, id in enumerate(item_ids)]
+        
+        try:
+            response = self.personalize_runtime.get_personalized_ranking(
+                campaignArn=ranking_campaign_arn,
+                userId=str(user_id),
+                inputList=[str(id) for id in item_ids]
+            )
+            
+            ranked_items = []
+            for i, item in enumerate(response.get('personalizedRanking', [])):
+                ranked_items.append({
+                    'product_id': item['itemId'],
+                    'rank': i + 1,
+                    'score': float(item.get('score', 0)),
+                    'algorithm': 'aws_personalize_ranking'
+                })
+            
+            return ranked_items
+            
+        except Exception as e:
+            logger.error(f"Error getting personalized ranking: {e}")
+            return [{'product_id': id, 'rank': i+1} for i, id in enumerate(item_ids)]
+
+
+# Singleton instance
+_personalize_service = None
+
+def get_personalize_service() -> AWSPersonalizeService:
+    """Get or create Personalize service instance"""
+    global _personalize_service
+    if _personalize_service is None:
+        _personalize_service = AWSPersonalizeService()
+    return _personalize_service

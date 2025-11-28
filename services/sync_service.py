@@ -375,6 +375,18 @@ class SyncService:
             # Insert orders
             orders_inserted, items_inserted = self.insert_orders(transformed_orders)
             
+            # Sync to AWS Personalize (real-time events)
+            personalize_result = None
+            if orders_inserted > 0:
+                try:
+                    from aws_personalize.personalize_sync import sync_orders_to_personalize
+                    personalize_result = sync_orders_to_personalize(transformed_orders)
+                    logger.info(f"AWS Personalize sync: {personalize_result.get('events_sent', 0)} events sent")
+                except ImportError:
+                    logger.debug("AWS Personalize sync not configured")
+                except Exception as e:
+                    logger.warning(f"AWS Personalize sync failed (non-blocking): {e}")
+            
             # Rebuild recommendation tables
             if orders_inserted > 0:
                 self.rebuild_recommendation_tables()
@@ -393,6 +405,7 @@ class SyncService:
                 'oe_orders_fetched': len(oe_orders),
                 'orders_inserted': orders_inserted,
                 'items_inserted': items_inserted,
+                'aws_personalize': personalize_result,
                 'timestamp': datetime.now().isoformat()
             }
             

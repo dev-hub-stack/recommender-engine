@@ -25,9 +25,9 @@ sudo mkdir -p /opt/mastergroup-api
 sudo chown ubuntu:ubuntu /opt/mastergroup-api
 cd /opt/mastergroup-api
 
-# Clone repository
+# Clone repository (specific branch)
 echo "Step 4: Cloning repository..."
-git clone https://github.com/dev-hub-stack/recommender-engine.git . || {
+git clone -b feature/aws-personalize-deployment https://github.com/dev-hub-stack/recommender-engine.git . || {
     echo "Git clone failed. You may need to copy files manually."
 }
 

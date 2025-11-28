@@ -3167,19 +3167,34 @@ async def get_personalize_recommendations_by_location(
             
             aggregated.sort(key=lambda x: x['avg_score'], reverse=True)
             
+            # Collect all product IDs from all recommendations
+            all_product_ids = set()
+            for user_rec in user_recommendations:
+                for rec in user_rec['recommendations']:
+                    all_product_ids.add(rec['product_id'])
+            for agg in aggregated[:20]:
+                all_product_ids.add(agg['product_id'])
+            
             # Enrich with product names
-            if aggregated:
-                product_ids = [a['product_id'] for a in aggregated[:20]]
-                placeholders = ','.join(['%s'] * len(product_ids))
+            product_names = {}
+            if all_product_ids:
+                product_ids_list = list(all_product_ids)
+                placeholders = ','.join(['%s'] * len(product_ids_list))
                 cursor.execute(f"""
                     SELECT DISTINCT product_id, product_name 
                     FROM order_items 
                     WHERE product_id IN ({placeholders})
-                """, product_ids)
+                """, product_ids_list)
                 product_names = {str(r['product_id']): r['product_name'] for r in cursor.fetchall()}
-                
-                for agg in aggregated:
-                    agg['product_name'] = product_names.get(agg['product_id'], f"Product {agg['product_id']}")
+            
+            # Apply product names to aggregated recommendations
+            for agg in aggregated:
+                agg['product_name'] = product_names.get(agg['product_id'], f"Product {agg['product_id']}")
+            
+            # Apply product names to per-user recommendations
+            for user_rec in user_recommendations:
+                for rec in user_rec['recommendations']:
+                    rec['product_name'] = product_names.get(rec['product_id'], f"Product {rec['product_id']}")
             
             cursor.close()
             

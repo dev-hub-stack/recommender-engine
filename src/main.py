@@ -20,6 +20,7 @@ import redis
 import json
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from psycopg2 import pool
 import requests
 import os
 from collections import defaultdict
@@ -57,6 +58,7 @@ AUTH_TOKEN = MASTER_GROUP_CONFIG.get('auth_token')
 # Global connections
 redis_client = None
 pg_conn = None
+pg_pool = None
 
 def get_pg_connection_params():
     """Get PostgreSQL connection parameters with SSL support"""
@@ -148,15 +150,24 @@ def init_redis():
         redis_client = None
 
 def init_postgres():
-    """Initialize PostgreSQL connection (tables already exist)"""
-    global pg_conn
+    """Initialize PostgreSQL connection pool"""
+    global pg_conn, pg_pool
     try:
+        # Create connection pool for concurrent requests
+        pg_pool = pool.ThreadedConnectionPool(
+            minconn=2,
+            maxconn=10,
+            **get_pg_connection_params()
+        )
+        
+        # Also create single connection for backward compatibility
         pg_conn = psycopg2.connect(**get_pg_connection_params())
         
-        logger.info("PostgreSQL connection established", host=PG_HOST, port=PG_PORT)
+        logger.info("PostgreSQL connection pool established", host=PG_HOST, port=PG_PORT)
     except Exception as e:
         logger.error("Failed to connect to PostgreSQL", error=str(e))
         pg_conn = None
+        pg_pool = None
 
 
 @asynccontextmanager
@@ -201,6 +212,8 @@ async def lifespan(app: FastAPI):
         redis_client.close()
     if pg_conn:
         pg_conn.close()
+    if pg_pool:
+        pg_pool.closeall()
     
     logger.info("Shutting down Recommendation Engine Service")
 

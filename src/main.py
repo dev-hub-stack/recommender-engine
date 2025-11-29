@@ -2212,176 +2212,37 @@ async def get_ml_collaborative_products(
     use_ml: bool = Query(True, description="Use ML algorithms or SQL fallback")
 ):
     """
-    Get products that are frequently bought together using ML
+    Get collaborative products - NOW USES REAL DATA FROM ANALYTICS
     
-    Uses Collaborative Filtering to find product associations
-    Falls back to SQL-based queries if ML not trained
+    NOTE: Local ML models disabled - using SQL-based collaborative analytics
+    Returns REAL purchase patterns and collaborative signals
     """
     try:
-        cache_key = f"ml:collaborative_products:{time_filter}:{limit}"
+        # Just call the analytics endpoint internally (which we already fixed)
+        products = await get_analytics_collaborative_products(time_filter, limit)
         
-        # Try Redis cache first (FAST PATH)
-        try:
-            cached = redis_client.get(cache_key)
-            if cached:
-                logger.info("✅ Cache HIT - collaborative products", time_filter=time_filter, limit=limit)
-                return json.loads(cached)
-        except Exception as e:
-            logger.warning(f"Redis cache failed: {e}")
+        # Transform to format frontend expects
+        product_list = []
+        for p in products:
+            product_list.append({
+                'product_id': p['productId'],
+                'product_name': p['productName'],
+                'category': p['category'],
+                'recommendation_count': p['recommendationCount'],
+                'avg_similarity_score': p['avgSimilarityScore'],
+                'total_revenue': p['totalRevenue'],
+                'algorithm': 'sql_collaborative_analytics'
+            })
         
-        logger.info("Fetching ML collaborative products", 
-                   time_filter=time_filter, 
-                   limit=limit,
-                   use_ml=use_ml)
+        result = {
+            "products": product_list,
+            "algorithm": "sql_collaborative",
+            "time_filter": time_filter,
+            "count": len(product_list)
+        }
         
-        if use_ml:
-            ml_service = get_ml_service()
-            
-            # Train if not trained
-            if not ml_service.is_trained:
-                logger.warning("Models not trained, training now...")
-                ml_service.train_all_models(time_filter=time_filter)
-            
-            # Use collaborative filtering engine
-            if ml_service.collaborative_engine and ml_service.collaborative_engine.is_trained:
-                # Get top products by interaction count
-                conn = psycopg2.connect(**get_pg_connection_params())
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
-                
-                cursor.execute("""
-                    SELECT 
-                        oi.product_id,
-                        MAX(oi.product_name) as product_name,
-                        COUNT(DISTINCT o.unified_customer_id) as customer_count,
-                        COUNT(DISTINCT oi.order_id) as order_count,
-                        SUM(oi.total_price) as total_revenue,
-                        AVG(oi.unit_price) as avg_price
-                    FROM order_items oi
-                    JOIN orders o ON oi.order_id = o.id
-                    WHERE o.unified_customer_id IS NOT NULL
-                    AND oi.product_id IS NOT NULL
-                    GROUP BY oi.product_id
-                    ORDER BY customer_count DESC, total_revenue DESC
-                    LIMIT %s
-                """, (limit,))
-                
-                products = cursor.fetchall()
-                cursor.close()
-                conn.close()
-                
-                # Format response with similarity scores from ML model
-                product_list = []
-                
-                # Get similarity matrix for calculating avg_similarity_score
-                item_similarity_matrix = None
-                item_to_idx = {}
-                if ml_service.collaborative_engine and hasattr(ml_service.collaborative_engine, 'item_similarity_matrix'):
-                    item_similarity_matrix = ml_service.collaborative_engine.item_similarity_matrix
-                    if ml_service.collaborative_engine.matrix_handler:
-                        item_to_idx = ml_service.collaborative_engine.matrix_handler.item_to_idx
-                
-                for product in products:
-                    product_dict = dict(product)
-                    product_dict['total_revenue'] = float(product_dict['total_revenue'] or 0)
-                    product_dict['avg_price'] = float(product_dict['avg_price'] or 0)
-                    product_dict['algorithm'] = 'collaborative_filtering_ml'
-                    
-                    # Calculate avg_similarity_score from ML model
-                    product_id = str(product_dict['product_id'])
-                    if item_similarity_matrix is not None and product_id in item_to_idx:
-                        idx = item_to_idx[product_id]
-                        # Get top 10 similarity scores for this product (excluding itself)
-                        similarities = item_similarity_matrix[idx]
-                        top_similarities = np.sort(similarities)[-10:]  # Top 10 most similar
-                        product_dict['avg_similarity_score'] = float(np.mean(top_similarities))
-                    else:
-                        # Fallback: calculate based on customer engagement
-                        max_customers = max(p['customer_count'] for p in products) if products else 1
-                        product_dict['avg_similarity_score'] = round(0.5 + 0.4 * (product_dict['customer_count'] / max_customers), 2)
-                    
-                    product_list.append(product_dict)
-                
-                logger.info("ML collaborative products fetched", count=len(product_list))
-                
-                result = {
-                    "products": product_list,
-                    "algorithm": "ml_collaborative_filtering",
-                    "time_filter": time_filter,
-                    "count": len(product_list)
-                }
-                
-                # Cache result for 5 minutes
-                try:
-                    redis_client.setex(cache_key, 300, json.dumps(result))
-                    logger.info("✅ Cached collaborative products", cache_key=cache_key)
-                except Exception as e:
-                    logger.warning(f"Failed to cache: {e}")
-                
-                return result
-            else:
-                logger.warning("Collaborative filtering not trained, falling back to SQL")
-                use_ml = False
-        
-        # SQL fallback
-        if not use_ml:
-            conn = psycopg2.connect(**get_pg_connection_params())
-            cursor = conn.cursor(cursor_factory=RealDictCursor)
-            
-            days_map = {
-                '7days': 7,
-                '30days': 30,
-                '90days': 90,
-                '6months': 180,
-                '1year': 365,
-                'all': None
-            }
-            days = days_map.get(time_filter)
-            
-            query = """
-                SELECT 
-                    oi.product_id,
-                    MAX(oi.product_name) as product_name,
-                    COUNT(DISTINCT o.unified_customer_id) as customer_count,
-                    COUNT(DISTINCT oi.order_id) as order_count,
-                    SUM(oi.total_price) as total_revenue,
-                    AVG(oi.unit_price) as avg_price
-                FROM order_items oi
-                JOIN orders o ON oi.order_id = o.id
-                WHERE o.unified_customer_id IS NOT NULL
-                AND oi.product_id IS NOT NULL
-            """
-            
-            params = []
-            if days:
-                query += " AND o.order_date >= NOW() - INTERVAL '%s days'"
-                params.append(days)
-            
-            query += " GROUP BY oi.product_id ORDER BY customer_count DESC, total_revenue DESC LIMIT %s"
-            params.append(limit)
-            
-            cursor.execute(query, params)
-            products = cursor.fetchall()
-            cursor.close()
-            conn.close()
-            
-            product_list = []
-            max_customers = max(p['customer_count'] for p in products) if products else 1
-            
-            for product in products:
-                product_dict = dict(product)
-                product_dict['total_revenue'] = float(product_dict['total_revenue'] or 0)
-                product_dict['avg_price'] = float(product_dict['avg_price'] or 0)
-                product_dict['algorithm'] = 'sql_fallback'
-                # Calculate similarity score based on customer engagement
-                product_dict['avg_similarity_score'] = round(0.5 + 0.4 * (product_dict['customer_count'] / max_customers), 2)
-                product_list.append(product_dict)
-            
-            return {
-                "products": product_list,
-                "algorithm": "sql_fallback",
-                "time_filter": time_filter,
-                "count": len(product_list)
-            }
+        logger.info("Collaborative products from analytics", count=len(product_list))
+        return result
         
     except Exception as e:
         logger.error("Failed to fetch collaborative products", error=str(e), exc_info=True)

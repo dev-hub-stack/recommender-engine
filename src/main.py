@@ -1968,7 +1968,8 @@ async def get_pos_vs_oe_revenue(time_filter: str = Query("all")):
             SELECT 
                 UPPER(order_type) as order_type,
                 COUNT(DISTINCT o.id) as total_orders,
-                SUM(o.total_price) as total_revenue,
+                -- Fix: Use SUM(oi.total_price) to avoid duplication from JOIN
+                SUM(oi.total_price) as total_revenue,
                 COUNT(DISTINCT o.unified_customer_id) as unique_customers,
                 AVG(o.total_price) as avg_order_value,
                 COUNT(DISTINCT oi.product_id) as unique_products,

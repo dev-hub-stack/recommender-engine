@@ -1037,11 +1037,11 @@ async def get_dashboard_metrics(time_filter: str = Query("30days")):
         
         cursor.execute(f"""
             SELECT 
-                COUNT(DISTINCT id) as total_orders,
-                COUNT(DISTINCT unified_customer_id) as total_customers,
-                SUM(total_price) as total_revenue,
-                AVG(total_price) as avg_order_value
-            FROM orders
+                COUNT(DISTINCT o.id) as total_orders,
+                COUNT(DISTINCT o.unified_customer_id) as total_customers,
+                SUM(o.total_price) as total_revenue,
+                AVG(o.total_price) as avg_order_value
+            FROM orders o
             {where_clause}
         """, params)
         

@@ -3,13 +3,17 @@
 Database Setup Script for MasterGroup Recommendation System
 
 This script handles complete database setup:
-1. Runs all Alembic migrations
-2. Populates order_items from orders JSON
-3. Rebuilds all recommendation tables
-4. Verifies setup is complete
+1. For FRESH databases: Runs initial schema SQL then migrations
+2. For EXISTING databases: Runs pending migrations only
+3. Populates order_items from orders JSON
+4. Rebuilds all recommendation tables
+5. Verifies setup is complete
 
 Usage:
-    python scripts/setup_database.py
+    python scripts/setup_database.py [--fresh]
+
+Options:
+    --fresh    Force fresh database setup (CAUTION: will recreate tables)
 
 Environment Variables Required:
     DATABASE_URL or individual PG_* variables
@@ -18,6 +22,7 @@ import os
 import sys
 import subprocess
 from pathlib import Path
+import argparse
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -222,18 +227,123 @@ def verify_setup(conn):
     return True
 
 
+def check_tables_exist(conn):
+    """Check if core tables already exist."""
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT COUNT(*) FROM information_schema.tables 
+            WHERE table_schema = 'public' AND table_name = 'orders'
+        """)
+        return cursor.fetchone()[0] > 0
+    except:
+        return False
+    finally:
+        cursor.close()
+
+
+def run_initial_schema(conn):
+    """Run initial schema SQL for fresh database."""
+    print("\n" + "=" * 60)
+    print("STEP 0: Creating Initial Schema (Fresh Database)")
+    print("=" * 60)
+    
+    sql_file = Path(__file__).parent.parent / 'sql' / 'legacy' / 'deploy_database.sql'
+    
+    if not sql_file.exists():
+        print(f"⚠️  Schema file not found: {sql_file}")
+        print("   Skipping initial schema - migrations will handle it")
+        return True
+    
+    print(f"📄 Running {sql_file.name}...")
+    
+    try:
+        with open(sql_file, 'r') as f:
+            sql = f.read()
+        
+        cursor = conn.cursor()
+        cursor.execute(sql)
+        conn.commit()
+        cursor.close()
+        print("✅ Initial schema created")
+        return True
+    except Exception as e:
+        print(f"⚠️  Schema creation error: {e}")
+        conn.rollback()
+        return True  # Continue anyway - migrations may still work
+
+
+def seed_admin_user(conn):
+    """Seed the admin user if not exists."""
+    print("\n" + "=" * 60)
+    print("STEP 5: Seeding Admin User")
+    print("=" * 60)
+    
+    cursor = conn.cursor()
+    
+    # Check if admin exists
+    cursor.execute("SELECT COUNT(*) FROM users WHERE email = 'admin@mastergroup.com'")
+    if cursor.fetchone()[0] > 0:
+        print("ℹ️  Admin user already exists")
+        cursor.close()
+        return True
+    
+    # Create admin user (password: MG@2024#Secure!Pass)
+    try:
+        cursor.execute("""
+            INSERT INTO users (email, password_hash, full_name, is_active) 
+            VALUES (
+                'admin@mastergroup.com',
+                '$2b$12$8ALlBQw1UrHePD2QyYRy0uGz/mMEOsay4HzCwvPjMt8nOmGlQ/8MO',
+                'Admin User',
+                true
+            )
+            ON CONFLICT (email) DO NOTHING
+        """)
+        conn.commit()
+        print("✅ Admin user created")
+    except Exception as e:
+        print(f"⚠️  Could not create admin user: {e}")
+    
+    cursor.close()
+    return True
+
+
 def main():
     """Main setup function."""
+    parser = argparse.ArgumentParser(description='MasterGroup Database Setup')
+    parser.add_argument('--fresh', action='store_true', 
+                       help='Force fresh database setup')
+    args = parser.parse_args()
+    
     print("=" * 60)
     print("MasterGroup Recommendation System - Database Setup")
     print("=" * 60)
+    
+    # Connect to database first to check state
+    try:
+        conn = connect_db()
+    except Exception as e:
+        print(f"\n❌ Cannot connect to database: {e}")
+        sys.exit(1)
+    
+    # Check if this is a fresh database
+    tables_exist = check_tables_exist(conn)
+    
+    if not tables_exist or args.fresh:
+        print("\n📦 Fresh database detected - running full setup...")
+        run_initial_schema(conn)
+    else:
+        print("\n📦 Existing database detected - running migrations only...")
+    
+    conn.close()
     
     # Step 1: Run migrations
     if not run_migrations():
         print("\n❌ Setup failed at migrations step")
         sys.exit(1)
     
-    # Connect to database for remaining steps
+    # Reconnect for remaining steps
     try:
         conn = connect_db()
     except Exception as e:
@@ -249,6 +359,9 @@ def main():
         
         # Step 4: Verify setup
         verify_setup(conn)
+        
+        # Step 5: Seed admin user
+        seed_admin_user(conn)
         
     finally:
         conn.close()

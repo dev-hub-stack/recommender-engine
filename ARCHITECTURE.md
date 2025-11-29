@@ -255,7 +255,7 @@ Use Cases:
 Status: ✅ Active - 4,182 products cached
 ```
 
-### 3. Item-Affinity (PENDING ⏳)
+### 3. Item-Affinity (REAL-TIME ONLY ⚠️)
 ```
 Purpose: "Which products INFLUENCE this user to buy?"
 Input: User ID
@@ -267,34 +267,56 @@ Use Cases:
 - Email win-back campaigns
 - High-value product promotion
 
-Status: ⏳ Endpoint ready, batch job pending
+Status: ⚠️ Real-time campaigns only (no batch support)
+        Requires ~$400/month for real-time inference
+        
+Alternative: Use similar-items + user-personalization for same effect
 ```
 
 ---
 
-## Item Affinity - How to Activate
+## Item Affinity - Activation Options
 
-### Step 1: Run Batch Inference
+### Option 1: Real-time Campaign (~$400/month)
 ```bash
+# Create a campaign (AWS Console or CLI)
+aws personalize create-campaign \
+  --name mastergroup-item-affinity-campaign \
+  --solution-version-arn arn:aws:personalize:us-east-1:657020414783:solution/mastergroup-item-affinity/0abd6fe3 \
+  --min-provisioned-tps 1
+
+# This enables real-time recommendations but costs ~$400/month
+```
+
+### Option 2: Use Existing Recipes (Recommended - FREE)
+Instead of item-affinity, combine existing batch recipes:
+```
+User-Personalization → "What should we recommend to this user?"
+Similar-Items → "What products are similar to what they're viewing?"
+
+Combined effect = Item Affinity behavior without extra cost
+```
+
+---
+
+## Scheduled Jobs (Automated)
+
+### Daily Batch Refresh (2 AM UTC)
+```bash
+# Cron job runs daily at 2 AM
+0 2 * * * /opt/mastergroup-api/run_daily_batch.sh
+
+# What it does:
+# 1. Creates batch inference jobs for user-personalization and similar-items
+# 2. Waits 1 hour for completion
+# 3. Loads results into PostgreSQL cache
+```
+
+### Manual Run
+```bash
+ssh ubuntu@44.201.11.243
 cd /opt/mastergroup-api
-python3 aws_personalize/run_batch_inference.py --recipe item-affinity
-```
-
-### Step 2: Wait for Job Completion (~30 min)
-```bash
-# Check status
-aws personalize describe-batch-inference-job \
-  --batch-inference-job-arn <arn>
-```
-
-### Step 3: Load Results
-```bash
-python3 aws_personalize/load_batch_results.py --recipe item-affinity
-```
-
-### Step 4: Use the API
-```bash
-curl "http://44.201.11.243:8001/api/v1/personalize/recommendations/item-affinity/03001234567_John?num_results=5"
+./run_daily_batch.sh
 ```
 
 ---

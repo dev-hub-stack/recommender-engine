@@ -310,7 +310,7 @@ def get_time_filter_clause(time_filter: str) -> tuple:
     """
     start_date = calculate_date_range(time_filter)
     if start_date:
-        return "WHERE order_date >= %s", (start_date,)
+        return "WHERE o.order_date >= %s", (start_date,)
     return "", ()
 
 

@@ -4,31 +4,14 @@ on:
   push:
     branches:
       - dev
-  pull_request:
-    branches:
-      - dev
-    types: [closed]
 
 jobs:
   deploy:
-    # Only run on push to dev or merged PR to dev
-    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.merged == true)
     runs-on: ubuntu-latest
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Run basic tests
-        run: |
-          pip install pytest
-          # Add tests here when available
-          echo "No tests configured yet"
 
       - name: Deploy to Lightsail
         uses: appleboy/ssh-action@v1.0.3
@@ -40,25 +23,35 @@ jobs:
             echo "🚀 Starting deployment..."
             cd /opt/mastergroup-api
             
-            # Backup current version
-            sudo cp -r src src.backup.$(date +%Y%m%d%H%M%S)
+            # Get current commit for backup reference
+            CURRENT_COMMIT=$(git rev-parse --short HEAD)
+            echo "Current: $CURRENT_COMMIT"
             
-            # Pull latest code
+            # Force pull latest code from dev
             git fetch origin dev
-            git checkout dev
-            git pull origin dev
+            git reset --hard origin/dev
+            
+            NEW_COMMIT=$(git rev-parse --short HEAD)
+            echo "Updated to: $NEW_COMMIT"
             
             # Restart the service
             sudo systemctl restart mastergroup-api
             
-            # Wait and check health
-            sleep 10
-            curl -f http://localhost:8001/health || exit 1
+            # Wait for service to start
+            sleep 5
             
-            echo "✅ Deployment successful!"
+            # Check if service is running
+            if systemctl is-active --quiet mastergroup-api; then
+              echo "✅ Service is running"
+            else
+              echo "❌ Service failed to start"
+              sudo journalctl -u mastergroup-api -n 20 --no-pager
+              exit 1
+            fi
+            
+            echo "✅ Deployment successful! ($CURRENT_COMMIT → $NEW_COMMIT)"
 
       - name: Notify on failure
         if: failure()
         run: |
-          echo "❌ Deployment failed!"
-          # Add Slack/Email notification here if needed
+          echo "❌ Deployment failed! Check the logs above."

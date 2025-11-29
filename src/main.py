@@ -1324,7 +1324,7 @@ async def get_analytics_rfm_segments(time_filter: str = Query("30days")):
 @app.get("/api/v1/analytics/customers/segment-details/{segment_name}")
 async def get_segment_details(
     segment_name: str,
-    time_filter: str = Query("30days"),
+    time_filter: str = Query("all"),  # Default to 'all' to include inactive customers
     limit: int = Query(20)
 ):
     """Get detailed customer list for a specific RFM segment"""
@@ -1335,17 +1335,17 @@ async def get_segment_details(
         
         where_clause, params = get_time_filter_clause(time_filter)
         
-        # Define segment criteria
+        # Define mutually exclusive segment criteria
         segment_criteria = {
             'Champions': "recency_days <= 30 AND frequency >= 5 AND monetary >= 50000",
-            'Loyal': "recency_days <= 60 AND frequency >= 3 AND monetary >= 20000",
-            'Loyal Customers': "recency_days <= 60 AND frequency >= 3 AND monetary >= 20000",
-            'Potential': "recency_days <= 90 AND frequency >= 2",
-            'Potential Loyalists': "recency_days <= 90 AND frequency >= 2",
+            'Loyal': "recency_days <= 60 AND frequency >= 3 AND monetary >= 20000 AND NOT (recency_days <= 30 AND frequency >= 5 AND monetary >= 50000)",
+            'Loyal Customers': "recency_days <= 60 AND frequency >= 3 AND monetary >= 20000 AND NOT (recency_days <= 30 AND frequency >= 5 AND monetary >= 50000)",
+            'Potential': "recency_days <= 90 AND frequency >= 2 AND NOT (recency_days <= 60 AND frequency >= 3 AND monetary >= 20000)",
+            'Potential Loyalists': "recency_days <= 90 AND frequency >= 2 AND NOT (recency_days <= 60 AND frequency >= 3 AND monetary >= 20000)",
             'New': "frequency = 1 AND recency_days <= 30",
             'New Customers': "frequency = 1 AND recency_days <= 30",
-            'At Risk': "recency_days > 90 AND frequency >= 2",
-            'Hibernating': "recency_days > 180",
+            'At Risk': "recency_days > 90 AND recency_days <= 180 AND frequency >= 2",
+            'Hibernating': "recency_days > 180 AND recency_days <= 365",
             'Lost': "recency_days > 365"
         }
         

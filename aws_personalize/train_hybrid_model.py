@@ -1,0 +1,226 @@
+"""
+AWS Personalize Hybrid Training Script (Cost-Optimized)
+
+This script implements the "Hybrid" strategy:
+1. Trains models (Solutions) for User Personalization & Similar Items
+2. Runs Batch Inference Jobs to generate recommendations for ALL users/items
+3. Saves results to S3 (which can then be loaded into PostgreSQL)
+4. AVOIDS creating real-time Campaigns to save ~$432/month
+
+Usage:
+    python aws_personalize/train_hybrid_model.py
+"""
+
+import boto3
+import json
+import time
+import os
+import csv
+from datetime import datetime
+
+# Configuration
+AWS_REGION = os.environ.get('AWS_REGION', 'us-east-1')
+S3_BUCKET = 'mastergroup-personalize-data'
+DATASET_GROUP_ARN = 'arn:aws:personalize:us-east-1:657020414783:dataset-group/mastergroup-recommendations'
+ROLE_ARN = 'arn:aws:iam::657020414783:role/PersonalizeRole'
+
+# Solution Configs - All 4 Recipes for Cost-Effective Batch Inference
+SOLUTIONS = {
+    'user_personalization': {
+        'name': 'mastergroup-user-personalization',
+        'recipe_arn': 'arn:aws:personalize:::recipe/aws-user-personalization',
+        'solution_arn': 'arn:aws:personalize:us-east-1:657020414783:solution/mastergroup-user-personalization',
+        'batch_input': 'batch/input/users.json',
+        'batch_output': 'batch/output/users/'
+    },
+    'similar_items': {
+        'name': 'mastergroup-similar-items',
+        'recipe_arn': 'arn:aws:personalize:::recipe/aws-similar-items',
+        'solution_arn': None,  # Will be created if missing
+        'batch_input': 'batch/input/items.json',
+        'batch_output': 'batch/output/items/'
+    },
+    'item_affinity': {
+        'name': 'mastergroup-item-affinity',
+        'recipe_arn': 'arn:aws:personalize:::recipe/aws-item-affinity',
+        'solution_arn': None,
+        'batch_input': 'batch/input/affinity.json',
+        'batch_output': 'batch/output/affinity/'
+    },
+    'personalized_ranking': {
+        'name': 'mastergroup-personalized-ranking',
+        'recipe_arn': 'arn:aws:personalize:::recipe/aws-personalized-ranking',
+        'solution_arn': None,
+        'batch_input': None,  # Ranking requires different input format (userId + itemIds)
+        'batch_output': 'batch/output/ranking/',
+        'skip_batch': True  # We'll use this on-demand via API, not batch
+    }
+}
+
+# Initialize clients
+personalize = boto3.client('personalize', region_name=AWS_REGION)
+s3 = boto3.client('s3', region_name=AWS_REGION)
+
+def create_solution(key, config):
+    """Create a solution if it doesn't exist"""
+    name = config['name']
+    try:
+        # Check if solution exists (by listing, simplified here by try/catch on create)
+        # Better to list first to avoid error noise
+        response = personalize.list_solutions(datasetGroupArn=DATASET_GROUP_ARN)
+        for sol in response.get('solutions', []):
+            if sol['name'] == name:
+                print(f"  ✅ Solution already exists: {name}")
+                return sol['solutionArn']
+        
+        # Create if not found
+        print(f"  Creating solution: {name}...")
+        response = personalize.create_solution(
+            name=name,
+            datasetGroupArn=DATASET_GROUP_ARN,
+            recipeArn=config['recipe_arn']
+        )
+        return response['solutionArn']
+    except Exception as e:
+        print(f"  ❌ Failed to create solution {name}: {e}")
+        return None
+
+def create_solution_version(solution_arn):
+    """Train the model (Create Solution Version)"""
+    try:
+        print(f"  Starting training for: {solution_arn.split('/')[-1]}...")
+        response = personalize.create_solution_version(
+            solutionArn=solution_arn,
+            trainingMode='FULL' # or UPDATE for incremental
+        )
+        return response['solutionVersionArn']
+    except Exception as e:
+        print(f"  ❌ Failed to start training: {e}")
+        return None
+
+def wait_for_version(version_arn):
+    """Wait for solution version to be ACTIVE"""
+    print(f"  ⏳ Waiting for training to complete: {version_arn.split('/')[-1]}...")
+    start = time.time()
+    while True:
+        resp = personalize.describe_solution_version(solutionVersionArn=version_arn)
+        status = resp['solutionVersion']['status']
+        
+        if status == 'ACTIVE':
+            print("  ✅ Training complete!")
+            return True
+        elif status == 'CREATE FAILED':
+            print(f"  ❌ Training failed: {resp['solutionVersion'].get('failureReason')}")
+            return False
+            
+        if time.time() - start > 7200: # 2 hours timeout
+            print("  ⚠️ Timeout waiting for training")
+            return False
+            
+        print(f"    Status: {status}...")
+        time.sleep(60)
+
+def create_batch_input_file(item_type='users'):
+    """Create input JSON file for batch inference"""
+    # This function needs to query DB to get all user IDs or item IDs
+    # For now, we'll assume the files are generated by another process or we download from S3
+    # But to keep this script self-contained, we should generate a simple input file
+    
+    # Placeholder: In production, you'd query your DB for all UserIDs
+    print(f"  ⚠️ Note: Ensure 'batch/input/{item_type}.json' exists in S3 bucket")
+    return f"s3://{S3_BUCKET}/batch/input/{item_type}.json"
+
+def run_batch_inference(solution_version_arn, job_name, input_path, output_path):
+    """Run a batch inference job"""
+    try:
+        print(f"  Starting batch inference job: {job_name}...")
+        response = personalize.create_batch_inference_job(
+            jobName=job_name,
+            solutionVersionArn=solution_version_arn,
+            jobInput={'s3DataSource': {'path': input_path}},
+            jobOutput={'s3DataDestination': {'path': output_path}},
+            roleArn=ROLE_ARN
+        )
+        return response['batchInferenceJobArn']
+    except Exception as e:
+        print(f"  ❌ Failed to start batch job: {e}")
+        return None
+
+def main():
+    print("="*60)
+    print("AWS PERSONALIZE HYBRID TRAINING (COST SAVING)")
+    print("="*60)
+    
+    # 1. Ensure Solutions Exist
+    print("\nSTEP 1: Checking Solutions...")
+    for key, config in SOLUTIONS.items():
+        arn = create_solution(key, config)
+        if arn:
+            SOLUTIONS[key]['solution_arn'] = arn
+            
+    # 2. Train Models (Create Versions)
+    print("\nSTEP 2: Training Models...")
+    versions = {}
+    for key, config in SOLUTIONS.items():
+        if config['solution_arn']:
+            ver_arn = create_solution_version(config['solution_arn'])
+            if ver_arn:
+                versions[key] = ver_arn
+                
+    if not versions:
+        print("No models to train. Exiting.")
+        return
+
+    # 3. Wait for Training (Optional - can run async)
+    print("\nSTEP 3: Waiting for Training (this takes ~30-60 mins)...")
+    # In a real automated pipeline, you might trigger this via EventBridge
+    # For this script, we'll wait
+    active_versions = {}
+    for key, ver_arn in versions.items():
+        if wait_for_version(ver_arn):
+            active_versions[key] = ver_arn
+            
+    # 4. Run Batch Inference for All Recipes
+    print("\nSTEP 4: Running Batch Inference Jobs...")
+    timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+    batch_jobs = {}
+    
+    for key, ver_arn in active_versions.items():
+        config = SOLUTIONS[key]
+        
+        # Skip if batch is disabled (e.g., personalized-ranking)
+        if config.get('skip_batch', False):
+            print(f"  ⏭️  Skipping batch for {key} (on-demand recipe)")
+            continue
+            
+        if not config.get('batch_input'):
+            print(f"  ⚠️  No batch input configured for {key}")
+            continue
+        
+        job_name = f"batch-{key}-{timestamp}"
+        input_path = f"s3://{S3_BUCKET}/{config['batch_input']}"
+        output_path = f"s3://{S3_BUCKET}/{config['batch_output']}"
+        
+        job_arn = run_batch_inference(ver_arn, job_name, input_path, output_path)
+        if job_arn:
+            batch_jobs[key] = {
+                'job_name': job_name,
+                'job_arn': job_arn,
+                'output_path': output_path
+            }
+
+    print("\n" + "="*60)
+    print("✅ BATCH INFERENCE JOBS SUBMITTED!")
+    print("="*60)
+    print(f"Total jobs: {len(batch_jobs)}")
+    for key, job in batch_jobs.items():
+        print(f"  - {key}: {job['job_name']}")
+    print("\n📊 Monitor progress in AWS Console or check job status via AWS CLI.")
+    print("⏱️  Batch jobs typically take 2-4 hours to complete.")
+    print("\n🔄 Next Steps:")
+    print("  1. Wait for batch jobs to complete")
+    print("  2. Run load_batch_results.py to import results to PostgreSQL")
+    print("  3. Update backend API to serve from offline tables")
+
+if __name__ == "__main__":
+    main()

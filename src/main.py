@@ -2501,29 +2501,21 @@ async def get_ml_product_pairs(
     Returns REAL product pairs bought together with confidence scores
     """
     try:
-        # Call analytics endpoint (which we already fixed)
-        pairs = await get_analytics_collaborative_pairs(time_filter, limit)
+        # Call analytics endpoint (returns {pairs: [...]})
+        response = await get_analytics_collaborative_pairs(time_filter, limit)
+        pairs = response.get("pairs", [])
         
-        # Transform to format frontend expects
-        formatted_pairs = []
+        # Add algorithm field to each pair
         for pair in pairs:
-            formatted_pairs.append({
-                'product_a_id': pair['productAId'],
-                'product_a_name': pair['productAName'],
-                'product_b_id': pair['productBId'],
-                'product_b_name': pair['productBName'],
-                'co_recommendation_count': pair['coPurchaseCount'],
-                'combined_revenue': pair['combinedRevenue'],
-                'confidence_score': pair['confidenceScore'],
-                'algorithm': 'sql_collaborative'
-            })
+            pair['algorithm'] = 'sql_collaborative'
+            pair['confidence_score'] = pair.get('co_recommendation_count', 0) / 100  # Normalize
         
         return {
             "success": True,
-            "pairs": formatted_pairs,
+            "pairs": pairs,
             "algorithm": "sql_collaborative",
             "time_filter": time_filter,
-            "total_count": len(formatted_pairs)
+            "total_count": len(pairs)
         }
         
     except Exception as e:

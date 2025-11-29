@@ -272,8 +272,8 @@ def main():
     try:
         # Load result types
         # Use correct prefixes based on your S3 folder structure
-        load_user_recommendations('batch-inference-output/user-personalization/')
-        load_similar_items('batch-inference-output/similar-items/')
+        load_user_recommendations('batch/output/users/')
+        load_similar_items('batch/output/items/')
         # load_item_affinity() # Uncomment if you have this solution running
         
         # Show final stats

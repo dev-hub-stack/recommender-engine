@@ -1517,7 +1517,7 @@ async def get_analytics_collaborative_products(
             SELECT 
                 oi.product_id,
                 MAX(oi.product_name) as product_name,
-                MAX(COALESCE(oi.category, 'General')) as category,
+                'General' as category,
                 COUNT(DISTINCT o.unified_customer_id) as customer_count,
                 COUNT(DISTINCT o.id) as recommendation_count,
                 SUM(oi.total_price) as total_revenue,
@@ -1687,21 +1687,29 @@ async def get_analytics_customer_similarity(
                     AND cp1.unified_customer_id != cp2.unified_customer_id
                 GROUP BY cp1.unified_customer_id
             ),
-            top_products AS (
+            product_sharing AS (
                 SELECT 
                     cp1.unified_customer_id,
-                    JSON_AGG(
-                        JSON_BUILD_OBJECT(
-                            'product_name', cp1.product_name,
-                            'shared_count', COUNT(DISTINCT cp2.unified_customer_id)
-                        )
-                        ORDER BY COUNT(DISTINCT cp2.unified_customer_id) DESC
-                    ) FILTER (WHERE cp2.unified_customer_id IS NOT NULL) as top_shared_products
+                    cp1.product_name,
+                    COUNT(DISTINCT cp2.unified_customer_id) as shared_count
                 FROM customer_products cp1
                 LEFT JOIN customer_products cp2 
                     ON cp1.product_id = cp2.product_id 
                     AND cp1.unified_customer_id != cp2.unified_customer_id
-                GROUP BY cp1.unified_customer_id
+                GROUP BY cp1.unified_customer_id, cp1.product_name, cp1.product_id
+            ),
+            top_products AS (
+                SELECT 
+                    unified_customer_id,
+                    JSON_AGG(
+                        JSON_BUILD_OBJECT(
+                            'product_name', product_name,
+                            'shared_count', shared_count
+                        )
+                        ORDER BY shared_count DESC
+                    ) FILTER (WHERE shared_count > 0) as top_shared_products
+                FROM product_sharing
+                GROUP BY unified_customer_id
             )
             SELECT 
                 cs.unified_customer_id as customer_id,

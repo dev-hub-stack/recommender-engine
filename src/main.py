@@ -1095,18 +1095,18 @@ async def get_revenue_trend(
         where_clause, params = get_time_filter_clause(time_filter)
         
         if period == "daily":
-            group_by = "DATE(order_date)"
+            group_by = "DATE(o.order_date)"
         elif period == "weekly":
-            group_by = "DATE_TRUNC('week', order_date)"
+            group_by = "DATE_TRUNC('week', o.order_date)"
         else:
-            group_by = "DATE_TRUNC('month', order_date)"
+            group_by = "DATE_TRUNC('month', o.order_date)"
         
         cursor.execute(f"""
             SELECT 
                 {group_by} as date,
-                SUM(total_price) as revenue,
-                COUNT(DISTINCT id) as orders
-            FROM orders
+                SUM(o.total_price) as revenue,
+                COUNT(DISTINCT o.id) as orders
+            FROM orders o
             {where_clause}
             GROUP BY {group_by}
             ORDER BY date DESC

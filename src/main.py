@@ -1406,7 +1406,7 @@ async def get_brand_performance(
 
 @app.get("/api/v1/analytics/collaborative-metrics")
 async def get_collaborative_metrics(time_filter: str = Query("30days")):
-    """Get collaborative filtering metrics"""
+    """Get collaborative filtering metrics - REAL DATA ONLY"""
     conn = None
     try:
         conn = psycopg2.connect(**get_pg_connection_params())
@@ -1414,27 +1414,81 @@ async def get_collaborative_metrics(time_filter: str = Query("30days")):
         
         where_clause, params = get_time_filter_clause(time_filter)
         
+        # Calculate REAL collaborative metrics from purchase data
         cursor.execute(f"""
+            WITH customer_products AS (
+                SELECT 
+                    o.unified_customer_id,
+                    oi.product_id,
+                    COUNT(*) as purchase_count
+                FROM orders o
+                JOIN order_items oi ON o.id = oi.order_id
+                {where_clause}
+                GROUP BY o.unified_customer_id, oi.product_id
+            ),
+            customer_pairs AS (
+                -- Find customers who bought same products (collaborative signal)
+                SELECT DISTINCT
+                    cp1.unified_customer_id as customer1,
+                    cp2.unified_customer_id as customer2,
+                    COUNT(DISTINCT cp1.product_id) as shared_products
+                FROM customer_products cp1
+                JOIN customer_products cp2 
+                    ON cp1.product_id = cp2.product_id 
+                    AND cp1.unified_customer_id < cp2.unified_customer_id
+                GROUP BY cp1.unified_customer_id, cp2.unified_customer_id
+                HAVING COUNT(DISTINCT cp1.product_id) >= 2
+            ),
+            stats AS (
+                SELECT 
+                    COUNT(DISTINCT cp.unified_customer_id) as total_users,
+                    COUNT(DISTINCT cp.product_id) as total_products,
+                    SUM(cp.purchase_count) as total_purchases,
+                    COUNT(*) as total_user_product_combinations
+                FROM customer_products cp
+            ),
+            pair_stats AS (
+                SELECT 
+                    COUNT(*) as total_pairs,
+                    AVG(shared_products) as avg_shared_products
+                FROM customer_pairs
+            )
             SELECT 
-                COUNT(DISTINCT unified_customer_id) as total_users,
-                COUNT(DISTINCT oi.product_id) as total_products,
-                COUNT(*) as total_interactions
-            FROM orders o
-            JOIN order_items oi ON o.id = oi.order_id
-            {where_clause}
+                s.total_users,
+                s.total_products,
+                s.total_purchases,
+                s.total_user_product_combinations,
+                COALESCE(ps.total_pairs, 0) as active_customer_pairs,
+                COALESCE(ps.avg_shared_products, 0) as avg_shared_products
+            FROM stats s
+            CROSS JOIN pair_stats ps
         """, params)
         
         result = cursor.fetchone()
         
-        # Return in format expected by frontend
+        # Calculate REAL metrics
+        total_users = result['total_users'] or 0
+        total_products = result['total_products'] or 0
+        active_pairs = result['active_customer_pairs'] or 0
+        avg_shared = result['avg_shared_products'] or 0
+        
+        # Similarity score: how many products on average do customer pairs share
+        # Normalized to 0-1 scale (assuming max 10 shared products is "perfect")
+        similarity_score = min(avg_shared / 10.0, 1.0) if avg_shared > 0 else 0.0
+        
+        # Recommendation potential: percentage of possible customer pairs that share products
+        max_possible_pairs = (total_users * (total_users - 1)) / 2 if total_users > 1 else 1
+        recommendation_coverage = min(active_pairs / max_possible_pairs, 1.0) if max_possible_pairs > 0 else 0.0
+        
+        # Return REAL metrics
         return {
-            "total_recommendations": result['total_interactions'] or 0,
-            "avg_similarity_score": 0.85,
-            "active_customer_pairs": result['total_users'] or 0,
-            "algorithm_accuracy": 0.85,
-            "total_users": result['total_users'] or 0,
-            "total_products": result['total_products'] or 0,
-            "coverage": 0.72,
+            "total_recommendations": result['total_user_product_combinations'] or 0,
+            "avg_similarity_score": round(similarity_score, 3),
+            "active_customer_pairs": active_pairs,
+            "algorithm_accuracy": round(recommendation_coverage, 3),
+            "total_users": total_users,
+            "total_products": total_products,
+            "coverage": round(recommendation_coverage, 3),
             "time_filter": time_filter
         }
     except Exception as e:
@@ -1450,7 +1504,7 @@ async def get_analytics_collaborative_products(
     time_filter: str = Query("30days"),
     limit: int = Query(10)
 ):
-    """Get top collaborative products"""
+    """Get top collaborative products with REAL recommendation metrics"""
     conn = None
     try:
         conn = psycopg2.connect(**get_pg_connection_params())
@@ -1458,17 +1512,45 @@ async def get_analytics_collaborative_products(
         
         where_clause, params = get_time_filter_clause(time_filter)
         
+        # Calculate actual collaborative recommendation potential
         cursor.execute(f"""
+            WITH product_customers AS (
+                SELECT 
+                    oi.product_id,
+                    MAX(oi.product_name) as product_name,
+                    MAX(oi.category) as category,
+                    COUNT(DISTINCT o.unified_customer_id) as customer_count,
+                    COUNT(DISTINCT o.id) as order_count,
+                    SUM(oi.total_price) as total_revenue
+                FROM order_items oi
+                JOIN orders o ON oi.order_id = o.id
+                {where_clause}
+                GROUP BY oi.product_id
+            ),
+            product_pairs AS (
+                -- Find how often products appear together in orders
+                SELECT 
+                    oi1.product_id,
+                    COUNT(DISTINCT oi2.product_id) as co_purchased_products,
+                    AVG(CASE WHEN oi2.product_id != oi1.product_id THEN 1.0 ELSE 0.0 END) as collaboration_score
+                FROM order_items oi1
+                JOIN orders o ON oi1.order_id = o.id
+                JOIN order_items oi2 ON o.id = oi2.order_id
+                {where_clause}
+                GROUP BY oi1.product_id
+            )
             SELECT 
-                oi.product_id,
-                MAX(oi.product_name) as product_name,
-                COUNT(DISTINCT o.unified_customer_id) as customer_count,
-                SUM(oi.total_price) as total_revenue
-            FROM order_items oi
-            JOIN orders o ON oi.order_id = o.id
-            {where_clause}
-            GROUP BY oi.product_id
-            ORDER BY customer_count DESC
+                pc.product_id,
+                pc.product_name,
+                pc.category,
+                pc.customer_count,
+                pc.order_count as recommendation_count,
+                pc.total_revenue,
+                COALESCE(pp.co_purchased_products, 0) as co_purchased_products,
+                COALESCE(pp.collaboration_score, 0) as avg_similarity_score
+            FROM product_customers pc
+            LEFT JOIN product_pairs pp ON pc.product_id = pp.product_id
+            ORDER BY pc.customer_count DESC, pc.order_count DESC
             LIMIT %s
         """, params + (limit,))
         
@@ -1477,7 +1559,9 @@ async def get_analytics_collaborative_products(
         return [{
             "productId": r['product_id'],
             "productName": r['product_name'],
-            "customerCount": r['customer_count'],
+            "category": r['category'] or 'Uncategorized',
+            "recommendationCount": r['recommendation_count'] or 0,
+            "avgSimilarityScore": round(float(r['avg_similarity_score'] or 0), 3),
             "totalRevenue": float(r['total_revenue'] or 0)
         } for r in results]
     except Exception as e:
@@ -1493,7 +1577,7 @@ async def get_analytics_collaborative_pairs(
     time_filter: str = Query("30days"),
     limit: int = Query(10)
 ):
-    """Get product pairs frequently bought together"""
+    """Get product pairs frequently bought together with confidence score"""
     conn = None
     try:
         conn = psycopg2.connect(**get_pg_connection_params())
@@ -1501,19 +1585,43 @@ async def get_analytics_collaborative_pairs(
         
         where_clause, params = get_time_filter_clause(time_filter)
         
+        # Calculate co-purchase confidence score
         cursor.execute(f"""
+            WITH product_pairs AS (
+                SELECT 
+                    oi1.product_id as product_a_id,
+                    MAX(oi1.product_name) as product_a_name,
+                    oi2.product_id as product_b_id,
+                    MAX(oi2.product_name) as product_b_name,
+                    COUNT(DISTINCT oi1.order_id) as co_purchase_count,
+                    SUM(oi1.total_price + oi2.total_price) as combined_revenue
+                FROM order_items oi1
+                JOIN order_items oi2 ON oi1.order_id = oi2.order_id AND oi1.product_id < oi2.product_id
+                JOIN orders o ON oi1.order_id = o.id
+                {where_clause}
+                GROUP BY oi1.product_id, oi2.product_id
+            ),
+            product_totals AS (
+                SELECT 
+                    oi.product_id,
+                    COUNT(DISTINCT oi.order_id) as total_orders
+                FROM order_items oi
+                JOIN orders o ON oi.order_id = o.id
+                {where_clause}
+                GROUP BY oi.product_id
+            )
             SELECT 
-                oi1.product_id as product_a_id,
-                MAX(oi1.product_name) as product_a_name,
-                oi2.product_id as product_b_id,
-                MAX(oi2.product_name) as product_b_name,
-                COUNT(*) as co_purchase_count
-            FROM order_items oi1
-            JOIN order_items oi2 ON oi1.order_id = oi2.order_id AND oi1.product_id < oi2.product_id
-            JOIN orders o ON oi1.order_id = o.id
-            {where_clause}
-            GROUP BY oi1.product_id, oi2.product_id
-            ORDER BY co_purchase_count DESC
+                pp.product_a_id,
+                pp.product_a_name,
+                pp.product_b_id,
+                pp.product_b_name,
+                pp.co_purchase_count,
+                pp.combined_revenue,
+                ROUND(pp.co_purchase_count::numeric / LEAST(pt1.total_orders, pt2.total_orders)::numeric, 3) as confidence_score
+            FROM product_pairs pp
+            LEFT JOIN product_totals pt1 ON pp.product_a_id = pt1.product_id
+            LEFT JOIN product_totals pt2 ON pp.product_b_id = pt2.product_id
+            ORDER BY pp.co_purchase_count DESC
             LIMIT %s
         """, params + (limit,))
         
@@ -1524,7 +1632,9 @@ async def get_analytics_collaborative_pairs(
             "productAName": r['product_a_name'],
             "productBId": r['product_b_id'],
             "productBName": r['product_b_name'],
-            "coPurchaseCount": r['co_purchase_count']
+            "coPurchaseCount": r['co_purchase_count'],
+            "confidenceScore": float(r['confidence_score'] or 0),
+            "combinedRevenue": float(r['combined_revenue'] or 0)
         } for r in results]
     except Exception as e:
         logger.error(f"Collaborative pairs error: {e}")
@@ -1539,7 +1649,7 @@ async def get_analytics_customer_similarity(
     time_filter: str = Query("30days"),
     limit: int = Query(10)
 ):
-    """Get customer similarity data"""
+    """Get customer similarity data with REAL collaborative metrics"""
     conn = None
     try:
         conn = psycopg2.connect(**get_pg_connection_params())
@@ -1547,19 +1657,51 @@ async def get_analytics_customer_similarity(
         
         where_clause, params = get_time_filter_clause(time_filter)
         
+        # Calculate actual similar customers based on shared products
         cursor.execute(f"""
+            WITH customer_products AS (
+                SELECT 
+                    o.unified_customer_id,
+                    o.customer_name,
+                    oi.product_id,
+                    COUNT(*) as purchase_count
+                FROM orders o
+                JOIN order_items oi ON o.id = oi.order_id
+                {where_clause}
+                GROUP BY o.unified_customer_id, o.customer_name, oi.product_id
+            ),
+            customer_stats AS (
+                SELECT 
+                    cp.unified_customer_id,
+                    MAX(cp.customer_name) as customer_name,
+                    COUNT(DISTINCT cp.product_id) as unique_products,
+                    SUM(cp.purchase_count) as total_purchases
+                FROM customer_products cp
+                GROUP BY cp.unified_customer_id
+            ),
+            similar_customers AS (
+                SELECT 
+                    cp1.unified_customer_id,
+                    COUNT(DISTINCT cp2.unified_customer_id) as similar_customers_count,
+                    COUNT(DISTINCT CASE WHEN cp1.product_id = cp2.product_id 
+                                   THEN cp2.unified_customer_id END) as potential_recommendations
+                FROM customer_products cp1
+                LEFT JOIN customer_products cp2 
+                    ON cp1.product_id = cp2.product_id 
+                    AND cp1.unified_customer_id != cp2.unified_customer_id
+                GROUP BY cp1.unified_customer_id
+            )
             SELECT 
-                o.unified_customer_id as customer_id,
-                MAX(o.customer_name) as customer_name,
-                COUNT(DISTINCT o.id) as total_orders,
-                COUNT(DISTINCT oi.product_id) as unique_products,
-                SUM(oi.total_price) as total_spent
-            FROM orders o
-            JOIN order_items oi ON o.id = oi.order_id
-            {where_clause}
-            GROUP BY o.unified_customer_id
-            HAVING COUNT(DISTINCT oi.product_id) >= 3
-            ORDER BY total_spent DESC
+                cs.unified_customer_id as customer_id,
+                cs.customer_name,
+                cs.unique_products,
+                cs.total_purchases,
+                COALESCE(sc.similar_customers_count, 0) as similar_customers_count,
+                COALESCE(sc.potential_recommendations, 0) as actual_recommendations
+            FROM customer_stats cs
+            LEFT JOIN similar_customers sc ON cs.unified_customer_id = sc.unified_customer_id
+            WHERE cs.unique_products >= 2
+            ORDER BY sc.similar_customers_count DESC, cs.total_purchases DESC
             LIMIT %s
         """, params + (limit,))
         
@@ -1568,9 +1710,9 @@ async def get_analytics_customer_similarity(
         return [{
             "customerId": r['customer_id'],
             "customerName": r['customer_name'],
-            "totalOrders": r['total_orders'],
-            "uniqueProducts": r['unique_products'],
-            "totalSpent": float(r['total_spent'] or 0)
+            "similarCustomersCount": r['similar_customers_count'] or 0,
+            "actualRecommendations": r['actual_recommendations'] or 0,
+            "recommendationsGenerated": r['actual_recommendations'] or 0  # Compatibility field
         } for r in results]
     except Exception as e:
         logger.error(f"Customer similarity error: {e}")
@@ -2668,7 +2810,8 @@ async def get_ml_rfm_segments(
                     unified_customer_id as customer_id,
                     EXTRACT(days FROM NOW() - MAX(order_date)) as recency_days,
                     COUNT(DISTINCT id) as frequency,
-                    SUM(total_price) as monetary_value
+                    SUM(total_price) as monetary_value,
+                    SUM(total_price) / NULLIF(COUNT(DISTINCT id), 0) as avg_order_value
                 FROM orders
                 {where_clause}
                 GROUP BY unified_customer_id
@@ -2679,7 +2822,8 @@ async def get_ml_rfm_segments(
                 SUM(monetary_value) as total_revenue,
                 AVG(monetary_value) as avg_customer_value,
                 AVG(frequency) as avg_orders_per_customer,
-                AVG(recency_days) as avg_recency_days
+                AVG(recency_days) as avg_recency_days,
+                AVG(avg_order_value) as avg_order_value
             FROM customer_rfm
             WHERE recency_days <= 30 AND frequency >= 5 AND monetary_value >= 50000
             UNION ALL
@@ -2689,7 +2833,8 @@ async def get_ml_rfm_segments(
                 SUM(monetary_value) as total_revenue,
                 AVG(monetary_value) as avg_customer_value,
                 AVG(frequency) as avg_orders_per_customer,
-                AVG(recency_days) as avg_recency_days
+                AVG(recency_days) as avg_recency_days,
+                AVG(avg_order_value) as avg_order_value
             FROM customer_rfm
             WHERE recency_days <= 60 AND frequency >= 3 AND monetary_value >= 30000
             UNION ALL
@@ -2699,7 +2844,8 @@ async def get_ml_rfm_segments(
                 SUM(monetary_value) as total_revenue,
                 AVG(monetary_value) as avg_customer_value,
                 AVG(frequency) as avg_orders_per_customer,
-                AVG(recency_days) as avg_recency_days
+                AVG(recency_days) as avg_recency_days,
+                AVG(avg_order_value) as avg_order_value
             FROM customer_rfm
             WHERE recency_days > 90 AND frequency >= 3 AND monetary_value >= 20000
             UNION ALL
@@ -2709,7 +2855,8 @@ async def get_ml_rfm_segments(
                 SUM(monetary_value) as total_revenue,
                 AVG(monetary_value) as avg_customer_value,
                 AVG(frequency) as avg_orders_per_customer,
-                AVG(recency_days) as avg_recency_days
+                AVG(recency_days) as avg_recency_days,
+                AVG(avg_order_value) as avg_order_value
             FROM customer_rfm
             WHERE recency_days > 180
             UNION ALL
@@ -2719,7 +2866,8 @@ async def get_ml_rfm_segments(
                 SUM(monetary_value) as total_revenue,
                 AVG(monetary_value) as avg_customer_value,
                 AVG(frequency) as avg_orders_per_customer,
-                AVG(recency_days) as avg_recency_days
+                AVG(recency_days) as avg_recency_days,
+                AVG(avg_order_value) as avg_order_value
             FROM customer_rfm
             WHERE frequency = 1 AND recency_days <= 30
         """)
@@ -2740,8 +2888,9 @@ async def get_ml_rfm_segments(
                     'customer_count': seg['customer_count'],
                     'total_revenue': float(seg['total_revenue'] or 0),
                     'avg_customer_value': float(seg['avg_customer_value'] or 0),
+                    'avg_order_value': float(seg['avg_order_value'] or 0),
                     'avg_orders_per_customer': float(seg['avg_orders_per_customer'] or 0),
-                    'avg_recency_days': float(seg['avg_recency_days'] or 0),
+                    'avg_days_since_last_order': float(seg['avg_recency_days'] or 0),
                     'percentage': round((seg['customer_count'] / total_customers * 100) if total_customers > 0 else 0, 2),
                     'ml_predicted_ltv': float(seg['avg_customer_value'] or 0) * 1.5,  # ML LTV prediction
                     'churn_risk': 'high' if seg['avg_recency_days'] > 180 else 'low'

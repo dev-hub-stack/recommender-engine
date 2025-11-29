@@ -303,14 +303,18 @@ def calculate_date_range(time_filter: str) -> datetime:
     return None
 
 
-def get_time_filter_clause(time_filter: str) -> tuple:
+def get_time_filter_clause(time_filter: str, table_alias: str = "o") -> tuple:
     """
     Get SQL WHERE clause and params for time filtering.
     Returns (where_clause, params_tuple)
+    
+    Args:
+        time_filter: Time period filter
+        table_alias: Table alias to use (default 'o' for orders table)
     """
     start_date = calculate_date_range(time_filter)
     if start_date:
-        return "WHERE o.order_date >= %s", (start_date,)
+        return f"WHERE {table_alias}.order_date >= %s", (start_date,)
     return "", ()
 
 

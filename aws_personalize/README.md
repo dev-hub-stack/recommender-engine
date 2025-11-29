@@ -27,8 +27,8 @@
 
 **MasterGroup's Current Scale:**
 - **Interactions:** 1,971,527 orders
-- **Users:** 180,484 customers
-- **Products:** 4,182 items
+- **Users:** 180,484 customers (Recommendations Loaded ✅)
+- **Products:** 4,182 items (Similarity Loaded ✅)
 
 **Monthly Cost Breakdown:**
 - **Training:** $0.50/month (monthly retraining)
@@ -61,17 +61,19 @@
     ↓
     Batch Inference: 2-4 hours for 180K users
     ↓
-    S3 Output Files → load_batch_results.py
+    S3 Output Files → load_batch_results.py (Optimized)
     ↓
     PostgreSQL Cache Tables:
-      • offline_user_recommendations (180K records)
-      • offline_similar_items (4K records)
-      • offline_item_affinity (180K records)
+      • offline_user_recommendations (180,483 records)
+      • offline_similar_items (4,182 records)
+      • offline_item_affinity (0 records - Optional)
 
 [Real-time] API Serving ⚡
     Backend API → PostgreSQL Cache → <10ms response
     ↓
     Frontend Dashboard (Netlify)
+    ↓
+    Shopify Store (Checkout/Cart)
 ```
 
 ### **Key Components**
@@ -84,12 +86,27 @@
 | **PostgreSQL Cache** | ✅ Active | Always | Fast recommendation serving |
 | **Backend API** | ✅ Running | 24/7 | Serve recommendations |
 | **Custom ML (Auto-Pilot)** | 🚫 Disabled | None | Replaced by AWS Personalize |
+| **Lightsail Server** | ✅ Active | 24/7 | 2GB Swap Added for Stability |
 
 ### **3 Active Recipes**
 
 1. **User Personalization** - Personalized product recommendations per user
 2. **Similar Items** - Product-to-product similarity for cross-selling
 3. **Item Affinity** - User interest scores for categories/products
+
+---
+
+## 🛒 Shopify Integration (Real-Time)
+
+The system is ready for Shopify integration. Since recommendations are cached in PostgreSQL, API response times are extremely fast (<10ms), making it perfect for checkout pages.
+
+### **Available Endpoints**
+
+| Page | Use Case | Endpoint |
+|------|----------|----------|
+| **Checkout** | "Recommended for You" | `GET /api/v1/personalize/recommendations/user/{user_id}` |
+| **Product Page** | "Similar Products" | `GET /api/v1/personalize/recommendations/similar/{product_id}` |
+| **Cart** | "Frequently Bought Together" | `GET /api/v1/analytics/collaborative-pairs` |
 
 ---
 
@@ -111,7 +128,8 @@ The system is deployed on Lightsail at: `44.201.11.243:8001`
 - ✅ Database tables created
 - ✅ Auto-sync enabled (daily 2 AM)
 - ✅ AWS Personalize solutions created
-- ✅ Batch training running (check status below)
+- ✅ Batch training completed
+- ✅ Data loaded into PostgreSQL (180K+ records)
 - ✅ Backend API serving recommendations
 
 **Check Current Status:**

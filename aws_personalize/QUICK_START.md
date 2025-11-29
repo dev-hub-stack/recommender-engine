@@ -15,7 +15,8 @@
 ✅ Database tables created  
 ✅ Auto-sync enabled (daily at 2 AM UTC)  
 ✅ AWS Personalize solutions created  
-✅ Batch training running (check status below)  
+✅ Batch training completed  
+✅ **Batch results LOADED (180,483 users)**  
 ✅ Backend API serving recommendations  
 ✅ Frontend dashboard live  
 
@@ -32,11 +33,22 @@ ssh -i your-key.pem ubuntu@44.201.11.243
 tail -f /opt/mastergroup-api/aws_personalize/training.log
 
 # Check recommendation counts
-psql -h <rds-host> -U postgres -d mastergroup_recommendations -c "
+psql -h ls-49a54a36b814758103dcc97a4c41b7f8bd563888.cijig8im8oxl.us-east-1.rds.amazonaws.com -U dbmasteruser -d mastergroup_recommendations -c "
   SELECT 
     (SELECT COUNT(*) FROM offline_user_recommendations) as users,
     (SELECT COUNT(*) FROM offline_similar_items) as products;"
 ```
+
+---
+
+## 🛒 Shopify Integration (Ready!)
+
+You can now integrate these recommendations into your store. The API is serving live data.
+
+| Page | Endpoint |
+|------|----------|
+| **Checkout** | `/api/v1/personalize/recommendations/user/{id}` |
+| **Product** | `/api/v1/personalize/recommendations/similar/{id}` |
 
 ---
 

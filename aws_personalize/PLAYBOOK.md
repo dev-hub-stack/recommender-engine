@@ -20,10 +20,10 @@
 |-----------|--------|---------|
 | **Data Sync** | ✅ **ACTIVE** | Daily at 2 AM UTC (Shopify → PostgreSQL) |
 | **AWS Personalize Batch** | ✅ **ACTIVE** | Monthly on 1st (Training + Inference) |
-| **PostgreSQL Cache** | ✅ **ACTIVE** | 180K+ user recommendations, 4K+ product similarities |
+| **PostgreSQL Cache** | ✅ **ACTIVE** | 180,483 user recommendations, 4,182 product similarities |
 | **Backend API** | ✅ **RUNNING** | Serving from cache (<10ms response) |
 | **Frontend Dashboard** | ✅ **LIVE** | master-dashboard.netlify.app |
-| **Auto-Pilot ML Training** | 🚫 **DISABLED** | Replaced by AWS Personalize |
+| **Server Memory** | ✅ **OPTIMIZED** | 2GB Swap Added, Loader optimized for <1GB RAM |
 
 ### **Quick Health Check:**
 
@@ -31,13 +31,12 @@
 # API Health
 curl http://44.201.11.243:8001/health
 
-# Check batch training status
-ssh -i your-key.pem ubuntu@44.201.11.243
-tail -f /opt/mastergroup-api/aws_personalize/training.log
+# Check database records
+psql -h ls-49a54a36b814758103dcc97a4c41b7f8bd563888.cijig8im8oxl.us-east-1.rds.amazonaws.com -U dbmasteruser -d mastergroup_recommendations -c "SELECT COUNT(*) FROM offline_user_recommendations;"
 ```
 
 ### **Key Metrics:**
-- **Users with Recommendations**: 180,484
+- **Users with Recommendations**: 180,483
 - **Products with Similarity**: 4,182
 - **API Response Time**: <10ms
 - **Monthly Cost**: $7.50
@@ -49,7 +48,8 @@ tail -f /opt/mastergroup-api/aws_personalize/training.log
 ## Table of Contents
 1. [Overview](#overview)
 2. [Prerequisites](#prerequisites)
-3. [Step 1: AWS CLI Configuration](#step-1-aws-cli-configuration)
+3. [Shopify Integration](#shopify-integration)
+4. [Step 1: AWS CLI Configuration](#step-1-aws-cli-configuration)
 4. [Step 2: Create S3 Bucket](#step-2-create-s3-bucket)
 5. [Step 3: Create IAM Role](#step-3-create-iam-role)
 6. [Step 4: Export Data from PostgreSQL](#step-4-export-data-from-postgresql)
@@ -108,6 +108,58 @@ tail -f /opt/mastergroup-api/aws_personalize/training.log
 - **Account ID**: `657020414783`
 - **Region**: `us-east-1`
 - **Profile Name**: `mastergroup`
+
+---
+
+## Shopify Integration
+
+This system is designed to feed recommendations directly into your Shopify store during checkout, product browsing, and cart viewing.
+
+### **Integration Strategy**
+
+Since recommendations are pre-calculated and stored in PostgreSQL, you can fetch them via the Backend API with **extremely low latency (<10ms)**. This is critical for e-commerce to avoid slowing down the checkout flow.
+
+### **Endpoints for Shopify**
+
+| Page | Feature | Endpoint |
+|------|---------|----------|
+| **Checkout / Thank You** | "Recommended for You" | `GET /api/v1/personalize/recommendations/user/{user_id}` |
+| **Product Page** | "Similar Products" | `GET /api/v1/personalize/recommendations/similar/{product_id}` |
+| **Cart** | "Frequently Bought Together" | `GET /api/v1/analytics/collaborative-pairs` |
+| **Home / Collections** | "Trending Now" | `GET /api/v1/personalize/recommendations/trending` |
+
+### **Implementation Example (JavaScript/Liquid)**
+
+Add this snippet to your Shopify theme (e.g., `checkout.liquid` or a custom section):
+
+```javascript
+// Fetch recommendations for the current logged-in user
+const userId = "{{ customer.id }}"; // Shopify Liquid variable
+
+if (userId) {
+  fetch(`https://api.mastergroup.com/api/v1/personalize/recommendations/user/${userId}`)
+    .then(response => response.json())
+    .then(data => {
+      const products = data.recommendations;
+      renderRecommendations(products);
+    })
+    .catch(err => console.error("Recommendation error:", err));
+}
+
+function renderRecommendations(products) {
+  const container = document.getElementById('recommended-products');
+  products.forEach(product => {
+    // Render product card
+    container.innerHTML += `
+      <div class="product-card">
+        <img src="${product.image_url}" alt="${product.name}">
+        <h3>${product.name}</h3>
+        <p>${product.price}</p>
+      </div>
+    `;
+  });
+}
+```
 
 ---
 

@@ -5,11 +5,15 @@ Replaces local ML models with AWS Personalize API calls
 
 import boto3
 import os
+import sys
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from typing import List, Dict, Optional
 import logging
 import json
+
+# Add parent directory to path for config import
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 logger = logging.getLogger(__name__)
 
@@ -23,16 +27,28 @@ class AWSPersonalizeService:
         self.region = os.environ.get('AWS_REGION', 'us-east-1')
         self.pg_conn = pg_conn
         
-        # Database connection for offline cache
+        # Database connection for offline cache - use centralized config
         if not self.pg_conn:
             try:
-                self.pg_conn = psycopg2.connect(
-                    host=os.environ.get('PG_HOST', 'localhost'),
-                    port=int(os.environ.get('PG_PORT', 5432)),
-                    database=os.environ.get('PG_DATABASE', 'mastergroup_recommendations'),
-                    user=os.environ.get('PG_USER', 'postgres'),
-                    password=os.environ.get('PG_PASSWORD', '')
-                )
+                # Try to import centralized config first
+                try:
+                    from config.master_group_api import PG_CONFIG
+                    self.pg_conn = psycopg2.connect(
+                        host=PG_CONFIG.get('host'),
+                        port=PG_CONFIG.get('port', 5432),
+                        database=PG_CONFIG.get('database'),
+                        user=PG_CONFIG.get('user'),
+                        password=PG_CONFIG.get('password')
+                    )
+                except ImportError:
+                    # Fallback to env vars
+                    self.pg_conn = psycopg2.connect(
+                        host=os.environ.get('PG_HOST', 'localhost'),
+                        port=int(os.environ.get('PG_PORT', 5432)),
+                        database=os.environ.get('PG_DATABASE', 'mastergroup_recommendations'),
+                        user=os.environ.get('PG_USER', 'postgres'),
+                        password=os.environ.get('PG_PASSWORD', '')
+                    )
                 logger.info("Connected to PostgreSQL for offline recommendations")
             except Exception as e:
                 logger.error(f"Failed to connect to database: {e}")
@@ -130,7 +146,7 @@ class AWSPersonalizeService:
             
             # Read from offline similar items cache
             cursor.execute(
-                """SELECT similar_items 
+                """SELECT similar_products 
                    FROM offline_similar_items 
                    WHERE product_id = %s
                    LIMIT 1""",
@@ -145,7 +161,7 @@ class AWSPersonalizeService:
                 return []
             
             # Parse JSON similar items
-            items = result['similar_items']
+            items = result['similar_products']
             if isinstance(items, str):
                 items = json.loads(items)
             

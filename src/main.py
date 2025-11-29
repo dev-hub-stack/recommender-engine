@@ -1509,6 +1509,13 @@ async def get_analytics_collaborative_products(
     limit: int = Query(10)
 ):
     """Get top collaborative products with REAL recommendation metrics"""
+    # Check cache first
+    cache_key = get_cache_key("analytics_collab_products", time_filter, limit)
+    cached = get_from_cache(cache_key)
+    if cached:
+        logger.info("Returning cached collaborative analytics products", time_filter=time_filter)
+        return cached
+
     conn = None
     try:
         conn = psycopg2.connect(**get_pg_connection_params())
@@ -1553,14 +1560,22 @@ async def get_analytics_collaborative_products(
         
         results = cursor.fetchall()
         
-        return [{
-            "productId": r['product_id'],
-            "productName": r['product_name'],
+        products = [{
+            "product_id": r['product_id'],
+            "product_name": r['product_name'],
             "category": r['category'],
-            "recommendationCount": r['recommendation_count'] or 0,
-            "avgSimilarityScore": round(float(r['avg_similarity_score'] or 0), 2),
-            "totalRevenue": float(r['total_revenue'] or 0)
+            "price": 0,
+            "recommendation_count": r['recommendation_count'] or 0,
+            "avg_similarity_score": round(float(r['avg_similarity_score'] or 0), 2),
+            "total_revenue": float(r['total_revenue'] or 0)
         } for r in results]
+
+        response_data = {"products": products}
+        
+        # Cache the result (1 hour TTL as analytics don't change instantly)
+        set_to_cache(cache_key, response_data, ttl=3600)
+        
+        return response_data
     except Exception as e:
         logger.error(f"Collaborative products error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1575,6 +1590,13 @@ async def get_analytics_collaborative_pairs(
     limit: int = Query(10)
 ):
     """Get product pairs frequently bought together with confidence score"""
+    # Check cache first
+    cache_key = get_cache_key("analytics_collab_pairs", time_filter, limit)
+    cached = get_from_cache(cache_key)
+    if cached:
+        logger.info("Returning cached collaborative pairs", time_filter=time_filter)
+        return cached
+
     conn = None
     try:
         conn = psycopg2.connect(**get_pg_connection_params())
@@ -1634,15 +1656,21 @@ async def get_analytics_collaborative_pairs(
         
         results = cursor.fetchall()
         
-        return [{
-            "productAId": r['product_a_id'],
-            "productAName": r['product_a_name'],
-            "productBId": r['product_b_id'],
-            "productBName": r['product_b_name'],
-            "coPurchaseCount": r['co_purchase_count'],
-            "confidenceScore": float(r['confidence_score'] or 0),
-            "combinedRevenue": float(r['combined_revenue'] or 0)
+        pairs = [{
+            "product_a_id": r['product_a_id'],
+            "product_a_name": r['product_a_name'],
+            "product_b_id": r['product_b_id'],
+            "product_b_name": r['product_b_name'],
+            "co_recommendation_count": r['co_purchase_count'],
+            "combined_revenue": float(r['combined_revenue'] or 0)
         } for r in results]
+        
+        response_data = {"pairs": pairs}
+        
+        # Cache the result
+        set_to_cache(cache_key, response_data, ttl=3600)
+        
+        return response_data
     except Exception as e:
         logger.error(f"Collaborative pairs error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1741,14 +1769,16 @@ async def get_analytics_customer_similarity(
         
         results = cursor.fetchall()
         
-        return [{
-            "customerId": r['customer_id'],
-            "customerName": r['customer_name'],
-            "similarCustomersCount": r['similar_customers_count'] or 0,
-            "actualRecommendations": r['actual_recommendations'] or 0,
-            "recommendationsGenerated": r['actual_recommendations'] or 0,  # Compatibility field
-            "topSharedProducts": r['top_shared_products'][:3] if r['top_shared_products'] else []
+        customers = [{
+            "customer_id": r['customer_id'],
+            "customer_name": r['customer_name'],
+            "similar_customers_count": r['similar_customers_count'] or 0,
+            "actual_recommendations": r['actual_recommendations'] or 0,
+            "recommendations_generated": r['actual_recommendations'] or 0,
+            "top_shared_products": r['top_shared_products'][:3] if r['top_shared_products'] else []
         } for r in results]
+        
+        return {"customers": customers}
     except Exception as e:
         logger.error(f"Customer similarity error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2230,30 +2260,22 @@ async def get_ml_collaborative_products(
     Returns REAL purchase patterns and collaborative signals
     """
     try:
-        # Just call the analytics endpoint internally (which we already fixed)
-        products = await get_analytics_collaborative_products(time_filter, limit)
+        # Just call the analytics endpoint internally (returns {products: [...]})
+        response = await get_analytics_collaborative_products(time_filter, limit)
+        products = response.get("products", [])
         
-        # Transform to format frontend expects
-        product_list = []
+        # Add algorithm field to each product
         for p in products:
-            product_list.append({
-                'product_id': p['productId'],
-                'product_name': p['productName'],
-                'category': p['category'],
-                'recommendation_count': p['recommendationCount'],
-                'avg_similarity_score': p['avgSimilarityScore'],
-                'total_revenue': p['totalRevenue'],
-                'algorithm': 'sql_collaborative_analytics'
-            })
+            p['algorithm'] = 'sql_collaborative_analytics'
         
         result = {
-            "products": product_list,
+            "products": products,
             "algorithm": "sql_collaborative",
             "time_filter": time_filter,
-            "count": len(product_list)
+            "count": len(products)
         }
         
-        logger.info("Collaborative products from analytics", count=len(product_list))
+        logger.info("Collaborative products from analytics", count=len(products))
         return result
         
     except Exception as e:
@@ -2521,8 +2543,9 @@ async def get_ml_customer_similarity(
     Returns REAL customer similarity based on shared purchase patterns
     """
     try:
-        # Call analytics endpoint (which we already fixed)
-        customers = await get_analytics_customer_similarity(time_filter, limit)
+        # Call analytics endpoint (returns {customers: [...]})
+        response = await get_analytics_customer_similarity(time_filter, limit)
+        customers = response.get("customers", [])
         
         return {
             "success": True,
@@ -3175,6 +3198,51 @@ async def get_personalize_recommendations(
         }
     except Exception as e:
         logger.error(f"Failed to get Personalize recommendations: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/personalize/recommendations/similar/{product_id}")
+async def get_similar_products(
+    product_id: str = Path(..., description="Product ID"),
+    num_results: int = Query(10, description="Number of similar products")
+):
+    """
+    Get similar products for cross-selling from AWS Personalize batch cache.
+    """
+    try:
+        from aws_personalize.personalize_service import get_personalize_service
+        
+        personalize = get_personalize_service()
+        similar_items = personalize.get_similar_items(product_id, num_results)
+        
+        # Enrich with product names from database
+        if similar_items and pg_pool:
+            product_ids = [r['product_id'] for r in similar_items]
+            conn = pg_pool.getconn()
+            try:
+                cursor = conn.cursor(cursor_factory=RealDictCursor)
+                placeholders = ','.join(['%s'] * len(product_ids))
+                cursor.execute(f"""
+                    SELECT DISTINCT product_id, product_name 
+                    FROM order_items 
+                    WHERE product_id IN ({placeholders})
+                """, product_ids)
+                product_names = {str(r['product_id']): r['product_name'] for r in cursor.fetchall()}
+                cursor.close()
+                
+                for item in similar_items:
+                    item['product_name'] = product_names.get(item['product_id'], f"Product {item['product_id']}")
+            finally:
+                pg_pool.putconn(conn)
+        
+        return {
+            "product_id": product_id,
+            "recommendations": similar_items,
+            "count": len(similar_items),
+            "source": "aws_personalize_batch"
+        }
+    except Exception as e:
+        logger.error(f"Failed to get similar products: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

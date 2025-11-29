@@ -94,7 +94,7 @@ def process_file_stream(s3_key, chunk_size=1000):
             except:
                 pass
 
-def load_user_recommendations(s3_prefix='batch-inference-output/user-personalization/'):
+def load_user_recommendations(s3_prefix='batch/output/users/'):
     """Load user personalization results into offline_user_recommendations"""
     logger.info(f"📥 Loading User Recommendations from {s3_prefix}...")
     
@@ -123,14 +123,17 @@ def load_user_recommendations(s3_prefix='batch-inference-output/user-personaliza
                         
                         if user_id and recommendations:
                             # Format recommendations as JSONB
-                            recs_json = json.dumps([
-                                {
-                                    'product_id': item['itemId'],
-                                    'score': item.get('score', 0)
-                                }
-                                for item in recommendations
-                            ])
+                            formatted_recs = []
+                            for item in recommendations:
+                                if isinstance(item, str):
+                                    formatted_recs.append({'product_id': item, 'score': 0})
+                                else:
+                                    formatted_recs.append({
+                                        'product_id': item.get('itemId'),
+                                        'score': item.get('score', 0)
+                                    })
                             
+                            recs_json = json.dumps(formatted_recs)
                             records.append((user_id, recs_json, 'aws-user-personalization'))
                 
                 if records:
@@ -161,7 +164,7 @@ def load_user_recommendations(s3_prefix='batch-inference-output/user-personaliza
         if conn:
             conn.close()
 
-def load_similar_items(s3_prefix='batch-inference-output/similar-items/'):
+def load_similar_items(s3_prefix='batch/output/items/'):
     """Load similar items results into offline_similar_items"""
     logger.info(f"📥 Loading Similar Items from {s3_prefix}...")
     
@@ -189,14 +192,17 @@ def load_similar_items(s3_prefix='batch-inference-output/similar-items/'):
                         similar_items = result['output'].get('recommendedItems', [])
                         
                         if product_id and similar_items:
-                            similar_json = json.dumps([
-                                {
-                                    'product_id': item['itemId'],
-                                    'score': item.get('score', 0)
-                                }
-                                for item in similar_items
-                            ])
+                            formatted_recs = []
+                            for item in similar_items:
+                                if isinstance(item, str):
+                                    formatted_recs.append({'product_id': item, 'score': 0})
+                                else:
+                                    formatted_recs.append({
+                                        'product_id': item.get('itemId'),
+                                        'score': item.get('score', 0)
+                                    })
                             
+                            similar_json = json.dumps(formatted_recs)
                             records.append((product_id, similar_json, 'aws-similar-items'))
                 
                 if records:

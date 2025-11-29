@@ -1467,18 +1467,18 @@ async def get_collaborative_metrics(time_filter: str = Query("30days")):
         result = cursor.fetchone()
         
         # Calculate REAL metrics
-        total_users = result['total_users'] or 0
-        total_products = result['total_products'] or 0
-        active_pairs = result['active_customer_pairs'] or 0
-        avg_shared = result['avg_shared_products'] or 0
+        total_users = int(result['total_users'] or 0)
+        total_products = int(result['total_products'] or 0)
+        active_pairs = int(result['active_customer_pairs'] or 0)
+        avg_shared = float(result['avg_shared_products'] or 0)
         
         # Similarity score: how many products on average do customer pairs share
         # Normalized to 0-1 scale (assuming max 10 shared products is "perfect")
         similarity_score = min(avg_shared / 10.0, 1.0) if avg_shared > 0 else 0.0
         
         # Recommendation potential: percentage of possible customer pairs that share products
-        max_possible_pairs = (total_users * (total_users - 1)) / 2 if total_users > 1 else 1
-        recommendation_coverage = min(active_pairs / max_possible_pairs, 1.0) if max_possible_pairs > 0 else 0.0
+        max_possible_pairs = float((total_users * (total_users - 1)) / 2) if total_users > 1 else 1.0
+        recommendation_coverage = min(float(active_pairs) / max_possible_pairs, 1.0) if max_possible_pairs > 0 else 0.0
         
         # Return REAL metrics
         return {
@@ -1514,43 +1514,28 @@ async def get_analytics_collaborative_products(
         
         # Calculate actual collaborative recommendation potential
         cursor.execute(f"""
-            WITH product_customers AS (
-                SELECT 
-                    oi.product_id,
-                    MAX(oi.product_name) as product_name,
-                    MAX(oi.category) as category,
-                    COUNT(DISTINCT o.unified_customer_id) as customer_count,
-                    COUNT(DISTINCT o.id) as order_count,
-                    SUM(oi.total_price) as total_revenue
-                FROM order_items oi
-                JOIN orders o ON oi.order_id = o.id
-                {where_clause}
-                GROUP BY oi.product_id
-            ),
-            product_pairs AS (
-                -- Find how often products appear together in orders
-                SELECT 
-                    oi1.product_id,
-                    COUNT(DISTINCT oi2.product_id) as co_purchased_products,
-                    AVG(CASE WHEN oi2.product_id != oi1.product_id THEN 1.0 ELSE 0.0 END) as collaboration_score
-                FROM order_items oi1
-                JOIN orders o ON oi1.order_id = o.id
-                JOIN order_items oi2 ON o.id = oi2.order_id
-                {where_clause}
-                GROUP BY oi1.product_id
-            )
             SELECT 
-                pc.product_id,
-                pc.product_name,
-                pc.category,
-                pc.customer_count,
-                pc.order_count as recommendation_count,
-                pc.total_revenue,
-                COALESCE(pp.co_purchased_products, 0) as co_purchased_products,
-                COALESCE(pp.collaboration_score, 0) as avg_similarity_score
-            FROM product_customers pc
-            LEFT JOIN product_pairs pp ON pc.product_id = pp.product_id
-            ORDER BY pc.customer_count DESC, pc.order_count DESC
+                oi.product_id,
+                MAX(oi.product_name) as product_name,
+                MAX(COALESCE(oi.category, 'General')) as category,
+                COUNT(DISTINCT o.unified_customer_id) as customer_count,
+                COUNT(DISTINCT o.id) as recommendation_count,
+                SUM(oi.total_price) as total_revenue,
+                -- Calculate how often this product appears with others (collaborative signal)
+                COUNT(DISTINCT CASE 
+                    WHEN EXISTS (
+                        SELECT 1 FROM order_items oi2 
+                        WHERE oi2.order_id = oi.order_id 
+                        AND oi2.product_id != oi.product_id
+                    ) THEN o.id 
+                END)::float / NULLIF(COUNT(DISTINCT o.id), 0) as avg_similarity_score
+            FROM order_items oi
+            JOIN orders o ON oi.order_id = o.id
+            {where_clause}
+            GROUP BY oi.product_id
+            HAVING COUNT(DISTINCT o.unified_customer_id) >= 2
+            ORDER BY COUNT(DISTINCT o.unified_customer_id) DESC, 
+                     COUNT(DISTINCT o.id) DESC
             LIMIT %s
         """, params + (limit,))
         
@@ -1559,9 +1544,9 @@ async def get_analytics_collaborative_products(
         return [{
             "productId": r['product_id'],
             "productName": r['product_name'],
-            "category": r['category'] or 'Uncategorized',
+            "category": r['category'],
             "recommendationCount": r['recommendation_count'] or 0,
-            "avgSimilarityScore": round(float(r['avg_similarity_score'] or 0), 3),
+            "avgSimilarityScore": round(float(r['avg_similarity_score'] or 0), 2),
             "totalRevenue": float(r['total_revenue'] or 0)
         } for r in results]
     except Exception as e:
@@ -1586,7 +1571,7 @@ async def get_analytics_collaborative_pairs(
         where_clause, params = get_time_filter_clause(time_filter)
         
         # Calculate co-purchase confidence score
-        cursor.execute(f"""
+        query = f"""
             WITH product_pairs AS (
                 SELECT 
                     oi1.product_id as product_a_id,
@@ -1600,6 +1585,7 @@ async def get_analytics_collaborative_pairs(
                 JOIN orders o ON oi1.order_id = o.id
                 {where_clause}
                 GROUP BY oi1.product_id, oi2.product_id
+                HAVING COUNT(DISTINCT oi1.order_id) >= 2
             ),
             product_totals AS (
                 SELECT 
@@ -1617,13 +1603,22 @@ async def get_analytics_collaborative_pairs(
                 pp.product_b_name,
                 pp.co_purchase_count,
                 pp.combined_revenue,
-                ROUND(pp.co_purchase_count::numeric / LEAST(pt1.total_orders, pt2.total_orders)::numeric, 3) as confidence_score
+                ROUND(
+                    pp.co_purchase_count::numeric / 
+                    NULLIF(LEAST(pt1.total_orders, pt2.total_orders), 0)::numeric, 
+                    3
+                ) as confidence_score
             FROM product_pairs pp
             LEFT JOIN product_totals pt1 ON pp.product_a_id = pt1.product_id
             LEFT JOIN product_totals pt2 ON pp.product_b_id = pt2.product_id
+            WHERE pt1.total_orders > 0 AND pt2.total_orders > 0
             ORDER BY pp.co_purchase_count DESC
             LIMIT %s
-        """, params + (limit,))
+        """
+        
+        # Duplicate params for the two where clauses
+        query_params = params + params + (limit,)
+        cursor.execute(query, query_params)
         
         results = cursor.fetchall()
         
@@ -1662,13 +1657,14 @@ async def get_analytics_customer_similarity(
             WITH customer_products AS (
                 SELECT 
                     o.unified_customer_id,
-                    o.customer_name,
+                    MAX(o.customer_name) as customer_name,
                     oi.product_id,
+                    MAX(oi.product_name) as product_name,
                     COUNT(*) as purchase_count
                 FROM orders o
                 JOIN order_items oi ON o.id = oi.order_id
                 {where_clause}
-                GROUP BY o.unified_customer_id, o.customer_name, oi.product_id
+                GROUP BY o.unified_customer_id, oi.product_id
             ),
             customer_stats AS (
                 SELECT 
@@ -1690,6 +1686,22 @@ async def get_analytics_customer_similarity(
                     ON cp1.product_id = cp2.product_id 
                     AND cp1.unified_customer_id != cp2.unified_customer_id
                 GROUP BY cp1.unified_customer_id
+            ),
+            top_products AS (
+                SELECT 
+                    cp1.unified_customer_id,
+                    JSON_AGG(
+                        JSON_BUILD_OBJECT(
+                            'product_name', cp1.product_name,
+                            'shared_count', COUNT(DISTINCT cp2.unified_customer_id)
+                        )
+                        ORDER BY COUNT(DISTINCT cp2.unified_customer_id) DESC
+                    ) FILTER (WHERE cp2.unified_customer_id IS NOT NULL) as top_shared_products
+                FROM customer_products cp1
+                LEFT JOIN customer_products cp2 
+                    ON cp1.product_id = cp2.product_id 
+                    AND cp1.unified_customer_id != cp2.unified_customer_id
+                GROUP BY cp1.unified_customer_id
             )
             SELECT 
                 cs.unified_customer_id as customer_id,
@@ -1697,9 +1709,11 @@ async def get_analytics_customer_similarity(
                 cs.unique_products,
                 cs.total_purchases,
                 COALESCE(sc.similar_customers_count, 0) as similar_customers_count,
-                COALESCE(sc.potential_recommendations, 0) as actual_recommendations
+                COALESCE(sc.potential_recommendations, 0) as actual_recommendations,
+                tp.top_shared_products
             FROM customer_stats cs
             LEFT JOIN similar_customers sc ON cs.unified_customer_id = sc.unified_customer_id
+            LEFT JOIN top_products tp ON cs.unified_customer_id = tp.unified_customer_id
             WHERE cs.unique_products >= 2
             ORDER BY sc.similar_customers_count DESC, cs.total_purchases DESC
             LIMIT %s
@@ -1712,7 +1726,8 @@ async def get_analytics_customer_similarity(
             "customerName": r['customer_name'],
             "similarCustomersCount": r['similar_customers_count'] or 0,
             "actualRecommendations": r['actual_recommendations'] or 0,
-            "recommendationsGenerated": r['actual_recommendations'] or 0  # Compatibility field
+            "recommendationsGenerated": r['actual_recommendations'] or 0,  # Compatibility field
+            "topSharedProducts": r['top_shared_products'][:3] if r['top_shared_products'] else []
         } for r in results]
     except Exception as e:
         logger.error(f"Customer similarity error: {e}")

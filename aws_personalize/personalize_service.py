@@ -5,33 +5,43 @@ Replaces local ML models with AWS Personalize API calls
 
 import boto3
 import os
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from typing import List, Dict, Optional
 import logging
+import json
 
 logger = logging.getLogger(__name__)
 
 class AWSPersonalizeService:
     """
-    Service to get recommendations from AWS Personalize
-    Drop-in replacement for local ML recommendation service
+    Service to get recommendations from AWS Personalize BATCH INFERENCE
+    Reads from offline cache tables populated by batch jobs (cost-optimized approach)
     """
     
-    def __init__(self):
+    def __init__(self, pg_conn=None):
         self.region = os.environ.get('AWS_REGION', 'us-east-1')
-        self.campaign_arn = os.environ.get('PERSONALIZE_CAMPAIGN_ARN', '')
-        self.similar_items_campaign_arn = os.environ.get('PERSONALIZE_SIMILAR_ITEMS_CAMPAIGN_ARN', '')
+        self.pg_conn = pg_conn
         
-        # Initialize Personalize Runtime client
-        self.personalize_runtime = boto3.client(
-            'personalize-runtime',
-            region_name=self.region
-        )
+        # Database connection for offline cache
+        if not self.pg_conn:
+            try:
+                self.pg_conn = psycopg2.connect(
+                    host=os.environ.get('PG_HOST', 'localhost'),
+                    port=int(os.environ.get('PG_PORT', 5432)),
+                    database=os.environ.get('PG_DATABASE', 'mastergroup_recommendations'),
+                    user=os.environ.get('PG_USER', 'postgres'),
+                    password=os.environ.get('PG_PASSWORD', '')
+                )
+                logger.info("Connected to PostgreSQL for offline recommendations")
+            except Exception as e:
+                logger.error(f"Failed to connect to database: {e}")
+                self.pg_conn = None
         
-        # Check if configured
-        self.is_configured = bool(self.campaign_arn)
+        self.is_configured = bool(self.pg_conn)
         
         if not self.is_configured:
-            logger.warning("AWS Personalize not configured. Set PERSONALIZE_CAMPAIGN_ARN")
+            logger.warning("AWS Personalize offline cache not available. Check database connection.")
     
     def get_recommendations_for_user(
         self, 
@@ -40,45 +50,59 @@ class AWSPersonalizeService:
         filter_arn: Optional[str] = None
     ) -> List[Dict]:
         """
-        Get personalized recommendations for a user
+        Get personalized recommendations for a user from OFFLINE CACHE
+        Reads from batch inference results stored in PostgreSQL
         
         Args:
             user_id: Customer ID
             num_results: Number of recommendations to return
-            filter_arn: Optional filter ARN
+            filter_arn: Not used (batch inference doesn't support filters)
             
         Returns:
             List of recommended items with scores
         """
-        if not self.is_configured:
-            logger.error("Personalize not configured")
+        if not self.is_configured or not self.pg_conn:
+            logger.error("Offline cache not available")
             return []
         
         try:
-            params = {
-                'campaignArn': self.campaign_arn,
-                'userId': str(user_id),
-                'numResults': num_results
-            }
+            cursor = self.pg_conn.cursor(cursor_factory=RealDictCursor)
             
-            if filter_arn:
-                params['filterArn'] = filter_arn
+            # Read from offline cache
+            cursor.execute(
+                """SELECT recommendations 
+                   FROM offline_user_recommendations 
+                   WHERE user_id = %s
+                   LIMIT 1""",
+                (str(user_id),)
+            )
             
-            response = self.personalize_runtime.get_recommendations(**params)
+            result = cursor.fetchone()
+            cursor.close()
             
+            if not result:
+                logger.debug(f"No cached recommendations for user {user_id}")
+                return []
+            
+            # Parse JSON recommendations
+            recs = result['recommendations']
+            if isinstance(recs, str):
+                recs = json.loads(recs)
+            
+            # Limit results
             recommendations = []
-            for item in response.get('itemList', []):
+            for item in recs[:num_results]:
                 recommendations.append({
-                    'product_id': item['itemId'],
+                    'product_id': str(item['product_id']),
                     'score': float(item.get('score', 0)),
-                    'algorithm': 'aws_personalize'
+                    'algorithm': 'aws_personalize_batch'
                 })
             
-            logger.info(f"Got {len(recommendations)} recommendations for user {user_id}")
+            logger.debug(f"Got {len(recommendations)} cached recommendations for user {user_id}")
             return recommendations
             
         except Exception as e:
-            logger.error(f"Error getting recommendations: {e}")
+            logger.error(f"Error reading cached recommendations: {e}")
             return []
     
     def get_similar_items(
@@ -87,7 +111,8 @@ class AWSPersonalizeService:
         num_results: int = 10
     ) -> List[Dict]:
         """
-        Get similar items for cross-selling
+        Get similar items for cross-selling from OFFLINE CACHE
+        Reads from batch inference results stored in PostgreSQL
         
         Args:
             item_id: Product ID
@@ -96,29 +121,48 @@ class AWSPersonalizeService:
         Returns:
             List of similar items with scores
         """
-        if not self.similar_items_campaign_arn:
-            logger.warning("Similar items campaign not configured")
+        if not self.is_configured or not self.pg_conn:
+            logger.error("Offline cache not available")
             return []
         
         try:
-            response = self.personalize_runtime.get_recommendations(
-                campaignArn=self.similar_items_campaign_arn,
-                itemId=str(item_id),
-                numResults=num_results
+            cursor = self.pg_conn.cursor(cursor_factory=RealDictCursor)
+            
+            # Read from offline similar items cache
+            cursor.execute(
+                """SELECT similar_items 
+                   FROM offline_similar_items 
+                   WHERE product_id = %s
+                   LIMIT 1""",
+                (str(item_id),)
             )
             
+            result = cursor.fetchone()
+            cursor.close()
+            
+            if not result:
+                logger.debug(f"No cached similar items for product {item_id}")
+                return []
+            
+            # Parse JSON similar items
+            items = result['similar_items']
+            if isinstance(items, str):
+                items = json.loads(items)
+            
+            # Limit results
             similar_items = []
-            for item in response.get('itemList', []):
+            for item in items[:num_results]:
                 similar_items.append({
-                    'product_id': item['itemId'],
-                    'similarity_score': float(item.get('score', 0)),
-                    'algorithm': 'aws_personalize_similar_items'
+                    'product_id': str(item['product_id']),
+                    'score': float(item.get('score', 0)),
+                    'algorithm': 'aws_similar_items_batch'
                 })
             
+            logger.debug(f"Got {len(similar_items)} cached similar items for {item_id}")
             return similar_items
             
         except Exception as e:
-            logger.error(f"Error getting similar items: {e}")
+            logger.error(f"Error reading cached similar items: {e}")
             return []
     
     def record_event(

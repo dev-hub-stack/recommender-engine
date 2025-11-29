@@ -29,7 +29,7 @@ class SchedulerService:
         self.scheduler = BackgroundScheduler()
         self.sync_service = get_sync_service()
         self.is_running = False
-        self.training_enabled = True  # Enable auto-pilot learning by default
+        self.training_enabled = False  # DISABLED: Using AWS Personalize batch inference instead
     
     def sync_job(self):
         """Job that runs periodically to sync orders"""
@@ -141,7 +141,7 @@ class SchedulerService:
             max_instances=1  # Prevent overlapping syncs
         )
         
-        # Add the model training job (daily at 3 AM) - AUTO-PILOT LEARNING
+        # Model training DISABLED - Using AWS Personalize batch inference instead
         if self.training_enabled:
             self.scheduler.add_job(
                 func=self.train_models_job,
@@ -152,16 +152,20 @@ class SchedulerService:
                 max_instances=1  # Prevent overlapping training
             )
             logger.info("🤖 Auto-Pilot Learning enabled - Training daily at 3:00 AM")
+        else:
+            logger.info("🚫 Auto-Pilot ML training DISABLED - Using AWS Personalize batch inference")
         
         # Start the scheduler
         self.scheduler.start()
         self.is_running = True
         
-        logger.info(f"✅ Scheduler started - Daily sync at 2:00 AM, Training at 3:00 AM")
-        logger.info(f"📅 Next sync scheduled for: {self.get_next_sync_time()}")
-        
         if self.training_enabled:
+            logger.info(f"✅ Scheduler started - Daily sync at 2:00 AM, Training at 3:00 AM")
             logger.info(f"🤖 Next training scheduled for: {self.get_next_training_time()}")
+        else:
+            logger.info(f"✅ Scheduler started - Daily sync at 2:00 AM (Training disabled)")
+        
+        logger.info(f"📅 Next sync scheduled for: {self.get_next_sync_time()}")
     
     def stop(self):
         """Stop the scheduler"""

@@ -1321,6 +1321,86 @@ async def get_analytics_rfm_segments(time_filter: str = Query("30days")):
             conn.close()
 
 
+@app.get("/api/v1/analytics/customers/segment-details/{segment_name}")
+async def get_segment_details(
+    segment_name: str,
+    time_filter: str = Query("30days"),
+    limit: int = Query(20)
+):
+    """Get detailed customer list for a specific RFM segment"""
+    conn = None
+    try:
+        conn = psycopg2.connect(**get_pg_connection_params())
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        where_clause, params = get_time_filter_clause(time_filter)
+        
+        # Define segment criteria
+        segment_criteria = {
+            'Champions': "recency_days <= 30 AND frequency >= 5 AND monetary >= 50000",
+            'Loyal': "recency_days <= 60 AND frequency >= 3 AND monetary >= 20000",
+            'Loyal Customers': "recency_days <= 60 AND frequency >= 3 AND monetary >= 20000",
+            'Potential': "recency_days <= 90 AND frequency >= 2",
+            'Potential Loyalists': "recency_days <= 90 AND frequency >= 2",
+            'New': "frequency = 1 AND recency_days <= 30",
+            'New Customers': "frequency = 1 AND recency_days <= 30",
+            'At Risk': "recency_days > 90 AND frequency >= 2",
+            'Hibernating': "recency_days > 180",
+            'Lost': "recency_days > 365"
+        }
+        
+        criteria = segment_criteria.get(segment_name, "1=1")
+        
+        cursor.execute(f"""
+            WITH customer_rfm AS (
+                SELECT 
+                    o.unified_customer_id,
+                    MAX(o.customer_name) as customer_name,
+                    MAX(o.customer_city) as city,
+                    EXTRACT(days FROM NOW() - MAX(o.order_date)) as recency_days,
+                    COUNT(DISTINCT o.id) as frequency,
+                    SUM(o.total_price) as monetary,
+                    MAX(o.order_date) as last_order_date,
+                    AVG(o.total_price) as avg_order_value
+                FROM orders o
+                {where_clause}
+                GROUP BY o.unified_customer_id
+            )
+            SELECT 
+                unified_customer_id as customer_id,
+                customer_name,
+                city,
+                recency_days,
+                frequency as total_orders,
+                monetary as total_revenue,
+                last_order_date,
+                avg_order_value
+            FROM customer_rfm
+            WHERE {criteria}
+            ORDER BY monetary DESC
+            LIMIT %s
+        """, params + (limit,))
+        
+        results = cursor.fetchall()
+        
+        return [{
+            "customer_id": r['customer_id'],
+            "customer_name": r['customer_name'] or 'Unknown',
+            "city": r['city'] or 'Unknown',
+            "days_since_order": int(r['recency_days'] or 0),
+            "total_orders": r['total_orders'],
+            "total_revenue": float(r['total_revenue'] or 0),
+            "last_order": str(r['last_order_date']) if r['last_order_date'] else None,
+            "avg_order_value": float(r['avg_order_value'] or 0)
+        } for r in results]
+    except Exception as e:
+        logger.error(f"Segment details error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            conn.close()
+
+
 @app.get("/api/v1/analytics/customers/at-risk")
 async def get_at_risk_customers(
     time_filter: str = Query("30days"),

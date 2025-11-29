@@ -1512,12 +1512,20 @@ async def get_analytics_collaborative_products(
         
         where_clause, params = get_time_filter_clause(time_filter)
         
-        # Calculate actual collaborative recommendation potential
+        # Calculate actual collaborative recommendation potential with smart category extraction
         cursor.execute(f"""
             SELECT 
                 oi.product_id,
                 MAX(oi.product_name) as product_name,
-                'General' as category,
+                -- Smart category extraction from product name
+                CASE 
+                    WHEN MAX(oi.product_name) ILIKE '%pillow%' THEN 'Pillows'
+                    WHEN MAX(oi.product_name) ILIKE '%cushion%' THEN 'Cushions'
+                    WHEN MAX(oi.product_name) ILIKE '%mattress%' OR MAX(oi.product_name) ILIKE '%foam%' THEN 'Mattresses & Foam'
+                    WHEN MAX(oi.product_name) ILIKE '%sheet%' OR MAX(oi.product_name) ILIKE '%cover%' THEN 'Bedding'
+                    WHEN MAX(oi.product_name) ILIKE '%blanket%' OR MAX(oi.product_name) ILIKE '%quilt%' THEN 'Blankets & Quilts'
+                    ELSE 'Home Furnishing'
+                END as category,
                 COUNT(DISTINCT o.unified_customer_id) as customer_count,
                 COUNT(DISTINCT o.id) as recommendation_count,
                 SUM(oi.total_price) as total_revenue,
@@ -2461,94 +2469,39 @@ async def get_ml_product_pairs(
     limit: int = Query(10, ge=1, le=100, description="Number of pairs")
 ):
     """
-    Get frequently bought together product pairs using ML
-    Uses Redis Cache for fast responses
+    Product Pairs - NOW USES REAL DATA FROM ANALYTICS
+    
+    NOTE: Local ML models disabled - using SQL-based collaborative analytics
+    Returns REAL product pairs bought together with confidence scores
     """
     try:
-        # Check cache first
-        cache_key = f"ml:product_pairs:{time_filter}:{limit}"
-        if redis_client:
-            try:
-                cached = redis_client.get(cache_key)
-                if cached:
-                    logger.info("✅ Cache HIT - product pairs", time_filter=time_filter, limit=limit)
-                    return json.loads(cached)
-            except Exception:
-                pass
+        # Call analytics endpoint (which we already fixed)
+        pairs = await get_analytics_collaborative_pairs(time_filter, limit)
         
-        logger.info("Fetching ML product pairs", time_filter=time_filter, limit=limit)
-        
-        # Get product co-occurrence data with optimized query
-        conn = psycopg2.connect(**get_pg_connection_params())
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        # Calculate time range
-        time_ranges = {'7days': 7, '30days': 30, '90days': 90, '6months': 180, '1year': 365, 'all': None}
-        days = time_ranges.get(time_filter)
-        
-        where_clause = ""
-        if days:
-            where_clause = f"AND o.order_date >= NOW() - INTERVAL '{days} days'"
-        
-        # Optimized query without slow subquery
-        cursor.execute(f"""
-            SELECT 
-                oi1.product_id as product_a_id,
-                MAX(oi1.product_name) as product_a_name,
-                oi2.product_id as product_b_id,
-                MAX(oi2.product_name) as product_b_name,
-                COUNT(DISTINCT oi1.order_id) as co_purchase_count,
-                COALESCE(SUM(oi1.total_price + oi2.total_price), 0) as combined_revenue
-            FROM order_items oi1
-            JOIN order_items oi2 ON oi1.order_id = oi2.order_id AND oi1.product_id < oi2.product_id
-            JOIN orders o ON oi1.order_id = o.id
-            WHERE o.unified_customer_id IS NOT NULL
-            {where_clause}
-            GROUP BY oi1.product_id, oi2.product_id
-            HAVING COUNT(DISTINCT oi1.order_id) >= 2
-            ORDER BY COUNT(DISTINCT oi1.order_id) DESC
-            LIMIT %s
-        """, (limit,))
-        
-        pairs = cursor.fetchall()
-        cursor.close()
-        conn.close()
-        
-        # Format results
+        # Transform to format frontend expects
         formatted_pairs = []
         for pair in pairs:
-            confidence = min(1.0, pair['co_purchase_count'] / 10.0)  # Simple confidence score
             formatted_pairs.append({
-                'product_a_id': pair['product_a_id'],
-                'product_a_name': pair['product_a_name'],
-                'product_b_id': pair['product_b_id'],
-                'product_b_name': pair['product_b_name'],
-                'co_recommendation_count': pair['co_purchase_count'],
-                'combined_revenue': float(pair['combined_revenue'] or 0),
-                'confidence_score': round(confidence, 3),
-                'algorithm': 'collaborative_ml'
+                'product_a_id': pair['productAId'],
+                'product_a_name': pair['productAName'],
+                'product_b_id': pair['productBId'],
+                'product_b_name': pair['productBName'],
+                'co_recommendation_count': pair['coPurchaseCount'],
+                'combined_revenue': pair['combinedRevenue'],
+                'confidence_score': pair['confidenceScore'],
+                'algorithm': 'sql_collaborative'
             })
         
-        result = {
+        return {
             "success": True,
             "pairs": formatted_pairs,
-            "algorithm": "collaborative_ml",
+            "algorithm": "sql_collaborative",
             "time_filter": time_filter,
             "total_count": len(formatted_pairs)
         }
         
-        # Cache result
-        if redis_client:
-            try:
-                redis_client.setex(cache_key, 1800, json.dumps(result))  # 30 min cache
-                logger.info("✅ Cached product pairs results", cache_key=cache_key)
-            except Exception:
-                pass
-        
-        return result
-        
     except Exception as e:
-        logger.error("Failed to get ML product pairs", error=str(e), exc_info=True)
+        logger.error("Failed to get product pairs", error=str(e), exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -2558,97 +2511,25 @@ async def get_ml_customer_similarity(
     limit: int = Query(10, ge=1, le=100, description="Number of customers")
 ):
     """
-    ⚡ FAST ML Customer Similarity - Uses Redis Cache + Pre-computed Results
+    Customer Similarity - NOW USES REAL DATA FROM ANALYTICS
     
-    Uses Matrix Factorization (SVD) to find customer similarities
-    Returns cached results in <50ms instead of slow database queries
+    NOTE: Local ML models disabled - using SQL-based collaborative analytics
+    Returns REAL customer similarity based on shared purchase patterns
     """
     try:
-        cache_key = f"ml:customer_similarity:{time_filter}:{limit}"
+        # Call analytics endpoint (which we already fixed)
+        customers = await get_analytics_customer_similarity(time_filter, limit)
         
-        # Try Redis cache first (FAST PATH)
-        try:
-            cached = redis_client.get(cache_key)
-            if cached:
-                logger.info("✅ Cache HIT - customer similarity", time_filter=time_filter, limit=limit)
-                return json.loads(cached)
-        except Exception as e:
-            logger.warning(f"Redis cache failed: {e}")
-        
-        logger.info("🔄 Cache MISS - computing customer similarity", time_filter=time_filter, limit=limit)
-        
-        # FAST QUERY: Use aggregated data only, no complex joins
-        conn = psycopg2.connect(**get_pg_connection_params())
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        time_ranges = {'7days': 7, '30days': 30, '90days': 90, '6months': 180, '1year': 365, 'all': None}
-        days = time_ranges.get(time_filter)
-        
-        where_clause = ""
-        if days:
-            where_clause = f"WHERE o.order_date >= NOW() - INTERVAL '{days} days'"
-        
-        # Optimized query using orders table for customer info
-        cursor.execute(f"""
-            SELECT 
-                o.unified_customer_id as customer_id,
-                MAX(o.customer_name) as customer_name,
-                MAX(o.customer_city) as customer_city,
-                COUNT(DISTINCT o.id) as total_orders,
-                COUNT(DISTINCT oi.product_id) as unique_products,
-                SUM(oi.total_price) as total_spent
-            FROM orders o
-            JOIN order_items oi ON o.id = oi.order_id
-            {where_clause}
-            GROUP BY o.unified_customer_id
-            HAVING COUNT(DISTINCT oi.product_id) >= 2
-            ORDER BY total_spent DESC
-            LIMIT %s
-        """, (limit,))
-        
-        customers = cursor.fetchall()
-        cursor.close()
-        conn.close()
-        
-        # Build result with ML-enhanced metrics
-        result_customers = []
-        for idx, customer in enumerate(customers):
-            # ML-based similarity score (using purchase patterns)
-            similarity_score = 0.85 - (idx * 0.02)  # Decreasing confidence
-            similar_count = min(len(customers) - 1, int(customer['unique_products'] * 2.5))
-            
-            result_customers.append({
-                'customer_id': customer['customer_id'],
-                'customer_name': customer['customer_name'] or 'Unknown',
-                'similar_customers_count': similar_count,
-                'actual_recommendations': customer['unique_products'] * 3,  # ML-estimated recommendations
-                'top_shared_products': [],  # Simplified for speed
-                'avg_similarity_score': round(similarity_score, 2),
-                'algorithm': 'matrix_factorization_ml',
-                'ml_confidence': round(similarity_score, 2)
-            })
-        
-        result = {
+        return {
             "success": True,
-            "customers": result_customers,
-            "algorithm": "matrix_factorization_ml",
+            "customers": customers,
+            "algorithm": "sql_collaborative",
             "time_filter": time_filter,
-            "total_count": len(result_customers),
-            "cached": False,
-            "execution_time_ms": "<50ms with Redis cache"
+            "total_count": len(customers)
         }
         
-        # Cache result for 5 minutes
-        try:
-            redis_client.setex(cache_key, 300, json.dumps(result))
-            logger.info("✅ Cached customer similarity results", cache_key=cache_key)
-        except Exception as e:
-            logger.warning(f"Failed to cache results: {e}")
-        
-        return result
-        
     except Exception as e:
-        logger.error("Failed to get ML customer similarity", error=str(e), exc_info=True)
+        logger.error("Failed to get customer similarity", error=str(e), exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

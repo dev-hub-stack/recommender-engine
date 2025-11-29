@@ -3256,11 +3256,40 @@ async def get_personalize_status():
         
         personalize = get_personalize_service()
         
+        # Check if we have batch inference data in the database
+        conn = None
+        has_user_recs = False
+        has_similar_items = False
+        user_count = 0
+        item_count = 0
+        
+        try:
+            conn = psycopg2.connect(**get_pg_connection_params())
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM offline_user_recommendations")
+            user_count = cursor.fetchone()[0]
+            has_user_recs = user_count > 0
+            
+            cursor.execute("SELECT COUNT(*) FROM offline_similar_items")
+            item_count = cursor.fetchone()[0]
+            has_similar_items = item_count > 0
+            cursor.close()
+        except:
+            pass
+        finally:
+            if conn:
+                conn.close()
+        
+        # System is configured if we have batch data
+        is_configured = has_user_recs or has_similar_items
+        
         return {
-            "is_configured": personalize.is_configured,
+            "is_configured": is_configured,
+            "mode": "batch_inference",
             "region": personalize.region,
-            "campaign_arn": personalize.campaign_arn[:50] + "..." if personalize.campaign_arn else None,
-            "similar_items_configured": bool(personalize.similar_items_campaign_arn)
+            "user_recommendations_count": user_count,
+            "similar_items_count": item_count,
+            "recipes_active": ["user-personalization", "similar-items"] if is_configured else []
         }
     except Exception as e:
         logger.error(f"Failed to get Personalize status: {e}")

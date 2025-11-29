@@ -1197,13 +1197,13 @@ async def get_province_performance(time_filter: str = Query("30days")):
         
         cursor.execute(f"""
             SELECT 
-                COALESCE(province, 'Unknown') as province,
-                COUNT(DISTINCT id) as total_orders,
-                COUNT(DISTINCT unified_customer_id) as total_customers,
-                SUM(total_price) as total_revenue
-            FROM orders
+                COALESCE(o.province, 'Unknown') as province,
+                COUNT(DISTINCT o.id) as total_orders,
+                COUNT(DISTINCT o.unified_customer_id) as total_customers,
+                SUM(o.total_price) as total_revenue
+            FROM orders o
             {where_clause}
-            GROUP BY province
+            GROUP BY o.province
             ORDER BY total_revenue DESC
         """, params)
         
@@ -1240,14 +1240,14 @@ async def get_city_performance(
         
         cursor.execute(f"""
             SELECT 
-                COALESCE(customer_city, 'Unknown') as city,
-                COALESCE(province, 'Unknown') as province,
-                COUNT(DISTINCT id) as total_orders,
-                COUNT(DISTINCT unified_customer_id) as total_customers,
-                SUM(total_price) as total_revenue
-            FROM orders
+                COALESCE(o.customer_city, 'Unknown') as city,
+                COALESCE(o.province, 'Unknown') as province,
+                COUNT(DISTINCT o.id) as total_orders,
+                COUNT(DISTINCT o.unified_customer_id) as total_customers,
+                SUM(o.total_price) as total_revenue
+            FROM orders o
             {where_clause}
-            GROUP BY customer_city, province
+            GROUP BY o.customer_city, o.province
             ORDER BY total_revenue DESC
             LIMIT %s
         """, params + (limit,))
@@ -1284,13 +1284,13 @@ async def get_analytics_rfm_segments(time_filter: str = Query("30days")):
         cursor.execute(f"""
             WITH customer_rfm AS (
                 SELECT 
-                    unified_customer_id,
-                    EXTRACT(days FROM NOW() - MAX(order_date)) as recency,
-                    COUNT(DISTINCT id) as frequency,
-                    SUM(total_price) as monetary
-                FROM orders
+                    o.unified_customer_id,
+                    EXTRACT(days FROM NOW() - MAX(o.order_date)) as recency,
+                    COUNT(DISTINCT o.id) as frequency,
+                    SUM(o.total_price) as monetary
+                FROM orders o
                 {where_clause}
-                GROUP BY unified_customer_id
+                GROUP BY o.unified_customer_id
             )
             SELECT 
                 CASE 
@@ -1896,12 +1896,12 @@ async def get_customer_profiling(time_filter: str = Query("all")):
         cursor.execute(f"""
             WITH customer_orders AS (
                 SELECT 
-                    unified_customer_id,
+                    o.unified_customer_id,
                     COUNT(*) as order_count,
-                    MIN(order_date) as first_order
-                FROM orders
+                    MIN(o.order_date) as first_order
+                FROM orders o
                 {where_clause}
-                GROUP BY unified_customer_id
+                GROUP BY o.unified_customer_id
             )
             SELECT 
                 CASE WHEN order_count = 1 THEN 'new' ELSE 'returning' END as customer_type,
@@ -1916,12 +1916,12 @@ async def get_customer_profiling(time_filter: str = Query("all")):
         # Get geographic distribution
         cursor.execute(f"""
             SELECT 
-                COALESCE(province, 'Unknown') as region,
-                COUNT(DISTINCT unified_customer_id) as customer_count,
-                SUM(total_price) as total_revenue
-            FROM orders
+                COALESCE(o.province, 'Unknown') as region,
+                COUNT(DISTINCT o.unified_customer_id) as customer_count,
+                SUM(o.total_price) as total_revenue
+            FROM orders o
             {where_clause}
-            GROUP BY province
+            GROUP BY o.province
             ORDER BY customer_count DESC
             LIMIT 10
         """, params)
@@ -2585,20 +2585,20 @@ async def get_ml_rfm_segments(
         
         where_clause = ""
         if days:
-            where_clause = f"WHERE order_date >= NOW() - INTERVAL '{days} days'"
+            where_clause = f"WHERE o.order_date >= NOW() - INTERVAL '{days} days'"
         
         # Use the same query structure as the existing SQL endpoint for consistency
         cursor.execute(f"""
             WITH customer_rfm AS (
                 SELECT 
-                    unified_customer_id as customer_id,
-                    EXTRACT(days FROM NOW() - MAX(order_date)) as recency_days,
-                    COUNT(DISTINCT id) as frequency,
-                    SUM(total_price) as monetary_value,
-                    SUM(total_price) / NULLIF(COUNT(DISTINCT id), 0) as avg_order_value
-                FROM orders
+                    o.unified_customer_id as customer_id,
+                    EXTRACT(days FROM NOW() - MAX(o.order_date)) as recency_days,
+                    COUNT(DISTINCT o.id) as frequency,
+                    SUM(o.total_price) as monetary_value,
+                    SUM(o.total_price) / NULLIF(COUNT(DISTINCT o.id), 0) as avg_order_value
+                FROM orders o
                 {where_clause}
-                GROUP BY unified_customer_id
+                GROUP BY o.unified_customer_id
             )
             SELECT 
                 'Champions' as segment_name,

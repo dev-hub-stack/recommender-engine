@@ -1963,26 +1963,43 @@ async def get_pos_vs_oe_revenue(time_filter: str = Query("all")):
         
         where_clause, params = get_time_filter_clause(time_filter)
         
-        # Get revenue breakdown by order type (POS vs OE)
+        # 1. Get main metrics from ORDERS table (Single Source of Truth for Revenue)
         cursor.execute(f"""
             SELECT 
                 UPPER(order_type) as order_type,
-                COUNT(DISTINCT o.id) as total_orders,
-                -- Fix: Use SUM(oi.total_price) to avoid duplication from JOIN
-                SUM(oi.total_price) as total_revenue,
+                COUNT(o.id) as total_orders,
+                SUM(o.total_price) as total_revenue,
                 COUNT(DISTINCT o.unified_customer_id) as unique_customers,
                 AVG(o.total_price) as avg_order_value,
-                COUNT(DISTINCT oi.product_id) as unique_products,
                 MIN(o.order_date) as earliest_order,
                 MAX(o.order_date) as latest_order
             FROM orders o
-            LEFT JOIN order_items oi ON o.id = oi.order_id
             {where_clause}
             GROUP BY order_type
             ORDER BY total_revenue DESC
         """, params)
         
-        breakdown = cursor.fetchall()
+        main_stats = {r['order_type']: r for r in cursor.fetchall()}
+        
+        # 2. Get product counts separately (to avoid join explosion)
+        cursor.execute(f"""
+            SELECT 
+                UPPER(o.order_type) as order_type,
+                COUNT(DISTINCT oi.product_id) as unique_products
+            FROM orders o
+            JOIN order_items oi ON o.id = oi.order_id
+            {where_clause}
+            GROUP BY o.order_type
+        """, params)
+        
+        product_stats = {r['order_type']: r['unique_products'] for r in cursor.fetchall()}
+        
+        # Merge and Format
+        breakdown = []
+        for o_type, stats in main_stats.items():
+            if not o_type: continue
+            stats['unique_products'] = product_stats.get(o_type, 0)
+            breakdown.append(stats)
         
         # Calculate totals and percentages
         total_revenue = sum(float(r['total_revenue'] or 0) for r in breakdown)

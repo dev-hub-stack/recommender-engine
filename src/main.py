@@ -1519,11 +1519,11 @@ async def get_analytics_collaborative_products(
                 MAX(oi.product_name) as product_name,
                 -- Smart category extraction from product name
                 CASE 
-                    WHEN MAX(oi.product_name) ILIKE '%pillow%' THEN 'Pillows'
-                    WHEN MAX(oi.product_name) ILIKE '%cushion%' THEN 'Cushions'
-                    WHEN MAX(oi.product_name) ILIKE '%mattress%' OR MAX(oi.product_name) ILIKE '%foam%' THEN 'Mattresses & Foam'
-                    WHEN MAX(oi.product_name) ILIKE '%sheet%' OR MAX(oi.product_name) ILIKE '%cover%' THEN 'Bedding'
-                    WHEN MAX(oi.product_name) ILIKE '%blanket%' OR MAX(oi.product_name) ILIKE '%quilt%' THEN 'Blankets & Quilts'
+                    WHEN MAX(oi.product_name) ILIKE '%%pillow%%' THEN 'Pillows'
+                    WHEN MAX(oi.product_name) ILIKE '%%cushion%%' THEN 'Cushions'
+                    WHEN MAX(oi.product_name) ILIKE '%%mattress%%' OR MAX(oi.product_name) ILIKE '%%foam%%' THEN 'Mattresses & Foam'
+                    WHEN MAX(oi.product_name) ILIKE '%%sheet%%' OR MAX(oi.product_name) ILIKE '%%cover%%' THEN 'Bedding'
+                    WHEN MAX(oi.product_name) ILIKE '%%blanket%%' OR MAX(oi.product_name) ILIKE '%%quilt%%' THEN 'Blankets & Quilts'
                     ELSE 'Home Furnishing'
                 END as category,
                 COUNT(DISTINCT o.unified_customer_id) as customer_count,

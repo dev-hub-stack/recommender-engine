@@ -1383,15 +1383,27 @@ async def get_segment_details(
         
         results = cursor.fetchall()
         
+        # Calculate RFM scores (1-5 scale)
+        def calc_rfm_scores(recency, frequency, monetary):
+            r_score = 5 if recency <= 30 else 4 if recency <= 60 else 3 if recency <= 90 else 2 if recency <= 180 else 1
+            f_score = 5 if frequency >= 10 else 4 if frequency >= 5 else 3 if frequency >= 3 else 2 if frequency >= 2 else 1
+            m_score = 5 if monetary >= 100000 else 4 if monetary >= 50000 else 3 if monetary >= 20000 else 2 if monetary >= 5000 else 1
+            return {"recency": r_score, "frequency": f_score, "monetary": m_score}
+        
         return [{
             "customer_id": r['customer_id'],
             "customer_name": r['customer_name'] or 'Unknown',
-            "city": r['city'] or 'Unknown',
-            "days_since_order": int(r['recency_days'] or 0),
+            "customer_city": r['city'] or 'Unknown',
+            "segment": segment_name,
             "total_orders": r['total_orders'],
-            "total_revenue": float(r['total_revenue'] or 0),
-            "last_order": str(r['last_order_date']) if r['last_order_date'] else None,
-            "avg_order_value": float(r['avg_order_value'] or 0)
+            "total_spent": float(r['total_revenue'] or 0),
+            "last_order_date": str(r['last_order_date']) if r['last_order_date'] else None,
+            "days_since_last_order": int(r['recency_days'] or 0),
+            "rfm_score": calc_rfm_scores(
+                int(r['recency_days'] or 0),
+                r['total_orders'],
+                float(r['total_revenue'] or 0)
+            )
         } for r in results]
     except Exception as e:
         logger.error(f"Segment details error: {e}")

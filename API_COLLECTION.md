@@ -133,7 +133,75 @@ GET /api/v1/personalize/recommendations/03001234567_John%20Doe?num_results=5
 
 ---
 
-## 4. Trending Products by Location
+## 4. Item Affinity (Products That Drive Conversions)
+
+Get products that influence a user's buying decision. Unlike user-personalization (what they'll buy), item-affinity shows what products DRIVE their purchase behavior.
+
+```http
+GET /api/v1/personalize/recommendations/item-affinity/{user_id}?num_results=5
+```
+
+**Parameters:**
+| Name | Type | Description |
+|------|------|-------------|
+| user_id | path | Customer ID (format: phone_name) |
+| num_results | query | Number of products (default: 10) |
+
+**Use Cases:**
+- Homepage hero banners
+- Email marketing campaigns
+- Retargeting ads
+- Win-back campaigns
+
+**Sample Request:**
+```
+GET /api/v1/personalize/recommendations/item-affinity/03001234567_John%20Doe?num_results=5
+```
+
+**Sample Response (when data available):**
+```json
+{
+  "user_id": "03001234567_John Doe",
+  "recommendations": [
+    {
+      "product_id": "1328",
+      "affinity_score": 0.95,
+      "algorithm": "aws_item_affinity",
+      "product_name": "MOLTY FOAM 78-72-6"
+    }
+  ],
+  "count": 5,
+  "source": "aws_item_affinity",
+  "status": "success"
+}
+```
+
+**Sample Response (when batch not run):**
+```json
+{
+  "user_id": "03001234567_John Doe",
+  "recommendations": [],
+  "count": 0,
+  "source": "item_affinity",
+  "status": "no_data",
+  "message": "Item affinity batch job not yet run. Run aws_personalize/run_batch_inference.py with --recipe item-affinity"
+}
+```
+
+**How to Activate:**
+```bash
+# 1. Run batch inference
+python3 aws_personalize/run_batch_inference.py --recipe item-affinity
+
+# 2. Wait ~30 min for completion
+
+# 3. Load results
+python3 aws_personalize/load_batch_results.py --recipe item-affinity
+```
+
+---
+
+## 5. Trending Products by Location
 
 Get trending products for a specific province/city.
 

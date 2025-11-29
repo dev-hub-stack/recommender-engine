@@ -3238,6 +3238,101 @@ async def get_similar_products(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/v1/personalize/recommendations/item-affinity/{user_id}")
+async def get_item_affinity_recommendations(
+    user_id: str = Path(..., description="User/Customer ID"),
+    num_results: int = Query(10, description="Number of products to return")
+):
+    """
+    Get Item Affinity recommendations - products that drive conversions for this user.
+    
+    Item Affinity identifies products that are likely to lead to purchases based on
+    the user's browsing/interaction patterns. Unlike user-personalization (what they'll buy),
+    item-affinity shows what products INFLUENCE their buying decision.
+    
+    Use cases:
+    - Homepage hero banners
+    - Email marketing campaigns  
+    - Retargeting ads
+    """
+    conn = None
+    try:
+        conn = psycopg2.connect(**get_pg_connection_params())
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Check if we have item affinity data
+        cursor.execute(
+            """SELECT item_affinities 
+               FROM offline_item_affinity 
+               WHERE user_id = %s
+               LIMIT 1""",
+            (str(user_id),)
+        )
+        
+        result = cursor.fetchone()
+        
+        if not result:
+            # No item affinity data - return empty with status
+            return {
+                "user_id": user_id,
+                "recommendations": [],
+                "count": 0,
+                "source": "item_affinity",
+                "status": "no_data",
+                "message": "Item affinity batch job not yet run. Run aws_personalize/run_batch_inference.py with --recipe item-affinity"
+            }
+        
+        # Parse affinities
+        affinities = result['item_affinities']
+        if isinstance(affinities, str):
+            import json
+            affinities = json.loads(affinities)
+        
+        # Limit results
+        recommendations = []
+        for item in affinities[:num_results]:
+            recommendations.append({
+                'product_id': str(item.get('product_id', item.get('item_id', ''))),
+                'affinity_score': float(item.get('score', item.get('affinity_score', 0))),
+                'algorithm': 'aws_item_affinity'
+            })
+        
+        # Enrich with product names
+        if recommendations and pg_pool:
+            product_ids = [r['product_id'] for r in recommendations]
+            enrich_conn = pg_pool.getconn()
+            try:
+                enrich_cursor = enrich_conn.cursor(cursor_factory=RealDictCursor)
+                placeholders = ','.join(['%s'] * len(product_ids))
+                enrich_cursor.execute(f"""
+                    SELECT DISTINCT product_id, product_name 
+                    FROM order_items 
+                    WHERE product_id IN ({placeholders})
+                """, product_ids)
+                product_names = {str(r['product_id']): r['product_name'] for r in enrich_cursor.fetchall()}
+                enrich_cursor.close()
+                
+                for rec in recommendations:
+                    rec['product_name'] = product_names.get(rec['product_id'], f"Product {rec['product_id']}")
+            finally:
+                pg_pool.putconn(enrich_conn)
+        
+        return {
+            "user_id": user_id,
+            "recommendations": recommendations,
+            "count": len(recommendations),
+            "source": "aws_item_affinity",
+            "status": "success"
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to get item affinity recommendations: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            conn.close()
+
+
 @app.get("/api/v1/personalize/status")
 async def get_personalize_status():
     """

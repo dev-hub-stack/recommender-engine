@@ -24,6 +24,7 @@ import requests
 import os
 from collections import defaultdict
 import re
+from export_routes import export_router
 
 # Simple settings configuration
 class Settings:
@@ -184,8 +185,8 @@ async def lifespan(app: FastAPI):
         from services.scheduler import get_scheduler
         
         scheduler = get_scheduler()
-        scheduler.start()
-        logger.info("Auto-sync scheduler started")
+        # TEMPORARILY DISABLED: scheduler.start()
+        logger.info("Auto-sync scheduler DISABLED temporarily")
     except Exception as e:
         logger.error("Failed to start scheduler", error=str(e))
     

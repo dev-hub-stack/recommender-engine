@@ -1615,9 +1615,49 @@ async def get_analytics_collaborative_products(
         
         where_clause, params = get_time_filter_clause(time_filter)
         
+        # OPTIMIZATION: Use pre-calculated table for 'all' time filter
+        if time_filter == 'all':
+            cursor.execute(f"""
+                SELECT 
+                    product_id,
+                    product_name,
+                    -- Smart category extraction
+                    CASE 
+                        WHEN product_name ILIKE '%%pillow%%' THEN 'Pillows'
+                        WHEN product_name ILIKE '%%cushion%%' THEN 'Cushions'
+                        WHEN product_name ILIKE '%%mattress%%' OR product_name ILIKE '%%foam%%' THEN 'Mattresses & Foam'
+                        WHEN product_name ILIKE '%%sheet%%' OR product_name ILIKE '%%cover%%' THEN 'Bedding'
+                        WHEN product_name ILIKE '%%blanket%%' OR product_name ILIKE '%%quilt%%' THEN 'Blankets & Quilts'
+                        ELSE 'Home Furnishing'
+                    END as category,
+                    unique_customers as customer_count,
+                    total_purchases as recommendation_count,
+                    total_revenue,
+                    popularity_score as avg_similarity_score
+                FROM product_statistics
+                ORDER BY popularity_score DESC, total_revenue DESC
+                LIMIT %s
+            """, (limit,))
+            
+            results = cursor.fetchall()
+            
+            products = [{
+                "product_id": r['product_id'],
+                "product_name": r['product_name'],
+                "category": r['category'],
+                "price": 0,
+                "recommendation_count": r['recommendation_count'] or 0,
+                "avg_similarity_score": round(float(r['avg_similarity_score'] or 0), 2),
+                "total_revenue": float(r['total_revenue'] or 0)
+            } for r in results]
+
+            response_data = {"products": products}
+            set_to_cache(cache_key, response_data, ttl=3600)
+            return response_data
+
         # Calculate actual collaborative recommendation potential with smart category extraction
         cursor.execute(f"""
-            SELECT 
+            SELECT  
                 oi.product_id,
                 MAX(oi.product_name) as product_name,
                 -- Smart category extraction from product name
@@ -1696,6 +1736,40 @@ async def get_analytics_collaborative_pairs(
         
         where_clause, params = get_time_filter_clause(time_filter)
         
+        # OPTIMIZATION: Use pre-calculated table for 'all' time filter
+        if time_filter == 'all':
+            cursor.execute("""
+                SELECT 
+                    product_1 as product_a_id,
+                    p1.product_name as product_a_name,
+                    product_2 as product_b_id,
+                    p2.product_name as product_b_name,
+                    co_purchase_count,
+                    0 as combined_revenue, -- Not stored in summary table
+                    confidence as confidence_score
+                FROM product_pairs pp
+                LEFT JOIN product_statistics p1 ON pp.product_1 = p1.product_id
+                LEFT JOIN product_statistics p2 ON pp.product_2 = p2.product_id
+                ORDER BY co_purchase_count DESC
+                LIMIT %s
+            """, (limit,))
+            
+            results = cursor.fetchall()
+            
+            response_data = {
+                "pairs": [{
+                    "product_a": {"id": r['product_a_id'], "name": r['product_a_name']},
+                    "product_b": {"id": r['product_b_id'], "name": r['product_b_name']},
+                    "co_recommendation_count": r['co_purchase_count'],
+                    "combined_revenue": float(r['combined_revenue'] or 0),
+                    "confidence_score": float(r['confidence_score'] or 0)
+                } for r in results],
+                "total_count": len(results)
+            }
+            
+            set_to_cache(cache_key, response_data, ttl=3600)
+            return response_data
+
         # Calculate co-purchase confidence score
         query = f"""
             WITH product_pairs AS (

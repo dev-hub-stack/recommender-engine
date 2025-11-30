@@ -1076,6 +1076,72 @@ async def get_dashboard_metrics(time_filter: str = Query("30days")):
             conn.close()
 
 
+@app.get("/api/v1/analytics/geographic-distribution")
+async def get_geographic_distribution(time_filter: str = Query("30days")):
+    """Get geographic distribution of customers by city - with Redis caching"""
+    cache_key = f"analytics:geographic:{time_filter}"
+    cached = get_from_cache(cache_key)
+    if cached:
+        return cached
+    
+    conn = None
+    try:
+        conn = psycopg2.connect(**get_pg_connection_params())
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        where_clause, params = get_time_filter_clause(time_filter)
+        
+        cursor.execute(f"""
+            SELECT 
+                o.customer_city as city,
+                COUNT(DISTINCT o.unified_customer_id) as customer_count,
+                COUNT(*) as orders,
+                COALESCE(SUM(o.total_price), 0) as revenue
+            FROM orders o
+            {where_clause}
+                AND o.customer_city IS NOT NULL
+                AND o.customer_city != ''
+            GROUP BY o.customer_city
+            ORDER BY customer_count DESC
+            LIMIT 10
+        """, params)
+        
+        results = cursor.fetchall()
+        
+        # Calculate total customers for percentage calculation
+        total_customers = sum(row['customer_count'] for row in results)
+        
+        # Format response
+        distribution_data = []
+        for row in results:
+            distribution_data.append({
+                "city": row['city'],
+                "customer_count": row['customer_count'],
+                "orders": row['orders'],
+                "revenue": float(row['revenue']),
+                "percentage": (row['customer_count'] / total_customers * 100) if total_customers > 0 else 0
+            })
+        
+        response = {
+            "success": True,
+            "time_filter": time_filter,
+            "total_cities": len(results),
+            "total_customers": total_customers,
+            "distribution": distribution_data
+        }
+        
+        # Cache for 5 minutes
+        set_cache_data(cache_key, response, 300)
+        
+        return response
+    except Exception as e:
+        logger.error(f"Geographic distribution error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            conn.close()
+
+
 @app.get("/api/v1/analytics/revenue-trend")
 async def get_revenue_trend(
     time_filter: str = Query("30days"),

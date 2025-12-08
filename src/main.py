@@ -2323,15 +2323,24 @@ async def get_customer_profiling(time_filter: str = Query("all")):
         
         composition = cursor.fetchall()
         
-        # Get geographic distribution
+        # Get geographic distribution (with merged Islamabad variants)
         cursor.execute(f"""
             SELECT 
-                COALESCE(o.province, 'Unknown') as region,
+                CASE 
+                    WHEN o.province IN ('Islamabad', 'Islamabad Capital Territory', 'Islamabad Capital', 'ICT') THEN 'Islamabad'
+                    WHEN o.province IN ('KPK', 'NWFP') THEN 'Khyber Pakhtunkhwa'
+                    ELSE COALESCE(o.province, 'Unknown')
+                END as region,
                 COUNT(DISTINCT o.unified_customer_id) as customer_count,
                 SUM(o.total_price) as total_revenue
             FROM orders o
             {where_clause}
-            GROUP BY o.province
+            GROUP BY 
+                CASE 
+                    WHEN o.province IN ('Islamabad', 'Islamabad Capital Territory', 'Islamabad Capital', 'ICT') THEN 'Islamabad'
+                    WHEN o.province IN ('KPK', 'NWFP') THEN 'Khyber Pakhtunkhwa'
+                    ELSE COALESCE(o.province, 'Unknown')
+                END
             ORDER BY customer_count DESC
             LIMIT 10
         """, params)
@@ -3808,12 +3817,21 @@ async def get_provinces():
             cursor = conn.cursor(cursor_factory=RealDictCursor)
             cursor.execute("""
                 SELECT 
-                    province,
+                    CASE 
+                        WHEN province IN ('Islamabad', 'Islamabad Capital Territory', 'Islamabad Capital', 'ICT') THEN 'Islamabad'
+                        WHEN province IN ('KPK', 'NWFP') THEN 'Khyber Pakhtunkhwa'
+                        ELSE province
+                    END as province,
                     COUNT(DISTINCT id) as order_count,
                     COUNT(DISTINCT unified_customer_id) as customer_count
                 FROM orders
                 WHERE province IS NOT NULL AND province != ''
-                GROUP BY province
+                GROUP BY 
+                    CASE 
+                        WHEN province IN ('Islamabad', 'Islamabad Capital Territory', 'Islamabad Capital', 'ICT') THEN 'Islamabad'
+                        WHEN province IN ('KPK', 'NWFP') THEN 'Khyber Pakhtunkhwa'
+                        ELSE province
+                    END
                 ORDER BY order_count DESC
             """)
             provinces = cursor.fetchall()

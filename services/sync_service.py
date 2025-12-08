@@ -167,30 +167,51 @@ class SyncService:
             customer_name = order.get('customer_name', order.get('name', ''))
             unified_customer_id = f"{customer_phone}_{customer_name}".strip('_')
             
+            # Extract province - OE uses customer_state, POS uses dealer.province
+            province = order.get('customer_state', '')
+            if not province and source == 'POS':
+                dealer = order.get('dealer', {})
+                province = dealer.get('province', '')
+            
             # Extract items
             items = order.get('has_items', order.get('items', []))
             if not isinstance(items, list):
                 items = []
             
-            # Create items JSON
+            # Create items JSON with SKU and category
             items_json = []
             for item in items:
+                # Get product_type - OE has real categories, POS has "simple"
+                product_type = item.get('product_type', '')
+                if product_type == 'simple':
+                    product_type = ''  # Clear generic POS category
+                
                 items_json.append({
                     'product_id': str(item.get('id', item.get('product_id', ''))),  # API uses 'id' for product
                     'product_name': item.get('title', item.get('product_name', item.get('name', ''))),  # API uses 'title'
+                    'sku': item.get('sku', item.get('SKU', '')),  # SKU available in OE only
+                    'category': product_type,  # Real category from OE (Mattresses, Accessories, etc.)
                     'quantity': int(item.get('quantity', 1)),
                     'price': float(item.get('price', 0)),
                     'unit_price': float(item.get('base_price', item.get('unit_price', item.get('price', 0))))
                 })
             
+            # Get city - for POS, also check dealer city
+            customer_city = order.get('customer_city', order.get('city', ''))
+            if not customer_city and source == 'POS':
+                dealer = order.get('dealer', {})
+                customer_city = dealer.get('city', '')
+            
             return {
                 'id': str(order.get('id', order.get('order_id', ''))),
                 'order_type': source,
+                'source_type': source,  # Add source_type for filtering
                 'order_date': order.get('order_date', order.get('created_at', datetime.now())),
                 'unified_customer_id': unified_customer_id,
                 'customer_name': customer_name,
                 'customer_phone': customer_phone,
-                'customer_city': order.get('customer_city', order.get('city', '')),
+                'customer_city': customer_city,
+                'province': province,  # Now properly extracted from dealer for POS
                 'customer_address': order.get('customer_address', order.get('address', '')),
                 'customer_email': order.get('customer_email', order.get('email', '')),
                 'total_price': float(order.get('total_price', order.get('total', 0))),
@@ -219,23 +240,25 @@ class SyncService:
                     # Use SAVEPOINT to handle individual order errors without aborting entire transaction
                     cursor.execute("SAVEPOINT order_insert")
                     
-                    # Insert order
+                    # Insert order with province and source_type
                     cursor.execute("""
                         INSERT INTO orders (
-                            id, order_type, order_date, unified_customer_id,
-                            customer_name, customer_phone, customer_city, customer_address,
+                            id, order_type, source_type, order_date, unified_customer_id,
+                            customer_name, customer_phone, customer_city, province, customer_address,
                             customer_email, total_price, payment_mode, brand_name,
                             order_status, order_name, items_json
                         ) VALUES (
-                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb
                         )
                         ON CONFLICT (id) DO UPDATE SET
                             updated_at = CURRENT_TIMESTAMP,
-                            synced_at = CURRENT_TIMESTAMP
+                            synced_at = CURRENT_TIMESTAMP,
+                            province = COALESCE(EXCLUDED.province, orders.province),
+                            source_type = COALESCE(EXCLUDED.source_type, orders.source_type)
                     """, (
-                        order['id'], order['order_type'], order['order_date'],
-                        order['unified_customer_id'], order['customer_name'],
-                        order['customer_phone'], order['customer_city'],
+                        order['id'], order['order_type'], order.get('source_type', order['order_type']),
+                        order['order_date'], order['unified_customer_id'], order['customer_name'],
+                        order['customer_phone'], order['customer_city'], order.get('province', ''),
                         order['customer_address'], order['customer_email'],
                         order['total_price'], order['payment_mode'],
                         order['brand_name'], order['order_status'],

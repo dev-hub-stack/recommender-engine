@@ -3567,6 +3567,149 @@ async def get_personalize_recommendations_by_location(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/v1/personalize/recommendations/by-segment")
+async def get_segment_recommendations(
+    segment: str = Query(..., description="RFM segment: champions, loyal, potential, new, at_risk, hibernating, lost"),
+    province: Optional[str] = Query(None, description="Filter by province"),
+    city: Optional[str] = Query(None, description="Filter by city"),
+    limit: int = Query(10, description="Number of recommendations")
+):
+    """
+    Get aggregated recommendations for customers in a specific RFM segment within a location.
+    Uses cached recommendations from offline_user_recommendations table.
+    """
+    try:
+        if not pg_pool:
+            raise HTTPException(status_code=500, detail="Database not connected")
+        
+        conn = pg_pool.getconn()
+        try:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            
+            # Define RFM segment criteria
+            segment_criteria = {
+                'champions': "recency_days <= 30 AND frequency >= 5 AND monetary >= 50000",
+                'loyal': "recency_days <= 60 AND frequency >= 3 AND monetary >= 30000",
+                'potential': "recency_days <= 30 AND frequency >= 2",
+                'new': "frequency = 1 AND recency_days <= 30",
+                'at_risk': "recency_days > 90 AND frequency >= 3 AND monetary >= 20000",
+                'hibernating': "recency_days > 120 AND frequency <= 2",
+                'lost': "recency_days > 180"
+            }
+            
+            criteria = segment_criteria.get(segment.lower(), "1=1")
+            
+            # Build location filter
+            location_filter = ""
+            params = []
+            if province:
+                # Normalize Islamabad variants
+                if province.lower() in ['islamabad', 'islamabad capital territory', 'islamabad capital', 'ict']:
+                    location_filter += " AND o.province IN ('Islamabad', 'Islamabad Capital Territory', 'Islamabad Capital', 'ICT')"
+                else:
+                    location_filter += " AND LOWER(o.province) = LOWER(%s)"
+                    params.append(province)
+            if city:
+                location_filter += " AND LOWER(o.customer_city) = LOWER(%s)"
+                params.append(city)
+            
+            # Get users in segment with their cached recommendations
+            cursor.execute(f"""
+                WITH customer_rfm AS (
+                    SELECT 
+                        o.unified_customer_id,
+                        MAX(o.customer_name) as customer_name,
+                        MAX(o.customer_city) as city,
+                        MAX(o.province) as province,
+                        EXTRACT(days FROM NOW() - MAX(o.order_date)) as recency_days,
+                        COUNT(DISTINCT o.id) as frequency,
+                        SUM(o.total_price) as monetary
+                    FROM orders o
+                    WHERE o.unified_customer_id IS NOT NULL
+                    {location_filter}
+                    GROUP BY o.unified_customer_id
+                ),
+                segment_users AS (
+                    SELECT unified_customer_id, customer_name, city, province
+                    FROM customer_rfm
+                    WHERE {criteria}
+                    LIMIT 100
+                )
+                SELECT 
+                    su.unified_customer_id,
+                    su.customer_name,
+                    su.city,
+                    su.province,
+                    our.recommendations
+                FROM segment_users su
+                LEFT JOIN offline_user_recommendations our 
+                    ON su.unified_customer_id = our.user_id
+                WHERE our.recommendations IS NOT NULL
+            """, params)
+            
+            users_with_recs = cursor.fetchall()
+            
+            # Aggregate recommendations across all users in segment
+            product_scores = {}
+            for user in users_with_recs:
+                recs = user['recommendations']
+                if isinstance(recs, str):
+                    import json
+                    recs = json.loads(recs)
+                
+                for rec in recs[:10]:  # Top 10 per user
+                    pid = rec.get('product_id') or rec.get('itemId')
+                    score = float(rec.get('score', 0.5))
+                    
+                    if pid not in product_scores:
+                        product_scores[pid] = {'total_score': 0, 'count': 0}
+                    product_scores[pid]['total_score'] += score
+                    product_scores[pid]['count'] += 1
+            
+            # Calculate average scores and sort
+            aggregated = []
+            for pid, data in product_scores.items():
+                aggregated.append({
+                    'product_id': pid,
+                    'avg_score': data['total_score'] / data['count'],
+                    'recommended_to_users': data['count']
+                })
+            
+            aggregated.sort(key=lambda x: (-x['recommended_to_users'], -x['avg_score']))
+            
+            # Enrich with product names
+            if aggregated:
+                product_ids = [a['product_id'] for a in aggregated[:limit]]
+                placeholders = ','.join(['%s'] * len(product_ids))
+                cursor.execute(f"""
+                    SELECT DISTINCT product_id, product_name 
+                    FROM order_items 
+                    WHERE product_id IN ({placeholders})
+                """, product_ids)
+                product_names = {str(r['product_id']): r['product_name'] for r in cursor.fetchall()}
+                
+                for rec in aggregated:
+                    rec['product_name'] = product_names.get(str(rec['product_id']), f"Product {rec['product_id']}")
+            
+            cursor.close()
+            
+            return {
+                "segment": segment,
+                "province": province,
+                "city": city,
+                "users_in_segment": len(users_with_recs),
+                "aggregated_recommendations": aggregated[:limit],
+                "source": "offline_cache_rfm"
+            }
+            
+        finally:
+            pg_pool.putconn(conn)
+            
+    except Exception as e:
+        logger.error(f"Failed to get segment recommendations: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/v1/personalize/recommendations/{user_id}")
 async def get_personalize_recommendations(
     user_id: str = Path(..., description="User/Customer ID"),

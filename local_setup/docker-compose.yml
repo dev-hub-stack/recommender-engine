@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  # Local PostgreSQL Database (mirrors Lightsail)
+  postgres:
+    image: postgres:16
+    container_name: mastergroup-postgres-local
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: MasterGroup2024Local!
+      POSTGRES_DB: mastergroup_recommendations
+    ports:
+      - "5433:5432"  # Use 5433 to avoid conflict with any local postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for caching (optional but recommended)
+  redis:
+    image: redis:7-alpine
+    container_name: mastergroup-redis-local
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  # API Server (same as production)
+  api:
+    build:
+      context: ..
+      dockerfile: local_setup/Dockerfile
+    container_name: mastergroup-api-local
+    environment:
+      - PG_HOST=postgres
+      - PG_PORT=5432
+      - PG_DATABASE=mastergroup_recommendations
+      - PG_USER=postgres
+      - PG_PASSWORD=MasterGroup2024Local!
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - AWS_REGION=us-east-1
+      - ENVIRONMENT=local
+    ports:
+      - "8001:8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ../src:/app/src
+      - ../aws_personalize:/app/aws_personalize
+      - ../custom_ml:/app/custom_ml
+
+volumes:
+  postgres_data:
+  redis_data:

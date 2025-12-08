@@ -318,8 +318,26 @@ def get_time_filter_clause(time_filter: str, table_alias: str = "o") -> tuple:
     return "", ()
 
 
+def normalize_province(province: str) -> str:
+    """Normalize province names (merge duplicates like Islamabad variants)"""
+    if not province:
+        return 'Unknown'
+    
+    province_mapping = {
+        'Islamabad Capital Territory': 'Islamabad',
+        'Islamabad Capital': 'Islamabad',
+        'ICT': 'Islamabad',
+        'KPK': 'Khyber Pakhtunkhwa',
+        'NWFP': 'Khyber Pakhtunkhwa',
+    }
+    return province_mapping.get(province, province)
+
+
 def get_region_for_province(province: str) -> str:
     """Map province to region"""
+    # First normalize the province name
+    normalized = normalize_province(province)
+    
     regions = {
         'Punjab': 'Central',
         'Sindh': 'South',
@@ -330,7 +348,7 @@ def get_region_for_province(province: str) -> str:
         'Azad Kashmir': 'North',
         'Gilgit-Baltistan': 'North',
     }
-    return regions.get(province, 'Central')
+    return regions.get(normalized, 'Central')
 
 
 # Smart category extraction function
@@ -1251,9 +1269,14 @@ async def get_product_analytics(
             conn.close()
 
 
-@app.get("/api/v1/analytics/geographic/provinces")
-async def get_province_performance(time_filter: str = Query("30days")):
-    """Get province-level performance"""
+@app.get("/api/v1/analytics/product-categories")
+async def get_product_categories(time_filter: str = Query("30days")):
+    """Get product categories with performance metrics"""
+    cache_key = f"analytics:product_categories:{time_filter}"
+    cached = get_from_cache(cache_key)
+    if cached:
+        return cached
+    
     conn = None
     try:
         conn = psycopg2.connect(**get_pg_connection_params())
@@ -1263,13 +1286,150 @@ async def get_province_performance(time_filter: str = Query("30days")):
         
         cursor.execute(f"""
             SELECT 
-                COALESCE(o.province, 'Unknown') as province,
+                oi.product_name,
+                COUNT(DISTINCT oi.order_id) as total_orders,
+                SUM(oi.total_price) as total_revenue,
+                COUNT(DISTINCT o.unified_customer_id) as unique_customers
+            FROM order_items oi
+            JOIN orders o ON oi.order_id = o.id
+            {where_clause}
+            GROUP BY oi.product_name
+            ORDER BY total_revenue DESC
+        """, params)
+        
+        results = cursor.fetchall()
+        
+        # Group by category using extract_smart_category
+        category_stats = {}
+        for r in results:
+            category = extract_smart_category(r['product_name'])
+            if category not in category_stats:
+                category_stats[category] = {
+                    "category": category,
+                    "total_orders": 0,
+                    "total_revenue": 0,
+                    "unique_customers": 0,
+                    "top_products": []
+                }
+            category_stats[category]["total_orders"] += r['total_orders']
+            category_stats[category]["total_revenue"] += float(r['total_revenue'] or 0)
+            category_stats[category]["unique_customers"] += r['unique_customers']
+            
+            # Keep top 5 products per category
+            if len(category_stats[category]["top_products"]) < 5:
+                category_stats[category]["top_products"].append({
+                    "product_name": r['product_name'],
+                    "revenue": float(r['total_revenue'] or 0),
+                    "orders": r['total_orders']
+                })
+        
+        # Sort by revenue
+        categories = sorted(category_stats.values(), key=lambda x: x['total_revenue'], reverse=True)
+        
+        response = {
+            "categories": categories,
+            "total_categories": len(categories),
+            "timeFilter": time_filter
+        }
+        set_to_cache(cache_key, response, 300)
+        return response
+    except Exception as e:
+        logger.error(f"Product categories error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            conn.close()
+
+
+@app.get("/api/v1/analytics/products-by-category")
+async def get_products_by_category(
+    category: str = Query(..., description="Product category to filter"),
+    time_filter: str = Query("30days"),
+    limit: int = Query(20)
+):
+    """Get products filtered by category"""
+    conn = None
+    try:
+        conn = psycopg2.connect(**get_pg_connection_params())
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        where_clause, params = get_time_filter_clause(time_filter)
+        
+        cursor.execute(f"""
+            SELECT 
+                oi.product_id,
+                MAX(oi.product_name) as product_name,
+                COUNT(DISTINCT oi.order_id) as total_orders,
+                SUM(oi.total_price) as total_revenue,
+                AVG(oi.unit_price) as avg_price
+            FROM order_items oi
+            JOIN orders o ON oi.order_id = o.id
+            {where_clause}
+            GROUP BY oi.product_id
+            ORDER BY total_revenue DESC
+        """, params)
+        
+        results = cursor.fetchall()
+        
+        # Filter by category
+        filtered = []
+        for r in results:
+            product_category = extract_smart_category(r['product_name'])
+            if product_category.lower() == category.lower():
+                filtered.append({
+                    "productId": r['product_id'],
+                    "productName": r['product_name'],
+                    "category": product_category,
+                    "totalOrders": r['total_orders'],
+                    "totalRevenue": float(r['total_revenue'] or 0),
+                    "avgPrice": float(r['avg_price'] or 0)
+                })
+                if len(filtered) >= limit:
+                    break
+        
+        return {
+            "products": filtered,
+            "category": category,
+            "count": len(filtered),
+            "timeFilter": time_filter
+        }
+    except Exception as e:
+        logger.error(f"Products by category error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            conn.close()
+
+
+@app.get("/api/v1/analytics/geographic/provinces")
+async def get_province_performance(time_filter: str = Query("30days")):
+    """Get province-level performance with merged Islamabad variants"""
+    conn = None
+    try:
+        conn = psycopg2.connect(**get_pg_connection_params())
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        where_clause, params = get_time_filter_clause(time_filter)
+        
+        # Use CASE to merge Islamabad variants at SQL level
+        cursor.execute(f"""
+            SELECT 
+                CASE 
+                    WHEN o.province IN ('Islamabad', 'Islamabad Capital Territory', 'Islamabad Capital', 'ICT') THEN 'Islamabad'
+                    WHEN o.province IN ('KPK', 'NWFP') THEN 'Khyber Pakhtunkhwa'
+                    ELSE COALESCE(o.province, 'Unknown')
+                END as province,
                 COUNT(DISTINCT o.id) as total_orders,
                 COUNT(DISTINCT o.unified_customer_id) as total_customers,
                 SUM(o.total_price) as total_revenue
             FROM orders o
             {where_clause}
-            GROUP BY o.province
+            GROUP BY 
+                CASE 
+                    WHEN o.province IN ('Islamabad', 'Islamabad Capital Territory', 'Islamabad Capital', 'ICT') THEN 'Islamabad'
+                    WHEN o.province IN ('KPK', 'NWFP') THEN 'Khyber Pakhtunkhwa'
+                    ELSE COALESCE(o.province, 'Unknown')
+                END
             ORDER BY total_revenue DESC
         """, params)
         

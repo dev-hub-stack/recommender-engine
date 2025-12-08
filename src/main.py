@@ -959,6 +959,77 @@ async def trigger_sync():
         logger.error("Manual sync error", error=str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.post("/api/v1/sync/full")
+async def trigger_full_sync(
+    days: int = Query(14, description="Number of days to sync"),
+    background_tasks: BackgroundTasks = None
+):
+    """Trigger a full sync for specified number of days"""
+    try:
+        import sys
+        sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+        from services.sync_service import get_sync_service
+        from datetime import datetime, timedelta
+        
+        sync_service = get_sync_service()
+        
+        # Calculate date range
+        end_date = datetime.now().strftime('%Y-%m-%d')
+        start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+        
+        logger.info(f"Starting full sync from {start_date} to {end_date}")
+        
+        # Fetch POS orders
+        pos_orders = sync_service.fetch_pos_orders(start_date, end_date, limit=5000)
+        
+        # Fetch OE orders
+        oe_orders = sync_service.fetch_oe_orders(days=days, limit=5000)
+        
+        # Transform orders
+        transformed_orders = []
+        for order in pos_orders:
+            transformed = sync_service.transform_order_data(order, 'POS')
+            if transformed:
+                transformed_orders.append(transformed)
+        
+        for order in oe_orders:
+            transformed = sync_service.transform_order_data(order, 'OE')
+            if transformed:
+                transformed_orders.append(transformed)
+        
+        # Insert orders
+        orders_inserted, items_inserted = sync_service.insert_orders(transformed_orders)
+        
+        # Clear caches
+        if redis_client and orders_inserted > 0:
+            keys_deleted = 0
+            for key in redis_client.scan_iter("popular:*"):
+                redis_client.delete(key)
+                keys_deleted += 1
+            for key in redis_client.scan_iter("collab:*"):
+                redis_client.delete(key)
+                keys_deleted += 1
+            for key in redis_client.scan_iter("analytics:*"):
+                redis_client.delete(key)
+                keys_deleted += 1
+            logger.info(f"Cleared {keys_deleted} cache keys")
+        
+        return {
+            "status": "success",
+            "start_date": start_date,
+            "end_date": end_date,
+            "days": days,
+            "pos_orders_fetched": len(pos_orders),
+            "oe_orders_fetched": len(oe_orders),
+            "orders_inserted": orders_inserted,
+            "items_inserted": items_inserted,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Full sync error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/v1/sync/status")
 async def get_sync_status():
     """Get current sync status"""

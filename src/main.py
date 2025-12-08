@@ -978,13 +978,15 @@ async def trigger_full_sync(
         end_date = datetime.now().strftime('%Y-%m-%d')
         start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
         
-        logger.info(f"Starting full sync from {start_date} to {end_date}")
+        logger.info(f"Starting full sync from {start_date} to {end_date} ({days} days)")
         
-        # Fetch POS orders
+        # Fetch POS orders with date range
         pos_orders = sync_service.fetch_pos_orders(start_date, end_date, limit=5000)
+        logger.info(f"Fetched {len(pos_orders)} POS orders")
         
-        # Fetch OE orders
-        oe_orders = sync_service.fetch_oe_orders(days=days, limit=5000)
+        # Fetch OE orders with same date range
+        oe_orders = sync_service.fetch_oe_orders(start_date=start_date, end_date=end_date, limit=5000)
+        logger.info(f"Fetched {len(oe_orders)} OE orders")
         
         # Transform orders
         transformed_orders = []

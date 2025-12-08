@@ -120,24 +120,31 @@ class SyncService:
             logger.error(f"Error fetching POS orders: {e}")
             return []
     
-    def fetch_oe_orders(self, days: int = 1, limit: Optional[int] = None) -> List[Dict]:
+    def fetch_oe_orders(self, days: int = 1, limit: Optional[int] = None, start_date: str = None, end_date: str = None) -> List[Dict]:
         """Fetch OE orders from Master Group API"""
         try:
             url = get_api_url('oe_orders')
             headers = get_auth_headers()
             
-            # Calculate date range (OE API expects start_date and end_date)
-            end_date = datetime.now().date()
-            start_date = end_date - timedelta(days=days)
+            # Use explicit dates if provided, otherwise calculate from days
+            if start_date and end_date:
+                params = {
+                    'start_date': start_date,
+                    'end_date': end_date
+                }
+            else:
+                # Calculate date range (OE API expects start_date and end_date)
+                end_dt = datetime.now().date()
+                start_dt = end_dt - timedelta(days=days)
+                params = {
+                    'start_date': start_dt.strftime('%Y-%m-%d'),
+                    'end_date': end_dt.strftime('%Y-%m-%d')
+                }
             
-            params = {
-                'start_date': start_date.strftime('%Y-%m-%d'),
-                'end_date': end_date.strftime('%Y-%m-%d')
-            }
             if limit:
                 params['limit'] = limit
             
-            logger.info(f"Fetching OE orders from {start_date} to {end_date}")
+            logger.info(f"Fetching OE orders from {params['start_date']} to {params['end_date']}")
             
             response = requests.get(
                 url,

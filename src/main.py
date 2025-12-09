@@ -1179,8 +1179,14 @@ async def get_dashboard_metrics(
         where_clause, params = get_time_filter_clause(time_filter)
         
         # Add category filter if specified
-        category_filter = get_category_filter_sql(category)
-        category_join = "JOIN order_items oi ON o.id = oi.order_id" if category_filter else ""
+        category_filter_raw = get_category_filter_sql(category)
+        category_join = "JOIN order_items oi ON o.id = oi.order_id" if category_filter_raw else ""
+        
+        # Handle WHERE clause properly when category filter exists but time filter doesn't
+        if category_filter_raw and not where_clause:
+            category_filter = "WHERE " + category_filter_raw.replace("AND ", "", 1)
+        else:
+            category_filter = category_filter_raw
         
         cursor.execute(f"""
             SELECT 
@@ -1192,7 +1198,7 @@ async def get_dashboard_metrics(
             {category_join}
             {where_clause}
             {category_filter}
-        """, params)
+        """, params if params else None)
         
         result = cursor.fetchone()
         
@@ -2324,8 +2330,14 @@ async def get_pos_vs_oe_revenue(
         where_clause, params = get_time_filter_clause(time_filter)
         
         # Add category filter if specified
-        category_filter = get_category_filter_sql(category)
-        category_join = "JOIN order_items oi ON o.id = oi.order_id" if category_filter else ""
+        category_filter_raw = get_category_filter_sql(category)
+        category_join = "JOIN order_items oi ON o.id = oi.order_id" if category_filter_raw else ""
+        
+        # Handle WHERE clause properly when category filter exists but time filter doesn't
+        if category_filter_raw and not where_clause:
+            category_filter = "WHERE " + category_filter_raw.replace("AND ", "", 1)
+        else:
+            category_filter = category_filter_raw
         
         # 1. Get main metrics from ORDERS table (Single Source of Truth for Revenue)
         cursor.execute(f"""
@@ -2343,7 +2355,7 @@ async def get_pos_vs_oe_revenue(
             {category_filter}
             GROUP BY o.order_type
             ORDER BY total_revenue DESC
-        """, params)
+        """, params if params else None)
         
         main_stats = {r['order_type']: r for r in cursor.fetchall()}
         

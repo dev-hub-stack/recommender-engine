@@ -582,10 +582,10 @@ def product_pair_recommendations(product_id: str, limit: int = 10, time_filter: 
         logger.error("Product pair recommendations error", error=str(e))
         return []
 
-def popular_products(limit: int = 10, time_filter: str = "7days") -> List[Dict]:
+def popular_products(limit: int = 10, time_filter: str = "7days", category: str = None) -> List[Dict]:
     """Get most popular products based on purchase count with time filtering and caching"""
     # Check cache first
-    cache_key = f"popular_products:{limit}:{time_filter}"
+    cache_key = f"popular_products:{limit}:{time_filter}:{category or 'all'}"
     if redis_client:
         try:
             cached_result = redis_client.get(cache_key)
@@ -642,7 +642,12 @@ def popular_products(limit: int = 10, time_filter: str = "7days") -> List[Dict]:
                 # Extract smart category using product name and order source
                 product_name = row['product_name'] or f"Product {row['product_id']}"
                 order_source = row['order_type'] if row['order_type'] in ['pos', 'oe'] else 'pos'
-                category = extract_smart_category(product_name, None, order_source)
+                product_category = extract_smart_category(product_name, None, order_source)
+                
+                # Filter by category if specified
+                if category and category.lower() != 'all':
+                    if product_category.lower() != category.lower():
+                        continue
                 
                 recommendations.append({
                     "product_id": row['product_id'],
@@ -653,8 +658,12 @@ def popular_products(limit: int = 10, time_filter: str = "7days") -> List[Dict]:
                     "unique_customers": row['unique_customers'],
                     "avg_price": float(row['avg_price']) if row['avg_price'] else 0,
                     "total_revenue": float(row['total_revenue']) if row['total_revenue'] else 0,
-                    "category": category
+                    "category": product_category
                 })
+                
+                # Stop if we have enough results
+                if len(recommendations) >= limit:
+                    break
             
             # Cache the results
             if redis_client:
@@ -789,22 +798,24 @@ async def get_product_pair_recommendations(
 @app.get("/api/v1/recommendations/popular")
 async def get_popular_products_endpoint(
     limit: int = Query(10, ge=1, le=100),
-    time_filter: str = Query("7days", description="Time filter: today, 7days, 30days, all")  # Changed default to 7days
+    time_filter: str = Query("7days", description="Time filter: today, 7days, 30days, all"),
+    category: str = Query(None, description="Filter by category: Mattresses, Pillows & Accessories, etc.")
 ):
-    """Get most popular products with time-based filtering"""
+    """Get most popular products with time-based and category filtering"""
     # Check cache first
-    cache_key = get_cache_key("popular", limit, time_filter)
+    cache_key = get_cache_key("popular", limit, time_filter, category or "all")
     cached = get_from_cache(cache_key)
     if cached:
-        logger.info("Returning cached popular products", time_filter=time_filter)
+        logger.info("Returning cached popular products", time_filter=time_filter, category=category)
         return cached
     
-    # Generate recommendations
-    recommendations = popular_products(limit, time_filter)
+    # Generate recommendations with category filter
+    recommendations = popular_products(limit * 3, time_filter, category)[:limit]  # Fetch more to ensure enough after filtering
     
     result = {
         "recommendations": recommendations,
         "time_filter": time_filter,
+        "category": category,
         "cached": False,
         "timestamp": datetime.now().isoformat()
     }

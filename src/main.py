@@ -418,21 +418,22 @@ def get_category_filter_sql(category: str) -> str:
     """
     Generate SQL WHERE clause for category filtering based on product names.
     Returns empty string if no category filter needed.
+    Note: Use %% to escape % in psycopg2 queries
     """
     if not category or category.lower() == 'all':
         return ""
     
     category_lower = category.lower()
     
-    # Map categories to SQL LIKE patterns
+    # Map categories to SQL LIKE patterns (use %% to escape % for psycopg2)
     category_patterns = {
-        'mattresses': ["'%foam%'", "'%mattress%'", "'%sleep%'", "'%spring%'", "'%ortho%'"],
-        'spring mattresses': ["'%spring%'", "'%pocket%'"],
-        'memory foam mattresses': ["'%memory%'", "'%ortho%'"],
-        'pillows & accessories': ["'%pillow%'", "'%cushion%'"],
-        'pillows': ["'%pillow%'"],
-        'bedding & accessories': ["'%sheet%'", "'%cover%'", "'%protector%'", "'%topper%'"],
-        'furniture': ["'%sofa%'", "'%chair%'", "'%table%'", "'%bed%'"],
+        'mattresses': ["'%%foam%%'", "'%%mattress%%'", "'%%sleep%%'", "'%%spring%%'", "'%%ortho%%'"],
+        'spring mattresses': ["'%%spring%%'", "'%%pocket%%'"],
+        'memory foam mattresses': ["'%%memory%%'", "'%%ortho%%'"],
+        'pillows & accessories': ["'%%pillow%%'", "'%%cushion%%'"],
+        'pillows': ["'%%pillow%%'"],
+        'bedding & accessories': ["'%%sheet%%'", "'%%cover%%'", "'%%protector%%'", "'%%topper%%'"],
+        'furniture': ["'%%sofa%%'", "'%%chair%%'", "'%%table%%'", "'%%bed%%'"],
         'general': []  # No filter for general
     }
     

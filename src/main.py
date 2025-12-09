@@ -413,6 +413,44 @@ def extract_smart_category(product_name: str, product_type: str = None, order_so
     # Default fallback
     return "General"
 
+
+def get_category_filter_sql(category: str) -> str:
+    """
+    Generate SQL WHERE clause for category filtering based on product names.
+    Returns empty string if no category filter needed.
+    """
+    if not category or category.lower() == 'all':
+        return ""
+    
+    category_lower = category.lower()
+    
+    # Map categories to SQL LIKE patterns
+    category_patterns = {
+        'mattresses': ["'%foam%'", "'%mattress%'", "'%sleep%'", "'%spring%'", "'%ortho%'"],
+        'spring mattresses': ["'%spring%'", "'%pocket%'"],
+        'memory foam mattresses': ["'%memory%'", "'%ortho%'"],
+        'pillows & accessories': ["'%pillow%'", "'%cushion%'"],
+        'pillows': ["'%pillow%'"],
+        'bedding & accessories': ["'%sheet%'", "'%cover%'", "'%protector%'", "'%topper%'"],
+        'furniture': ["'%sofa%'", "'%chair%'", "'%table%'", "'%bed%'"],
+        'general': []  # No filter for general
+    }
+    
+    patterns = category_patterns.get(category_lower, [])
+    if not patterns:
+        # Try partial match
+        for key, pats in category_patterns.items():
+            if category_lower in key or key in category_lower:
+                patterns = pats
+                break
+    
+    if not patterns:
+        return ""
+    
+    like_clauses = " OR ".join([f"LOWER(oi.product_name) LIKE {p}" for p in patterns])
+    return f"AND ({like_clauses})"
+
+
 # Recommendation algorithms
 def collaborative_filtering(customer_id: str, limit: int = 10, time_filter: str = "all") -> List[Dict]:
     """
@@ -1117,9 +1155,12 @@ async def get_training_status():
 # ============================================================================
 
 @app.get("/api/v1/analytics/dashboard")
-async def get_dashboard_metrics(time_filter: str = Query("30days")):
-    """Get dashboard summary metrics - with Redis caching"""
-    cache_key = f"analytics:dashboard:{time_filter}"
+async def get_dashboard_metrics(
+    time_filter: str = Query("30days"),
+    category: str = Query(None, description="Filter by product category")
+):
+    """Get dashboard summary metrics - with Redis caching and category filter"""
+    cache_key = f"analytics:dashboard:{time_filter}:{category or 'all'}"
     
     # Check cache first
     if redis_client:
@@ -1137,6 +1178,10 @@ async def get_dashboard_metrics(time_filter: str = Query("30days")):
         
         where_clause, params = get_time_filter_clause(time_filter)
         
+        # Add category filter if specified
+        category_filter = get_category_filter_sql(category)
+        category_join = "JOIN order_items oi ON o.id = oi.order_id" if category_filter else ""
+        
         cursor.execute(f"""
             SELECT 
                 COUNT(DISTINCT o.id) as total_orders,
@@ -1144,7 +1189,9 @@ async def get_dashboard_metrics(time_filter: str = Query("30days")):
                 SUM(o.total_price) as total_revenue,
                 AVG(o.total_price) as avg_order_value
             FROM orders o
+            {category_join}
             {where_clause}
+            {category_filter}
         """, params)
         
         result = cursor.fetchone()
@@ -2264,8 +2311,11 @@ async def get_analytics_customer_similarity(
 
 
 @app.get("/api/v1/analytics/pos-vs-oe-revenue")
-async def get_pos_vs_oe_revenue(time_filter: str = Query("all")):
-    """Get POS vs OE revenue breakdown"""
+async def get_pos_vs_oe_revenue(
+    time_filter: str = Query("all"),
+    category: str = Query(None, description="Filter by product category")
+):
+    """Get POS vs OE revenue breakdown with optional category filter"""
     conn = None
     try:
         conn = psycopg2.connect(**get_pg_connection_params())
@@ -2273,19 +2323,25 @@ async def get_pos_vs_oe_revenue(time_filter: str = Query("all")):
         
         where_clause, params = get_time_filter_clause(time_filter)
         
+        # Add category filter if specified
+        category_filter = get_category_filter_sql(category)
+        category_join = "JOIN order_items oi ON o.id = oi.order_id" if category_filter else ""
+        
         # 1. Get main metrics from ORDERS table (Single Source of Truth for Revenue)
         cursor.execute(f"""
             SELECT 
-                UPPER(order_type) as order_type,
-                COUNT(o.id) as total_orders,
+                UPPER(o.order_type) as order_type,
+                COUNT(DISTINCT o.id) as total_orders,
                 SUM(o.total_price) as total_revenue,
                 COUNT(DISTINCT o.unified_customer_id) as unique_customers,
                 AVG(o.total_price) as avg_order_value,
                 MIN(o.order_date) as earliest_order,
                 MAX(o.order_date) as latest_order
             FROM orders o
+            {category_join}
             {where_clause}
-            GROUP BY order_type
+            {category_filter}
+            GROUP BY o.order_type
             ORDER BY total_revenue DESC
         """, params)
         

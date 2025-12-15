@@ -31,6 +31,25 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config.master_group_api import PG_CONFIG, REDIS_CONFIG, MASTER_GROUP_CONFIG
 
+# Import ML recommendation service
+# Temporarily disabled to debug - will re-enable after backend starts
+# from src.ml_recommendation_service import ml_service
+
+# Temporary dummy service
+class DummyMLService:
+    def initialize(self): 
+        print("⚠️  ML Service disabled for debugging")
+        return False
+    def is_ready(self): return False
+    def get_model_info(self): return {"error": "ML temporarily disabled"}
+    def get_location_recommendations(self, **kwargs): return []
+    def get_cart_recommendations(self, **kwargs): return []
+    def get_similar_products(self, **kwargs): return []
+    def get_popular_products(self, **kwargs): return []
+    def batch_recommendations(self, **kwargs): return {}
+
+ml_service = DummyMLService()
+
 # Simple settings configuration
 class Settings:
     version = "1.0.0"
@@ -121,6 +140,25 @@ class Recommendation(BaseModel):
     purchase_count: Optional[int] = None
     co_purchase_count: Optional[int] = None
 
+# ML Recommendation Request/Response Models
+class LocationRequest(BaseModel):
+    city: Optional[str] = ""
+    state: Optional[str] = ""
+    country: Optional[str] = ""
+
+class CartItem(BaseModel):
+    sku: str
+    quantity: Optional[int] = 1
+
+class CartRecommendationRequest(BaseModel):
+    location: LocationRequest
+    cart_items: List[CartItem]
+    limit: Optional[int] = 5
+
+class BatchLocationRequest(BaseModel):
+    locations: List[LocationRequest]
+    limit: Optional[int] = 10
+
 
 def init_redis():
     """Initialize Redis connection"""
@@ -187,6 +225,16 @@ async def lifespan(app: FastAPI):
     
     # Initialize PostgreSQL
     init_postgres()
+    
+    # Initialize ML recommendation service
+    logger.info("Loading ML recommendation models...")
+    try:
+        if ml_service.initialize():
+            logger.info("✅ ML recommendation models loaded successfully")
+        else:
+            logger.error("❌ Failed to load ML models - ML endpoints will not work")
+    except Exception as e:
+        logger.error("❌ ML service initialization failed", error=str(e))
     
     # Initialize and start sync scheduler
     try:
@@ -4231,6 +4279,192 @@ async def get_users_by_location(
 # ============================================================================
 # END ML-POWERED ANALYTICS ENDPOINTS
 # ============================================================================
+
+
+# ============================================================================
+# COLLABORATIVE FILTERING ML ENDPOINTS
+# ============================================================================
+
+@app.get("/api/v1/ml/health")
+async def ml_health_check():
+    """Check ML service health"""
+    return {
+        "success": True,
+        "ml_service_ready": ml_service.is_ready(),
+        "timestamp": datetime.now().isoformat()
+    }
+
+@app.get("/api/v1/ml/model/info")
+async def ml_model_info():
+    """Get ML model information"""
+    try:
+        if not ml_service.is_ready():
+            raise HTTPException(status_code=503, detail="ML models not loaded")
+        
+        return {
+            "success": True,
+            "model_info": ml_service.get_model_info()
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting model info: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/ml/recommendations/location")
+async def ml_location_recommendations(
+    city: str = Query("", description="Customer city"),
+    state: str = Query("", description="Customer state"),
+    country: str = Query("", description="Customer country"),
+    limit: int = Query(10, ge=1, le=100, description="Number of recommendations"),
+    exclude_purchased: bool = Query(True, description="Exclude purchased products")
+):
+    """Get ML-based recommendations for a location"""
+    try:
+        if not ml_service.is_ready():
+            raise HTTPException(status_code=503, detail="ML models not loaded")
+        
+        recommendations = ml_service.get_location_recommendations(
+            city=city,
+            state=state,
+            country=country,
+            limit=limit,
+            exclude_purchased=exclude_purchased
+        )
+        
+        return {
+            "success": True,
+            "algorithm": "collaborative_filtering_ml",
+            "location": {"city": city, "state": state, "country": country},
+            "n_recommendations": len(recommendations),
+            "recommendations": recommendations
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating ML recommendations: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/v1/ml/recommendations/cart")
+async def ml_cart_recommendations(request: CartRecommendationRequest):
+    """Get cart-based ML recommendations (Frequently Bought Together)"""
+    try:
+        if not ml_service.is_ready():
+            raise HTTPException(status_code=503, detail="ML models not loaded")
+        
+        # Extract SKUs from cart items
+        cart_skus = [item.sku for item in request.cart_items]
+        
+        recommendations = ml_service.get_cart_recommendations(
+            city=request.location.city,
+            state=request.location.state,
+            country=request.location.country,
+            cart_skus=cart_skus,
+            limit=request.limit
+        )
+        
+        return {
+            "success": True,
+            "algorithm": "cart_based_collaborative_filtering",
+            "location": request.location.dict(),
+            "cart_items_count": len(cart_skus),
+            "cart_skus": cart_skus,
+            "n_recommendations": len(recommendations),
+            "recommendations": recommendations
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating cart recommendations: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/ml/recommendations/similar-products/{product_id}")
+async def ml_similar_products(
+    product_id: str = Path(..., description="Product SKU"),
+    limit: int = Query(10, ge=1, le=100, description="Number of similar products")
+):
+    """Get similar products using ML"""
+    try:
+        if not ml_service.is_ready():
+            raise HTTPException(status_code=503, detail="ML models not loaded")
+        
+        similar_products = ml_service.get_similar_products(
+            product_id=product_id,
+            limit=limit
+        )
+        
+        if not similar_products:
+            raise HTTPException(status_code=404, detail=f"Product {product_id} not found")
+        
+        return {
+            "success": True,
+            "algorithm": "item_based_collaborative_filtering",
+            "product_id": product_id,
+            "n_similar_products": len(similar_products),
+            "similar_products": similar_products
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error finding similar products: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/ml/recommendations/popular")
+async def ml_popular_products(
+    limit: int = Query(10, ge=1, le=100, description="Number of products")
+):
+    """Get popular products using ML"""
+    try:
+        if not ml_service.is_ready():
+            raise HTTPException(status_code=503, detail="ML models not loaded")
+        
+        popular_products = ml_service.get_popular_products(limit=limit)
+        
+        return {
+            "success": True,
+            "algorithm": "popularity_based_ml",
+            "n_products": len(popular_products),
+            "products": popular_products
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting popular products: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/v1/ml/recommendations/batch")
+async def ml_batch_recommendations(request: BatchLocationRequest):
+    """Get recommendations for multiple locations"""
+    try:
+        if not ml_service.is_ready():
+            raise HTTPException(status_code=503, detail="ML models not loaded")
+        
+        if len(request.locations) > 1000:
+            raise HTTPException(status_code=400, detail="Maximum 1000 locations per batch")
+        
+        # Convert to list of dicts
+        locations = [loc.dict() for loc in request.locations]
+        
+        results = ml_service.batch_recommendations(
+            locations=locations,
+            limit=request.limit
+        )
+        
+        return {
+            "success": True,
+            "n_locations": len(locations),
+            "recommendations": results
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in batch recommendations: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# END COLLABORATIVE FILTERING ML ENDPOINTS
+# ============================================================================
+
 
 if __name__ == "__main__":
     import uvicorn

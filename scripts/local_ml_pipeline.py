@@ -204,12 +204,18 @@ def insert_orders_to_db(orders: List[Dict], source: str):
             """, (order_id, unified_id, customer_name, order_date, total, source))
             
             # Insert order items
-            items = order.get('items') or order.get('order_items', [])
+            items = order.get('items') or order.get('order_items') or order.get('has_items', [])
             for item in items:
                 product_id = item.get('product_id') or item.get('id')
-                product_name = item.get('product_name') or item.get('name', '')
+                product_name = item.get('product_name') or item.get('name') or item.get('title', '')
+                sku = item.get('sku')
+                
+                # If SKU exists (OE orders), append to name if not already there
+                if sku and sku not in product_name:
+                    product_name = f"{product_name} ({sku})"
+                
                 quantity = item.get('quantity', 1)
-                price = item.get('price') or item.get('unit_price', 0)
+                price = item.get('price') or item.get('unit_price') or item.get('base_price', 0)
                 
                 if product_id:
                     cursor.execute("""

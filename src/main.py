@@ -3885,9 +3885,13 @@ async def get_segment_recommendations(
                     recs = json.loads(recs)
                 
                 for rec in recs[:10]:  # Top 10 per user
-                    pid = rec.get('product_id') or rec.get('itemId')
+                    # Handle different field names
+                    pid = rec.get('item_id') or rec.get('product_id') or rec.get('itemId')
                     score = float(rec.get('score', 0.5))
                     
+                    if not pid:
+                        continue
+                        
                     if pid not in product_scores:
                         product_scores[pid] = {'total_score': 0, 'count': 0}
                     product_scores[pid]['total_score'] += score

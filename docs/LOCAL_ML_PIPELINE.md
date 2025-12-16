@@ -1,8 +1,22 @@
 # 🔄 Local ML Recommendation Pipeline
 
+> **Last Updated:** December 16, 2025  
+> **Status:** ✅ ACTIVE - Replaced AWS Personalize  
+> **Pipeline Last Run:** Dec 16, 2025 (77 minutes, 74,827 users)
+
 ## Overview
 
-This document describes the recommendation pipeline that replaces AWS Personalize with a local ML solution.
+This document describes the recommendation pipeline that replaces AWS Personalize with a local ML solution. The pipeline was successfully run on Dec 16, 2025, generating recommendations for 74,827 users and 4,182 products.
+
+## Current Statistics
+
+| Metric | Value |
+|--------|-------|
+| **Total Users with Recommendations** | 74,827 |
+| **Total Products with Similar Items** | 4,182 |
+| **Total Interactions Processed** | 1,971,527 |
+| **Pipeline Duration** | ~77 minutes |
+| **Cost** | $0/month (vs $170/month AWS Personalize) |
 
 ## 📊 Pipeline Architecture
 
@@ -284,5 +298,124 @@ recommendation-engine-service/
 - ✅ **Recommendations Cached**: 180,483 users
 - ✅ **Similar Items Cached**: 4,182 products
 - ✅ **API Serving**: From PostgreSQL cache
-- ⏳ **ML Training**: Ready to implement
-- ⏳ **Batch Inference**: Ready to implement
+- ✅ **ML Training**: Implemented (see below)
+- ✅ **Batch Inference**: Implemented (see below)
+
+---
+
+## 🆕 New File-Based Local ML Implementation
+
+### Overview
+
+The new implementation uses **joblib files** instead of database storage for faster model loading and simpler management.
+
+### Components Created
+
+| File | Purpose |
+|------|---------|
+| `src/services/local_model_storage.py` | File-based model storage using joblib |
+| `src/services/local_recommender.py` | Training & inference for SVD, similarity, popularity |
+| `scripts/train_local_models.py` | CLI script to train models |
+| `models/` | Directory where trained models are saved |
+
+### Models Trained
+
+1. **SVD Recommender** (`svd_recommender_latest.joblib`)
+   - Algorithm: Singular Value Decomposition (scikit-surprise)
+   - Purpose: User personalization (like AWS User-Personalization)
+   - Metrics: RMSE, MAE from cross-validation
+
+2. **Item Similarity** (`item_similarity_latest.joblib`)
+   - Algorithm: Cosine similarity on user-item matrix
+   - Purpose: Similar items (like AWS Similar-Items)
+   - Output: N×N similarity matrix
+
+3. **Popularity Scores** (`popularity_scores_latest.joblib`)
+   - Algorithm: Weighted by recency (exponential decay)
+   - Purpose: Cold-start fallback
+   - Output: Item → score dictionary
+
+### API Endpoints
+
+```
+POST /api/v1/local-ml/train
+     Train all models (SVD, similarity, popularity)
+     Query params: days (default: 90)
+
+GET  /api/v1/local-ml/status
+     Check model status and versions
+
+GET  /api/v1/local-ml/recommendations/{user_id}
+     Get personalized recommendations
+     Query params: limit, exclude_purchased
+
+GET  /api/v1/local-ml/similar-items/{item_id}
+     Get similar items
+
+GET  /api/v1/local-ml/frequently-bought-together/{item_id}
+     Get co-purchase items
+
+GET  /api/v1/local-ml/popular
+     Get most popular items
+```
+
+### Usage
+
+#### CLI Training
+```bash
+# Train with default 90 days of data
+python scripts/train_local_models.py
+
+# Train with 30 days, cleanup old versions
+python scripts/train_local_models.py --days 30 --cleanup
+
+# Test only (no training)
+python scripts/train_local_models.py --test-only
+```
+
+#### API Training
+```bash
+# Trigger training via API
+curl -X POST "http://localhost:8001/api/v1/local-ml/train?days=90"
+
+# Check status
+curl "http://localhost:8001/api/v1/local-ml/status"
+
+# Get recommendations
+curl "http://localhost:8001/api/v1/local-ml/recommendations/customer123"
+```
+
+### Model Storage
+
+Models are saved in the `models/` directory:
+
+```
+models/
+├── svd_recommender_latest.joblib      # Always points to newest
+├── svd_recommender_20231216_020000.joblib  # Versioned backup
+├── item_similarity_latest.joblib
+├── item_similarity_20231216_020000.joblib
+├── popularity_scores_latest.joblib
+├── popularity_scores_20231216_020000.joblib
+└── metadata.json                       # Index of all models
+```
+
+### Dependencies
+
+```
+# requirements.txt additions
+scikit-surprise==1.1.3   # Collaborative filtering (SVD, KNN)
+scipy==1.11.4            # Sparse matrices, similarity calculations
+joblib==1.3.2            # Model serialization (already included)
+```
+
+### Comparison: Old vs New Implementation
+
+| Feature | Old (DB Storage) | New (File Storage) |
+|---------|-----------------|-------------------|
+| **Storage** | PostgreSQL BYTEA | Joblib files |
+| **Load Time** | ~500ms (network) | ~50ms (local disk) |
+| **Debugging** | Hard (binary in DB) | Easy (inspect files) |
+| **Versioning** | Single version | Multiple versions |
+| **Portability** | Tied to DB | Copy files anywhere |
+| **Size Limit** | DB row limits | Filesystem only |

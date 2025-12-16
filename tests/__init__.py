@@ -1,3 +1,0 @@
-"""
-Recommendation Engine Tests Package
-"""

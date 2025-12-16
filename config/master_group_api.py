@@ -1,105 +1,122 @@
 """
-Master Group API Configuration
+Configuration for Master Group API and database connections.
+Reads from environment variables with sensible defaults.
 """
 import os
 from dotenv import load_dotenv
 
+# Load .env file
 load_dotenv()
 
+# =============================================================================
+# PostgreSQL Configuration
+# =============================================================================
+PG_CONFIG = {
+    "host": os.getenv("PG_HOST", "localhost"),
+    "port": int(os.getenv("PG_PORT", 5432)),
+    "database": os.getenv("PG_DB", "mastergroup_recommendations"),
+    "dbname": os.getenv("PG_DB", "mastergroup_recommendations"),  # alias for psycopg2
+    "user": os.getenv("PG_USER", "postgres"),
+    "password": os.getenv("PG_PASSWORD", ""),
+}
+
+# Production PostgreSQL (Lightsail)
+PROD_PG_CONFIG = {
+    "host": os.getenv("PROD_PG_HOST", ""),
+    "port": int(os.getenv("PROD_PG_PORT", 5432)),
+    "dbname": os.getenv("PROD_PG_DB", "mastergroup_recommendations"),
+    "user": os.getenv("PROD_PG_USER", "postgres"),
+    "password": os.getenv("PROD_PG_PASSWORD", ""),
+}
+
+# =============================================================================
+# Redis Configuration
+# =============================================================================
+REDIS_CONFIG = {
+    "host": os.getenv("REDIS_HOST", "localhost"),
+    "port": int(os.getenv("REDIS_PORT", 6379)),
+    "db": int(os.getenv("REDIS_DB", 0)),
+}
+
+# =============================================================================
 # Master Group API Configuration
+# =============================================================================
 MASTER_GROUP_CONFIG = {
-    'base_url': os.getenv('MASTER_GROUP_API_BASE', 'https://mes.master.com.pk'),
-    'endpoints': {
-        'pos_orders': os.getenv('MASTER_GROUP_POS_ENDPOINT', '/get_pos_orders'),
-        'oe_orders': os.getenv('MASTER_GROUP_OE_ENDPOINT', '/get_oe_orders')
-    },
-    'auth_token': os.getenv('MASTER_GROUP_AUTH_TOKEN', ''),
-    'timeout': 300,  # 5 minutes
-    'retry_attempts': 3,
-    'retry_delay': 60,  # 1 minute
-    'sync_pos': os.getenv('SYNC_POS_ORDERS', 'true').lower() == 'true',
-    'sync_oe': os.getenv('SYNC_OE_ORDERS', 'true').lower() == 'true',
-    'headers': {
-        'Authorization': os.getenv('MASTER_GROUP_AUTH_TOKEN', ''),
-        'Content-Type': 'application/json'
-    }
+    "base_url": os.getenv("MASTER_GROUP_API_BASE", "https://mes.master.com.pk"),
+    "pos_endpoint": os.getenv("MASTER_GROUP_POS_ENDPOINT", "/get_pos_orders"),
+    "oe_endpoint": os.getenv("MASTER_GROUP_OE_ENDPOINT", "/get_oe_orders"),
+    "auth_token": os.getenv("MASTER_GROUP_AUTH_TOKEN", ""),
 }
 
-# Sync Configuration - Changed to once per day (1440 minutes) to reduce load
+# =============================================================================
+# Sync Configuration
+# =============================================================================
 SYNC_CONFIG = {
-    'interval_minutes': int(os.getenv('SYNC_INTERVAL_MINUTES', '1440')),  # Default: once per day
-    'batch_size': int(os.getenv('SYNC_BATCH_SIZE', '1000')),
-    'lookback_minutes': int(os.getenv('SYNC_LOOKBACK_MINUTES', '1440')),  # Look back 24 hours
-    'enable_auto_sync': os.getenv('ENABLE_AUTO_SYNC', 'false').lower() == 'true',  # Disabled by default
-    'incremental': True  # Only fetch new orders
+    "sync_pos_orders": os.getenv("SYNC_POS_ORDERS", "true").lower() == "true",
+    "sync_oe_orders": os.getenv("SYNC_OE_ORDERS", "true").lower() == "true",
+    "interval_minutes": int(os.getenv("SYNC_INTERVAL_MINUTES", 360)),
+    "batch_size": int(os.getenv("SYNC_BATCH_SIZE", 1000)),
+    "lookback_minutes": int(os.getenv("SYNC_LOOKBACK_MINUTES", 1440)),
+    "enable_auto_sync": os.getenv("ENABLE_AUTO_SYNC", "true").lower() == "true",
 }
 
-# Environment Detection and Database Configuration
-def is_heroku():
-    """Check if we're running on Heroku"""
-    return os.getenv('DATABASE_URL') is not None
+# =============================================================================
+# Shopify Configuration
+# =============================================================================
+SHOPIFY_CONFIG = {
+    "store": os.getenv("SHOPIFY_STORE", "masterverse-project.myshopify.com"),
+    "api_key": os.getenv("SHOPIFY_API_KEY", ""),
+    "api_secret": os.getenv("SHOPIFY_API_SECRET", ""),
+    "access_token": os.getenv("SHOPIFY_ACCESS_TOKEN", ""),
+    "api_version": os.getenv("SHOPIFY_API_VERSION", "2024-01"),
+}
 
-def get_database_config():
-    """Get database configuration based on environment"""
-    if is_heroku():
-        # Parse Heroku DATABASE_URL
-        import urllib.parse as urlparse
-        url = urlparse.urlparse(os.getenv('DATABASE_URL'))
-        return {
-            'host': url.hostname,
-            'port': url.port or 5432,
-            'database': url.path[1:],  # Remove leading slash
-            'user': url.username,
-            'password': url.password,
-            'sslmode': 'require'  # Heroku requires SSL
-        }
-    else:
-        # Local development configuration
-        return {
-            'host': os.getenv('PG_HOST', 'localhost'),
-            'port': int(os.getenv('PG_PORT', '5432')),
-            'database': os.getenv('PG_DB', 'mastergroup_recommendations'),
-            'user': os.getenv('PG_USER', 'postgres'),
-            'password': os.getenv('PG_PASSWORD', 'postgres'),
-            'sslmode': 'disable'  # Disable SSL for local development
-        }
+# =============================================================================
+# ML Configuration
+# =============================================================================
+ML_CONFIG = {
+    "use_local_ml": os.getenv("USE_LOCAL_ML", "true").lower() == "true",
+    "model_path": os.getenv("ML_MODEL_PATH", "./custom_ml/models"),
+    "training_schedule": os.getenv("ML_TRAINING_SCHEDULE", "0 2 * * *"),
+    "batch_inference_schedule": os.getenv("ML_BATCH_INFERENCE_SCHEDULE", "0 3 * * *"),
+}
 
-def get_redis_config():
-    """Get Redis configuration based on environment"""
-    if is_heroku():
-        # Parse Heroku REDIS_URL
-        redis_url = os.getenv('REDIS_URL')
-        if redis_url:
-            import urllib.parse as urlparse
-            url = urlparse.urlparse(redis_url)
-            return {
-                'host': url.hostname,
-                'port': url.port or 6379,
-                'db': int(os.getenv('REDIS_DB', '0')),
-                'ttl': int(os.getenv('CACHE_TTL', '3600')),
-                'password': url.password,
-                'ssl': True,
-                'ssl_cert_reqs': None  # Disable SSL certificate verification for Heroku Redis
-            }
-    
-    # Local development configuration
-    return {
-        'host': os.getenv('REDIS_HOST', 'localhost'),
-        'port': int(os.getenv('REDIS_PORT', '6379')),
-        'db': int(os.getenv('REDIS_DB', '0')),
-        'ttl': int(os.getenv('CACHE_TTL', '3600'))
-    }
+# =============================================================================
+# Application Settings
+# =============================================================================
+class Settings:
+    debug = os.getenv("DEBUG", "true").lower() == "true"
+    environment = os.getenv("ENVIRONMENT", "local")
+    api_host = os.getenv("API_HOST", "0.0.0.0")
+    api_port = int(os.getenv("API_PORT", 8001))
 
-# Use environment-specific configurations
-PG_CONFIG = get_database_config()
-REDIS_CONFIG = get_redis_config()
+settings = Settings()
 
-def get_api_url(endpoint_name):
-    """Get full API URL for an endpoint"""
-    base_url = MASTER_GROUP_CONFIG['base_url']
-    endpoint = MASTER_GROUP_CONFIG['endpoints'].get(endpoint_name, '')
-    return f"{base_url}{endpoint}"
 
-def get_auth_headers():
-    """Get authentication headers for API requests"""
-    return MASTER_GROUP_CONFIG['headers']
+# =============================================================================
+# Helper Functions
+# =============================================================================
+def get_api_url(endpoint_type: str = "pos") -> str:
+    """Get full API URL for Master Group endpoint"""
+    base = MASTER_GROUP_CONFIG["base_url"]
+    if endpoint_type == "pos":
+        return f"{base}{MASTER_GROUP_CONFIG['pos_endpoint']}"
+    elif endpoint_type == "oe":
+        return f"{base}{MASTER_GROUP_CONFIG['oe_endpoint']}"
+    return base
+
+
+def get_auth_headers() -> dict:
+    """Get authentication headers for Master Group API"""
+    token = MASTER_GROUP_CONFIG["auth_token"]
+    if token:
+        return {"Authorization": f"Bearer {token}"}
+    return {}
+
+
+def get_pg_connection_string() -> str:
+    """Get PostgreSQL connection string"""
+    return (
+        f"postgresql://{PG_CONFIG['user']}:{PG_CONFIG['password']}"
+        f"@{PG_CONFIG['host']}:{PG_CONFIG['port']}/{PG_CONFIG['dbname']}"
+    )

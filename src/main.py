@@ -4,7 +4,7 @@ Core ML algorithms and recommendation inference with Redis caching and PostgreSQ
 """
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Query, Depends, status, Path, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Query, Depends, status, Path, BackgroundTasks, Request
 from src.auth import (
     authenticate_user, create_access_token, update_last_login,
     get_current_active_user, User, LoginRequest, Token,
@@ -731,9 +731,10 @@ def popular_products(limit: int = 10, time_filter: str = "7days", category: str 
                 order_source = row['order_type'] if row['order_type'] in ['pos', 'oe'] else 'pos'
                 product_category = extract_smart_category(product_name, None, order_source)
                 
-                # Filter by category if specified
+                # Filter by category if specified (supports comma-separated multi-select)
                 if category and category.lower() != 'all':
-                    if product_category.lower() != category.lower():
+                    selected_categories = [c.strip().lower() for c in category.split(',')]
+                    if product_category.lower() not in selected_categories:
                         continue
                 
                 recommendations.append({
@@ -4277,194 +4278,504 @@ async def get_users_by_location(
 
 
 # ============================================================================
+# SHOPIFY INTEGRATION ENDPOINTS
+# ============================================================================
+
+@app.post("/api/v1/shopify/recommendations")
+async def get_shopify_recommendations(
+    request: Request
+):
+    """
+    Unified Shopify recommendation endpoint for checkout/cart pages.
+    
+    Request body:
+    {
+        "customer_email": "user@example.com",     // Optional: for personalized recs
+        "customer_phone": "03001234567",          // Optional: for personalized recs
+        "cart_items": ["product_id_1", "product_id_2"],  // Optional: for similar items
+        "current_product": "product_id",          // Optional: for similar items
+        "city": "Lahore",                         // Optional: for location-based
+        "province": "Punjab",                     // Optional: for location-based
+        "rfm_segment": "champions",               // Optional: for segment-based
+        "limit": 10                               // Optional: max recommendations
+    }
+    
+    Returns recommendations based on available context, with fallbacks:
+    1. Personalized (if customer identified)
+    2. Similar items (if cart/product provided)
+    3. Location-based (if city/province provided)
+    4. Segment-based (if RFM segment provided)
+    5. Popular items (fallback)
+    """
+    try:
+        body = await request.json()
+        
+        customer_email = body.get("customer_email")
+        customer_phone = body.get("customer_phone")
+        cart_items = body.get("cart_items", [])
+        current_product = body.get("current_product")
+        city = body.get("city")
+        province = body.get("province")
+        rfm_segment = body.get("rfm_segment")
+        limit = body.get("limit", 10)
+        
+        recommendations = []
+        recommendation_type = "popular"  # Default fallback
+        
+        if not pg_pool:
+            raise HTTPException(status_code=500, detail="Database not connected")
+        
+        conn = pg_pool.getconn()
+        try:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            
+            # 1. Try personalized recommendations (if customer identified)
+            user_id = None
+            if customer_phone or customer_email:
+                # Find user by phone or email
+                identifier = customer_phone or customer_email
+                cursor.execute("""
+                    SELECT DISTINCT unified_customer_id 
+                    FROM orders 
+                    WHERE unified_customer_id ILIKE %s 
+                    OR customer_phone = %s 
+                    OR customer_email = %s
+                    LIMIT 1
+                """, (f"%{identifier}%", customer_phone, customer_email))
+                result = cursor.fetchone()
+                
+                if result:
+                    user_id = result['unified_customer_id']
+                    
+                    # Get personalized recommendations from cache
+                    cursor.execute("""
+                        SELECT recommendations 
+                        FROM offline_user_recommendations 
+                        WHERE user_id = %s
+                    """, (user_id,))
+                    rec_result = cursor.fetchone()
+                    
+                    if rec_result and rec_result['recommendations']:
+                        recs = rec_result['recommendations']
+                        if isinstance(recs, str):
+                            import json
+                            recs = json.loads(recs)
+                        recommendations = recs[:limit]
+                        recommendation_type = "personalized"
+            
+            # 2. Try similar items (if cart or current product provided)
+            if not recommendations and (cart_items or current_product):
+                product_id = current_product or (cart_items[0] if cart_items else None)
+                
+                if product_id:
+                    cursor.execute("""
+                        SELECT similar_products 
+                        FROM offline_similar_items 
+                        WHERE product_id = %s
+                    """, (str(product_id),))
+                    sim_result = cursor.fetchone()
+                    
+                    if sim_result and sim_result['similar_products']:
+                        sims = sim_result['similar_products']
+                        if isinstance(sims, str):
+                            import json
+                            sims = json.loads(sims)
+                        recommendations = sims[:limit]
+                        recommendation_type = "similar_items"
+            
+            # 3. Try location-based recommendations
+            if not recommendations and (city or province):
+                cursor.execute("""
+                    SELECT oi.product_id, oi.product_name, COUNT(*) as purchase_count
+                    FROM orders o
+                    JOIN order_items oi ON o.id::text = oi.order_id
+                    WHERE (LOWER(o.customer_city) = LOWER(%s) OR LOWER(o.province) = LOWER(%s))
+                    AND oi.product_id IS NOT NULL
+                    GROUP BY oi.product_id, oi.product_name
+                    ORDER BY purchase_count DESC
+                    LIMIT %s
+                """, (city or '', province or '', limit))
+                
+                loc_results = cursor.fetchall()
+                if loc_results:
+                    recommendations = [
+                        {"item_id": r['product_id'], "item_name": r['product_name'], "score": r['purchase_count']}
+                        for r in loc_results
+                    ]
+                    recommendation_type = "location_based"
+            
+            # 4. Try segment-based recommendations
+            if not recommendations and rfm_segment:
+                # Get popular items for this segment
+                cursor.execute("""
+                    SELECT oi.product_id, oi.product_name, COUNT(*) as purchase_count
+                    FROM orders o
+                    JOIN order_items oi ON o.id::text = oi.order_id
+                    WHERE o.unified_customer_id IN (
+                        SELECT user_id FROM rfm_segments WHERE segment = %s
+                    )
+                    AND oi.product_id IS NOT NULL
+                    GROUP BY oi.product_id, oi.product_name
+                    ORDER BY purchase_count DESC
+                    LIMIT %s
+                """, (rfm_segment, limit))
+                
+                seg_results = cursor.fetchall()
+                if seg_results:
+                    recommendations = [
+                        {"item_id": r['product_id'], "item_name": r['product_name'], "score": r['purchase_count']}
+                        for r in seg_results
+                    ]
+                    recommendation_type = "segment_based"
+            
+            # 5. Fallback to popular items
+            if not recommendations:
+                cursor.execute("""
+                    SELECT oi.product_id, oi.product_name, COUNT(*) as purchase_count
+                    FROM order_items oi
+                    JOIN orders o ON o.id::text = oi.order_id
+                    WHERE o.order_date >= NOW() - INTERVAL '90 days'
+                    AND oi.product_id IS NOT NULL
+                    GROUP BY oi.product_id, oi.product_name
+                    ORDER BY purchase_count DESC
+                    LIMIT %s
+                """, (limit,))
+                
+                pop_results = cursor.fetchall()
+                recommendations = [
+                    {"item_id": r['product_id'], "item_name": r['product_name'], "score": r['purchase_count']}
+                    for r in pop_results
+                ]
+                recommendation_type = "popular"
+            
+            cursor.close()
+            
+        finally:
+            pg_pool.putconn(conn)
+        
+        return {
+            "success": True,
+            "recommendation_type": recommendation_type,
+            "user_identified": user_id is not None,
+            "user_id": user_id,
+            "recommendations": recommendations,
+            "count": len(recommendations),
+            "context": {
+                "customer_phone": customer_phone,
+                "customer_email": customer_email,
+                "cart_items": cart_items,
+                "current_product": current_product,
+                "city": city,
+                "province": province,
+                "rfm_segment": rfm_segment
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Shopify recommendations error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/shopify/similar/{product_id}")
+async def get_shopify_similar_products(
+    product_id: str = Path(..., description="Shopify Product ID"),
+    limit: int = Query(10, description="Number of similar products")
+):
+    """
+    Get similar products for Shopify product pages.
+    Use this for "You might also like" sections.
+    """
+    try:
+        if not pg_pool:
+            raise HTTPException(status_code=500, detail="Database not connected")
+        
+        conn = pg_pool.getconn()
+        try:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            
+            # Get similar products from cache
+            cursor.execute("""
+                SELECT similar_products 
+                FROM offline_similar_items 
+                WHERE product_id = %s
+            """, (str(product_id),))
+            result = cursor.fetchone()
+            
+            if result and result['similar_products']:
+                sims = result['similar_products']
+                if isinstance(sims, str):
+                    import json
+                    sims = json.loads(sims)
+                
+                cursor.close()
+                return {
+                    "success": True,
+                    "product_id": product_id,
+                    "similar_products": sims[:limit],
+                    "count": len(sims[:limit])
+                }
+            
+            # Fallback: get popular products
+            cursor.execute("""
+                SELECT oi.product_id, oi.product_name, COUNT(*) as score
+                FROM order_items oi
+                JOIN orders o ON o.id::text = oi.order_id
+                WHERE o.order_date >= NOW() - INTERVAL '90 days'
+                AND oi.product_id != %s
+                AND oi.product_id IS NOT NULL
+                GROUP BY oi.product_id, oi.product_name
+                ORDER BY score DESC
+                LIMIT %s
+            """, (str(product_id), limit))
+            
+            results = cursor.fetchall()
+            cursor.close()
+            
+            return {
+                "success": True,
+                "product_id": product_id,
+                "similar_products": [
+                    {"item_id": r['product_id'], "item_name": r['product_name'], "score": r['score']}
+                    for r in results
+                ],
+                "count": len(results),
+                "fallback": True
+            }
+            
+        finally:
+            pg_pool.putconn(conn)
+            
+    except Exception as e:
+        logger.error(f"Shopify similar products error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/shopify/sync")
+async def sync_shopify_orders(
+    days: int = Query(30, description="Days of orders to sync"),
+    background_tasks: BackgroundTasks = None
+):
+    """
+    Sync orders from Shopify store to local database.
+    This updates the training data for recommendations.
+    """
+    try:
+        from src.services.shopify_service import get_shopify_service
+        
+        shopify = get_shopify_service()
+        
+        if not pg_pool:
+            raise HTTPException(status_code=500, detail="Database not connected")
+        
+        conn = pg_pool.getconn()
+        try:
+            result = shopify.sync_orders_to_db(conn, days=days)
+            return {
+                "success": True,
+                "message": f"Synced {result['orders_synced']} orders, {result['items_synced']} items from Shopify",
+                **result
+            }
+        finally:
+            pg_pool.putconn(conn)
+            
+    except Exception as e:
+        logger.error(f"Shopify sync error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/shopify/products")
+async def get_shopify_products(
+    limit: int = Query(50, description="Number of products to return")
+):
+    """
+    Get products from Shopify store.
+    Useful for mapping product IDs between systems.
+    """
+    try:
+        from src.services.shopify_service import get_shopify_service
+        
+        shopify = get_shopify_service()
+        products = shopify.get_products(limit=limit)
+        
+        return {
+            "success": True,
+            "products": [
+                {
+                    "id": str(p["id"]),
+                    "title": p.get("title", ""),
+                    "handle": p.get("handle", ""),
+                    "vendor": p.get("vendor", ""),
+                    "price": float(p.get("variants", [{}])[0].get("price", 0)) if p.get("variants") else 0
+                }
+                for p in products
+            ],
+            "count": len(products)
+        }
+        
+    except Exception as e:
+        logger.error(f"Shopify products error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/shopify/webhook/order-created")
+async def shopify_order_webhook(request: Request):
+    """
+    Webhook handler for Shopify order creation.
+    Automatically updates training data when new orders come in.
+    
+    Configure in Shopify Admin > Settings > Notifications > Webhooks
+    Topic: orders/create
+    """
+    try:
+        body = await request.json()
+        
+        # Extract order data
+        order_id = f"shopify_{body.get('id')}"
+        customer = body.get("customer", {})
+        
+        customer_email = customer.get("email", "")
+        customer_phone = customer.get("phone", "")
+        customer_name = f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip()
+        
+        # Generate unified customer ID
+        if customer_phone:
+            unified_id = f"{customer_phone}_{customer_name.split()[0].lower() if customer_name else 'customer'}"
+        elif customer_email:
+            unified_id = customer_email.split("@")[0]
+        else:
+            unified_id = f"shopify_{customer.get('id', 'unknown')}"
+        
+        shipping = body.get("shipping_address", {})
+        city = shipping.get("city", "")
+        province = shipping.get("province", "")
+        
+        order_date = body.get("created_at", "")[:19]
+        total = float(body.get("total_price", 0))
+        
+        if not pg_pool:
+            raise HTTPException(status_code=500, detail="Database not connected")
+        
+        conn = pg_pool.getconn()
+        try:
+            cursor = conn.cursor()
+            
+            # Insert order
+            cursor.execute("""
+                INSERT INTO orders (id, unified_customer_id, customer_name, customer_email, 
+                                   customer_phone, customer_city, province, order_date, 
+                                   total_price, source_type)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    unified_customer_id = EXCLUDED.unified_customer_id,
+                    total_price = EXCLUDED.total_price
+            """, (order_id, unified_id, customer_name, customer_email, 
+                  customer_phone, city, province, order_date, total, 'SHOPIFY'))
+            
+            items_inserted = 0
+            for item in body.get("line_items", []):
+                product_id = str(item.get("product_id", ""))
+                product_name = item.get("title", "")
+                quantity = item.get("quantity", 1)
+                price = float(item.get("price", 0))
+                
+                if product_id:
+                    cursor.execute("""
+                        INSERT INTO order_items (order_id, product_id, product_name, 
+                                                quantity, unit_price)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (order_id, product_id) DO UPDATE SET
+                            quantity = EXCLUDED.quantity
+                    """, (order_id, product_id, product_name, quantity, price))
+                    items_inserted += 1
+            
+            conn.commit()
+            cursor.close()
+            
+            logger.info(f"Shopify webhook: Order {order_id} saved ({items_inserted} items)")
+            
+            return {
+                "success": True,
+                "order_id": order_id,
+                "customer_id": unified_id,
+                "items_count": items_inserted
+            }
+            
+        finally:
+            pg_pool.putconn(conn)
+            
+    except Exception as e:
+        logger.error(f"Shopify webhook error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/shopify/popular")
+async def get_shopify_popular_products(
+    city: Optional[str] = Query(None, description="Filter by city"),
+    province: Optional[str] = Query(None, description="Filter by province"),
+    days: int = Query(30, description="Look back days"),
+    limit: int = Query(10, description="Number of products")
+):
+    """
+    Get popular products, optionally filtered by location.
+    Use for anonymous users or homepage recommendations.
+    """
+    try:
+        if not pg_pool:
+            raise HTTPException(status_code=500, detail="Database not connected")
+        
+        conn = pg_pool.getconn()
+        try:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            
+            query = """
+                SELECT oi.product_id, oi.product_name, COUNT(*) as purchase_count
+                FROM order_items oi
+                JOIN orders o ON o.id::text = oi.order_id
+                WHERE o.order_date >= NOW() - INTERVAL '%s days'
+                AND oi.product_id IS NOT NULL
+            """
+            params = [days]
+            
+            if city:
+                query += " AND LOWER(o.customer_city) = LOWER(%s)"
+                params.append(city)
+            
+            if province:
+                query += " AND LOWER(o.province) = LOWER(%s)"
+                params.append(province)
+            
+            query += """
+                GROUP BY oi.product_id, oi.product_name
+                ORDER BY purchase_count DESC
+                LIMIT %s
+            """
+            params.append(limit)
+            
+            cursor.execute(query, params)
+            results = cursor.fetchall()
+            cursor.close()
+            
+            return {
+                "success": True,
+                "popular_products": [
+                    {"item_id": r['product_id'], "item_name": r['product_name'], "score": r['purchase_count']}
+                    for r in results
+                ],
+                "count": len(results),
+                "filters": {"city": city, "province": province, "days": days}
+            }
+            
+        finally:
+            pg_pool.putconn(conn)
+            
+    except Exception as e:
+        logger.error(f"Shopify popular products error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
 # END ML-POWERED ANALYTICS ENDPOINTS
 # ============================================================================
-
-
-# ============================================================================
-# COLLABORATIVE FILTERING ML ENDPOINTS
-# ============================================================================
-
-@app.get("/api/v1/ml/health")
-async def ml_health_check():
-    """Check ML service health"""
-    return {
-        "success": True,
-        "ml_service_ready": ml_service.is_ready(),
-        "timestamp": datetime.now().isoformat()
-    }
-
-@app.get("/api/v1/ml/model/info")
-async def ml_model_info():
-    """Get ML model information"""
-    try:
-        if not ml_service.is_ready():
-            raise HTTPException(status_code=503, detail="ML models not loaded")
-        
-        return {
-            "success": True,
-            "model_info": ml_service.get_model_info()
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting model info: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/v1/ml/recommendations/location")
-async def ml_location_recommendations(
-    city: str = Query("", description="Customer city"),
-    state: str = Query("", description="Customer state"),
-    country: str = Query("", description="Customer country"),
-    limit: int = Query(10, ge=1, le=100, description="Number of recommendations"),
-    exclude_purchased: bool = Query(True, description="Exclude purchased products")
-):
-    """Get ML-based recommendations for a location"""
-    try:
-        if not ml_service.is_ready():
-            raise HTTPException(status_code=503, detail="ML models not loaded")
-        
-        recommendations = ml_service.get_location_recommendations(
-            city=city,
-            state=state,
-            country=country,
-            limit=limit,
-            exclude_purchased=exclude_purchased
-        )
-        
-        return {
-            "success": True,
-            "algorithm": "collaborative_filtering_ml",
-            "location": {"city": city, "state": state, "country": country},
-            "n_recommendations": len(recommendations),
-            "recommendations": recommendations
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error generating ML recommendations: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/v1/ml/recommendations/cart")
-async def ml_cart_recommendations(request: CartRecommendationRequest):
-    """Get cart-based ML recommendations (Frequently Bought Together)"""
-    try:
-        if not ml_service.is_ready():
-            raise HTTPException(status_code=503, detail="ML models not loaded")
-        
-        # Extract SKUs from cart items
-        cart_skus = [item.sku for item in request.cart_items]
-        
-        recommendations = ml_service.get_cart_recommendations(
-            city=request.location.city,
-            state=request.location.state,
-            country=request.location.country,
-            cart_skus=cart_skus,
-            limit=request.limit
-        )
-        
-        return {
-            "success": True,
-            "algorithm": "cart_based_collaborative_filtering",
-            "location": request.location.dict(),
-            "cart_items_count": len(cart_skus),
-            "cart_skus": cart_skus,
-            "n_recommendations": len(recommendations),
-            "recommendations": recommendations
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error generating cart recommendations: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/v1/ml/recommendations/similar-products/{product_id}")
-async def ml_similar_products(
-    product_id: str = Path(..., description="Product SKU"),
-    limit: int = Query(10, ge=1, le=100, description="Number of similar products")
-):
-    """Get similar products using ML"""
-    try:
-        if not ml_service.is_ready():
-            raise HTTPException(status_code=503, detail="ML models not loaded")
-        
-        similar_products = ml_service.get_similar_products(
-            product_id=product_id,
-            limit=limit
-        )
-        
-        if not similar_products:
-            raise HTTPException(status_code=404, detail=f"Product {product_id} not found")
-        
-        return {
-            "success": True,
-            "algorithm": "item_based_collaborative_filtering",
-            "product_id": product_id,
-            "n_similar_products": len(similar_products),
-            "similar_products": similar_products
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error finding similar products: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/v1/ml/recommendations/popular")
-async def ml_popular_products(
-    limit: int = Query(10, ge=1, le=100, description="Number of products")
-):
-    """Get popular products using ML"""
-    try:
-        if not ml_service.is_ready():
-            raise HTTPException(status_code=503, detail="ML models not loaded")
-        
-        popular_products = ml_service.get_popular_products(limit=limit)
-        
-        return {
-            "success": True,
-            "algorithm": "popularity_based_ml",
-            "n_products": len(popular_products),
-            "products": popular_products
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting popular products: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/v1/ml/recommendations/batch")
-async def ml_batch_recommendations(request: BatchLocationRequest):
-    """Get recommendations for multiple locations"""
-    try:
-        if not ml_service.is_ready():
-            raise HTTPException(status_code=503, detail="ML models not loaded")
-        
-        if len(request.locations) > 1000:
-            raise HTTPException(status_code=400, detail="Maximum 1000 locations per batch")
-        
-        # Convert to list of dicts
-        locations = [loc.dict() for loc in request.locations]
-        
-        results = ml_service.batch_recommendations(
-            locations=locations,
-            limit=request.limit
-        )
-        
-        return {
-            "success": True,
-            "n_locations": len(locations),
-            "recommendations": results
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in batch recommendations: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ============================================================================
-# END COLLABORATIVE FILTERING ML ENDPOINTS
-# ============================================================================
-
 
 if __name__ == "__main__":
     import uvicorn

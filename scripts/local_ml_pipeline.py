@@ -104,70 +104,93 @@ def fetch_from_master_apis(days: int = 7) -> Dict:
         'errors': []
     }
     
-    end_date = datetime.now().strftime('%Y-%m-%d')
-    start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+    # Batch fetching configuration
+    BATCH_DAYS = 90
     
-    # Auth headers
-    headers = {
-        'Authorization': os.getenv('MASTER_GROUP_AUTH_TOKEN', ''),
-        'Content-Type': 'application/json'
-    }
+    total_oe = 0
+    total_pos = 0
     
-    # Fetch OE Orders
-    try:
-        logger.info(f"  Fetching OE orders ({start_date} to {end_date})...")
-        url = f"{MASTER_API_BASE}/get_oe_orders"
-        response = requests.get(
-            url, 
-            params={'start_date': start_date, 'end_date': end_date},
-            headers=headers,
-            timeout=120
-        )
+    # Calculate batches
+    current_end = datetime.now()
+    final_start = current_end - timedelta(days=days)
+    
+    current_batch_end = current_end
+    
+    logger.info(f"  🔄 Batch processing: Fetching data in {BATCH_DAYS}-day chunks...")
+    
+    while current_batch_end > final_start:
+        current_batch_start = current_batch_end - timedelta(days=BATCH_DAYS)
+        if current_batch_start < final_start:
+            current_batch_start = final_start
+            
+        start_str = current_batch_start.strftime('%Y-%m-%d')
+        end_str = current_batch_end.strftime('%Y-%m-%d')
         
-        if response.status_code == 200:
-            data = response.json()
-            orders = data if isinstance(data, list) else data.get('data', [])
-            results['oe_orders'] = len(orders)
-            
-            # Insert into database
-            if orders:
-                insert_orders_to_db(orders, source='OE')
-            logger.info(f"  ✅ OE: {len(orders)} orders")
-        else:
-            results['errors'].append(f"OE API error: {response.status_code}")
-            logger.error(f"  ❌ OE API error: {response.status_code}")
-            
-    except Exception as e:
-        results['errors'].append(f"OE API exception: {str(e)}")
-        logger.error(f"  ❌ OE API exception: {e}")
-    
-    # Fetch POS Orders
-    try:
-        logger.info(f"  Fetching POS orders ({start_date} to {end_date})...")
-        url = f"{MASTER_API_BASE}/get_pos_orders"
-        response = requests.get(
-            url,
-            params={'start_date': start_date, 'end_date': end_date},
-            headers=headers,
-            timeout=120
-        )
+        logger.info(f"    Chunk: {start_str} to {end_str}")
         
-        if response.status_code == 200:
-            data = response.json()
-            orders = data if isinstance(data, list) else data.get('data', [])
-            results['pos_orders'] = len(orders)
+        end_date = end_str
+        start_date = start_str
+        
+        # Auth headers
+        headers = {
+            'Authorization': os.getenv('MASTER_GROUP_AUTH_TOKEN', ''),
+            'Content-Type': 'application/json'
+        }
+        
+        # Fetch OE Orders
+        try:
+            url = f"{MASTER_API_BASE}/get_oe_orders"
+            response = requests.get(
+                url, 
+                params={'start_date': start_date, 'end_date': end_date},
+                headers=headers,
+                timeout=120
+            )
             
-            # Insert into database
-            if orders:
-                insert_orders_to_db(orders, source='POS')
-            logger.info(f"  ✅ POS: {len(orders)} orders")
-        else:
-            results['errors'].append(f"POS API error: {response.status_code}")
-            logger.error(f"  ❌ POS API error: {response.status_code}")
+            if response.status_code == 200:
+                data = response.json()
+                orders = data if isinstance(data, list) else data.get('data', [])
+                
+                # Insert into database
+                if orders:
+                    insert_orders_to_db(orders, source='OE')
+                    total_oe += len(orders)
+            else:
+                logger.error(f"      ❌ OE API error: {response.status_code}")
+                
+        except Exception as e:
+            logger.error(f"      ❌ OE API exception: {e}")
+
+        # Fetch POS Orders
+        try:
+            url = f"{MASTER_API_BASE}/get_pos_orders"
+            response = requests.get(
+                url,
+                params={'start_date': start_date, 'end_date': end_date},
+                headers=headers,
+                timeout=120
+            )
             
-    except Exception as e:
-        results['errors'].append(f"POS API exception: {str(e)}")
-        logger.error(f"  ❌ POS API exception: {e}")
+            if response.status_code == 200:
+                data = response.json()
+                orders = data if isinstance(data, list) else data.get('data', [])
+                
+                # Insert into database
+                if orders:
+                    insert_orders_to_db(orders, source='POS')
+                    total_pos += len(orders)
+            else:
+                logger.error(f"      ❌ POS API error: {response.status_code}")
+                
+        except Exception as e:
+            logger.error(f"      ❌ POS API exception: {e}")
+            
+        # Move to next batch
+        current_batch_end = current_batch_start
+        
+    results['oe_orders'] = total_oe
+    results['pos_orders'] = total_pos
+    logger.info(f"  ✅ Total OE: {total_oe}, Total POS: {total_pos}")
     
     return results
 

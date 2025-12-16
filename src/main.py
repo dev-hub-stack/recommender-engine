@@ -4025,16 +4025,16 @@ async def get_similar_products(
             
             # Get similar items from local cache
             cursor.execute("""
-                SELECT similar_items
+                SELECT similar_products
                 FROM offline_similar_items
-                WHERE item_id = %s
+                WHERE product_id = %s
             """, (product_id,))
             
             result = cursor.fetchone()
             similar_items = []
             
-            if result and result['similar_items']:
-                items_data = result['similar_items']
+            if result and result['similar_products']:
+                items_data = result['similar_products']
                 if isinstance(items_data, str):
                     import json
                     items_data = json.loads(items_data)

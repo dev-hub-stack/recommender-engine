@@ -3640,15 +3640,14 @@ async def get_personalize_recommendations_by_location(
     province: Optional[str] = Query(None, description="Filter by province"),
     city: Optional[str] = Query(None, description="Filter by city"),
     num_results: int = Query(10, description="Number of recommendations per user"),
-    limit_users: int = Query(5, description="Number of users to get recommendations for")
+    limit_users: int = Query(50, description="Number of users to get recommendations for")
 ):
     """
-    Get AWS Personalize recommendations for users in a specific province/city.
+    Get ML recommendations for users in a specific province/city.
+    Uses local ML models (replaces AWS Personalize).
     Returns aggregated recommendations for users in that location.
     """
     try:
-        from aws_personalize.personalize_service import get_personalize_service
-        
         if not pg_pool:
             raise HTTPException(status_code=500, detail="Database not connected")
         
@@ -3656,10 +3655,14 @@ async def get_personalize_recommendations_by_location(
         try:
             cursor = conn.cursor(cursor_factory=RealDictCursor)
             
-            # Build query to get users from location
+            # Build query to get users from location who have recommendations
             query = """
-                SELECT DISTINCT o.unified_customer_id as customer_id, o.customer_name, o.customer_city as city, o.province
+                SELECT DISTINCT o.unified_customer_id as customer_id, 
+                       o.customer_name, 
+                       o.customer_city as city, 
+                       o.province
                 FROM orders o
+                INNER JOIN offline_user_recommendations r ON o.unified_customer_id = r.user_id
                 WHERE o.unified_customer_id IS NOT NULL
             """
             params = []
@@ -3686,19 +3689,34 @@ async def get_personalize_recommendations_by_location(
                     "message": "No users found in this location"
                 }
             
-            # Get recommendations for each user
-            personalize = get_personalize_service()
+            # Get recommendations for each user from local cache
             user_recommendations = []
             all_product_scores = defaultdict(lambda: {"score": 0, "count": 0})
             
+            user_ids = [u['customer_id'] for u in users]
+            placeholders = ','.join(['%s'] * len(user_ids))
+            
+            cursor.execute(f"""
+                SELECT user_id, recommendations
+                FROM offline_user_recommendations
+                WHERE user_id IN ({placeholders})
+            """, user_ids)
+            
+            user_recs_map = {r['user_id']: r['recommendations'] for r in cursor.fetchall()}
+            
             for user in users:
-                recs = personalize.get_recommendations_for_user(
-                    str(user['customer_id']), 
-                    num_results
-                )
+                user_id = user['customer_id']
+                recs_data = user_recs_map.get(user_id, [])
+                
+                # Parse recommendations (stored as JSONB)
+                if isinstance(recs_data, str):
+                    import json
+                    recs_data = json.loads(recs_data)
+                
+                recs = recs_data[:num_results] if recs_data else []
                 
                 user_recommendations.append({
-                    "customer_id": user['customer_id'],
+                    "customer_id": user_id,
                     "customer_name": user['customer_name'],
                     "city": user['city'],
                     "province": user['province'],
@@ -3707,25 +3725,30 @@ async def get_personalize_recommendations_by_location(
                 
                 # Aggregate scores
                 for rec in recs:
-                    all_product_scores[rec['product_id']]['score'] += rec['score']
-                    all_product_scores[rec['product_id']]['count'] += 1
+                    pid = rec.get('item_id') or rec.get('product_id')
+                    score = rec.get('score', 0)
+                    if pid:
+                        all_product_scores[pid]['score'] += score
+                        all_product_scores[pid]['count'] += 1
             
             # Calculate average scores and sort
             aggregated = []
             for product_id, data in all_product_scores.items():
                 aggregated.append({
                     "product_id": product_id,
-                    "avg_score": data['score'] / data['count'],
+                    "avg_score": data['score'] / data['count'] if data['count'] > 0 else 0,
                     "recommended_to_users": data['count']
                 })
             
-            aggregated.sort(key=lambda x: x['avg_score'], reverse=True)
+            aggregated.sort(key=lambda x: (-x['recommended_to_users'], -x['avg_score']))
             
             # Collect all product IDs from all recommendations
             all_product_ids = set()
             for user_rec in user_recommendations:
                 for rec in user_rec['recommendations']:
-                    all_product_ids.add(rec['product_id'])
+                    pid = rec.get('item_id') or rec.get('product_id')
+                    if pid:
+                        all_product_ids.add(pid)
             for agg in aggregated[:20]:
                 all_product_ids.add(agg['product_id'])
             
@@ -3743,12 +3766,14 @@ async def get_personalize_recommendations_by_location(
             
             # Apply product names to aggregated recommendations
             for agg in aggregated:
-                agg['product_name'] = product_names.get(agg['product_id'], f"Product {agg['product_id']}")
+                agg['product_name'] = product_names.get(str(agg['product_id']), f"Product {agg['product_id']}")
             
             # Apply product names to per-user recommendations
             for user_rec in user_recommendations:
                 for rec in user_rec['recommendations']:
-                    rec['product_name'] = product_names.get(rec['product_id'], f"Product {rec['product_id']}")
+                    pid = rec.get('item_id') or rec.get('product_id')
+                    rec['product_id'] = pid
+                    rec['product_name'] = product_names.get(str(pid), f"Product {pid}")
             
             cursor.close()
             
@@ -3758,7 +3783,7 @@ async def get_personalize_recommendations_by_location(
                 "total_users": len(users),
                 "users": user_recommendations,
                 "aggregated_recommendations": aggregated[:20],
-                "source": "aws_personalize"
+                "source": "local_ml"
             }
             
         finally:
@@ -3918,42 +3943,66 @@ async def get_personalize_recommendations(
     num_results: int = Query(10, description="Number of recommendations")
 ):
     """
-    Get personalized recommendations from AWS Personalize for a specific user.
+    Get personalized recommendations for a specific user.
+    Uses local ML models (replaces AWS Personalize).
     """
     try:
-        from aws_personalize.personalize_service import get_personalize_service
+        if not pg_pool:
+            raise HTTPException(status_code=500, detail="Database not connected")
         
-        personalize = get_personalize_service()
-        recommendations = personalize.get_recommendations_for_user(user_id, num_results)
-        
-        # Enrich with product names from database
-        if recommendations and pg_pool:
-            product_ids = [r['product_id'] for r in recommendations]
-            conn = pg_pool.getconn()
-            try:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
-                placeholders = ','.join(['%s'] * len(product_ids))
-                cursor.execute(f"""
-                    SELECT DISTINCT product_id, product_name 
-                    FROM order_items 
-                    WHERE product_id IN ({placeholders})
-                """, product_ids)
-                product_names = {str(r['product_id']): r['product_name'] for r in cursor.fetchall()}
-                cursor.close()
+        conn = pg_pool.getconn()
+        try:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            
+            # Get recommendations from local cache
+            cursor.execute("""
+                SELECT recommendations
+                FROM offline_user_recommendations
+                WHERE user_id = %s
+            """, (user_id,))
+            
+            result = cursor.fetchone()
+            recommendations = []
+            
+            if result and result['recommendations']:
+                recs_data = result['recommendations']
+                if isinstance(recs_data, str):
+                    import json
+                    recs_data = json.loads(recs_data)
+                recommendations = recs_data[:num_results]
+            
+            # Enrich with product names
+            if recommendations:
+                product_ids = [r.get('item_id') or r.get('product_id') for r in recommendations]
+                product_ids = [pid for pid in product_ids if pid]
                 
-                for rec in recommendations:
-                    rec['product_name'] = product_names.get(rec['product_id'], f"Product {rec['product_id']}")
-            finally:
-                pg_pool.putconn(conn)
-        
-        return {
-            "user_id": user_id,
-            "recommendations": recommendations,
-            "count": len(recommendations),
-            "source": "aws_personalize"
-        }
+                if product_ids:
+                    placeholders = ','.join(['%s'] * len(product_ids))
+                    cursor.execute(f"""
+                        SELECT DISTINCT product_id, product_name 
+                        FROM order_items 
+                        WHERE product_id IN ({placeholders})
+                    """, product_ids)
+                    product_names = {str(r['product_id']): r['product_name'] for r in cursor.fetchall()}
+                    
+                    for rec in recommendations:
+                        pid = rec.get('item_id') or rec.get('product_id')
+                        rec['product_id'] = pid
+                        rec['product_name'] = product_names.get(str(pid), f"Product {pid}")
+            
+            cursor.close()
+            
+            return {
+                "user_id": user_id,
+                "recommendations": recommendations,
+                "count": len(recommendations),
+                "source": "local_ml"
+            }
+        finally:
+            pg_pool.putconn(conn)
+            
     except Exception as e:
-        logger.error(f"Failed to get Personalize recommendations: {e}")
+        logger.error(f"Failed to get recommendations: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -3963,40 +4012,64 @@ async def get_similar_products(
     num_results: int = Query(10, description="Number of similar products")
 ):
     """
-    Get similar products for cross-selling from AWS Personalize batch cache.
+    Get similar products for cross-selling.
+    Uses local ML models (replaces AWS Personalize).
     """
     try:
-        from aws_personalize.personalize_service import get_personalize_service
+        if not pg_pool:
+            raise HTTPException(status_code=500, detail="Database not connected")
         
-        personalize = get_personalize_service()
-        similar_items = personalize.get_similar_items(product_id, num_results)
-        
-        # Enrich with product names from database
-        if similar_items and pg_pool:
-            product_ids = [r['product_id'] for r in similar_items]
-            conn = pg_pool.getconn()
-            try:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
-                placeholders = ','.join(['%s'] * len(product_ids))
-                cursor.execute(f"""
-                    SELECT DISTINCT product_id, product_name 
-                    FROM order_items 
-                    WHERE product_id IN ({placeholders})
-                """, product_ids)
-                product_names = {str(r['product_id']): r['product_name'] for r in cursor.fetchall()}
-                cursor.close()
+        conn = pg_pool.getconn()
+        try:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            
+            # Get similar items from local cache
+            cursor.execute("""
+                SELECT similar_items
+                FROM offline_similar_items
+                WHERE item_id = %s
+            """, (product_id,))
+            
+            result = cursor.fetchone()
+            similar_items = []
+            
+            if result and result['similar_items']:
+                items_data = result['similar_items']
+                if isinstance(items_data, str):
+                    import json
+                    items_data = json.loads(items_data)
+                similar_items = items_data[:num_results]
+            
+            # Enrich with product names
+            if similar_items:
+                product_ids = [r.get('item_id') or r.get('product_id') for r in similar_items]
+                product_ids = [pid for pid in product_ids if pid]
                 
-                for item in similar_items:
-                    item['product_name'] = product_names.get(item['product_id'], f"Product {item['product_id']}")
-            finally:
-                pg_pool.putconn(conn)
-        
-        return {
-            "product_id": product_id,
-            "recommendations": similar_items,
-            "count": len(similar_items),
-            "source": "aws_personalize_batch"
-        }
+                if product_ids:
+                    placeholders = ','.join(['%s'] * len(product_ids))
+                    cursor.execute(f"""
+                        SELECT DISTINCT product_id, product_name 
+                        FROM order_items 
+                        WHERE product_id IN ({placeholders})
+                    """, product_ids)
+                    product_names = {str(r['product_id']): r['product_name'] for r in cursor.fetchall()}
+                    
+                    for item in similar_items:
+                        pid = item.get('item_id') or item.get('product_id')
+                        item['product_id'] = pid
+                        item['product_name'] = product_names.get(str(pid), f"Product {pid}")
+            
+            cursor.close()
+            
+            return {
+                "product_id": product_id,
+                "recommendations": similar_items,
+                "count": len(similar_items),
+                "source": "local_ml"
+            }
+        finally:
+            pg_pool.putconn(conn)
+            
     except Exception as e:
         logger.error(f"Failed to get similar products: {e}")
         raise HTTPException(status_code=500, detail=str(e))

@@ -1,4 +1,4 @@
-name: Deploy to Lightsail
+name: Deploy to EC2
 
 on:
   push:
@@ -13,15 +13,15 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Deploy to Lightsail
+      - name: Deploy to EC2
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.LIGHTSAIL_HOST }}
-          username: ${{ secrets.LIGHTSAIL_USERNAME }}
-          key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            echo "🚀 Starting deployment..."
-            cd /opt/mastergroup-api
+            echo "🚀 Starting deployment to EC2..."
+            cd /opt/mastergroup-ml
             
             # Get current commit for backup reference
             CURRENT_COMMIT=$(git rev-parse --short HEAD)
@@ -43,12 +43,15 @@ jobs:
             # Check if service is running
             if systemctl is-active --quiet mastergroup-api; then
               echo "✅ Service is running"
+              # Verify health endpoint
+              curl -s http://localhost:8001/health | head -c 100
             else
               echo "❌ Service failed to start"
               sudo journalctl -u mastergroup-api -n 20 --no-pager
               exit 1
             fi
             
+            echo ""
             echo "✅ Deployment successful! ($CURRENT_COMMIT → $NEW_COMMIT)"
 
       - name: Notify on failure

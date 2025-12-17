@@ -168,3 +168,4 @@ yarn-error.log*
 .env.production
 secrets/
 upload_to_s3.sh
+*.pem

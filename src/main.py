@@ -32,23 +32,10 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config.master_group_api import PG_CONFIG, REDIS_CONFIG, MASTER_GROUP_CONFIG
 
 # Import ML recommendation service
-# Temporarily disabled to debug - will re-enable after backend starts
-# from src.ml_recommendation_service import ml_service
+from src.algorithms.ml_recommendation_service import get_ml_service
 
-# Temporary dummy service
-class DummyMLService:
-    def initialize(self): 
-        print("⚠️  ML Service disabled for debugging")
-        return False
-    def is_ready(self): return False
-    def get_model_info(self): return {"error": "ML temporarily disabled"}
-    def get_location_recommendations(self, **kwargs): return []
-    def get_cart_recommendations(self, **kwargs): return []
-    def get_similar_products(self, **kwargs): return []
-    def get_popular_products(self, **kwargs): return []
-    def batch_recommendations(self, **kwargs): return {}
-
-ml_service = DummyMLService()
+# Initialize global ML service
+ml_service = get_ml_service()
 
 # Simple settings configuration
 class Settings:
@@ -229,12 +216,14 @@ async def lifespan(app: FastAPI):
     # Initialize ML recommendation service
     logger.info("Loading ML recommendation models...")
     try:
-        if ml_service.initialize():
+        # Load models from DB (persisted) or disk
+        ml_service.load_trained_models(time_filter='30days')
+        if ml_service.is_trained:
             logger.info("✅ ML recommendation models loaded successfully")
         else:
-            logger.error("❌ Failed to load ML models - ML endpoints will not work")
+            logger.warning("⚠️ ML models not trained - some endpoints may return fallback data")
     except Exception as e:
-        logger.error("❌ ML service initialization failed", error=str(e))
+        logger.error("❌ ML service initialization failed (non-critical)", error=str(e))
     
     # Initialize and start sync scheduler
     try:

@@ -2997,7 +2997,8 @@ async def configure_ab_test(
 @app.get("/api/v1/ml/top-products")
 async def get_ml_top_products(
     time_filter: str = Query("30days", description="Time filter"),
-    limit: int = Query(10, ge=1, le=100, description="Number of products")
+    limit: int = Query(10, ge=1, le=100, description="Number of products"),
+    category: str = Query(None, description="Filter by category (comma-separated for multiple)")
 ):
     """
     ⚡ FAST ML Top Products - Uses Redis Cache + Optimized Queries
@@ -3010,7 +3011,7 @@ async def get_ml_top_products(
     Returns cached results in <50ms instead of slow database queries
     """
     try:
-        cache_key = f"ml:top_products:{time_filter}:{limit}"
+        cache_key = f"ml:top_products:{time_filter}:{limit}:{category or 'all'}"
         
         # Try Redis cache first (FAST PATH)
         try:
@@ -3029,9 +3030,17 @@ async def get_ml_top_products(
         time_ranges = {'7days': 7, '30days': 30, '90days': 90, '6months': 180, '1year': 365, 'all': None}
         days = time_ranges.get(time_filter)
         
-        where_clause = ""
+        where_clauses = []
         if days:
-            where_clause = f"WHERE o.order_date >= NOW() - INTERVAL '{days} days'"
+            where_clauses.append(f"o.order_date >= NOW() - INTERVAL '{days} days'")
+        
+        # Add category filter if specified
+        if category:
+            categories = [c.strip().upper() for c in category.split(',')]
+            category_conditions = " OR ".join([f"UPPER(oi.product_name) LIKE '{cat}%'" for cat in categories])
+            where_clauses.append(f"({category_conditions})")
+        
+        where_clause = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
         
         # Optimized query with pre-aggregation - extract category from product name prefix
         cursor.execute(f"""

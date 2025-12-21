@@ -671,14 +671,17 @@ def popular_products(limit: int = 10, time_filter: str = "7days", category: str 
         except Exception as e:
             logger.warning("Cache read failed for popular products", error=str(e))
     
-    if not pg_conn:
+    if not pg_pool:
         return []
     
     try:
+        # Get connection from pool
+        conn = pg_pool.getconn()
+        
         # Calculate date range based on filter
         start_date = calculate_date_range(time_filter)
         
-        with pg_conn.cursor(cursor_factory=RealDictCursor) as cur:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
             if start_date:
                 cur.execute("""
                     SELECT oi.product_id, 
@@ -755,6 +758,10 @@ def popular_products(limit: int = 10, time_filter: str = "7days", category: str 
     except Exception as e:
         logger.error("Popular products error", error=str(e))
         return []
+    finally:
+        # Return connection to pool
+        if pg_pool and 'conn' in locals():
+            pg_pool.putconn(conn)
 
 
 # API Endpoints

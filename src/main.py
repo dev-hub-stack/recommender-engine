@@ -3777,10 +3777,10 @@ async def get_personalize_recommendations_by_location(
             
             # Apply category filter if specified
             if category:
-                categories = [c.strip().upper() for c in category.split(',')]
+                categories = [c.strip().lower() for c in category.split(',')]
                 aggregated = [
                     agg for agg in aggregated 
-                    if any(agg['product_name'].upper().startswith(cat) for cat in categories)
+                    if extract_smart_category(agg['product_name']).lower() in categories
                 ]
             
             # Apply product names to per-user recommendations
@@ -3941,10 +3941,10 @@ async def get_segment_recommendations(
             
             # Apply category filter if specified
             if category:
-                categories = [c.strip().upper() for c in category.split(',')]
+                categories = [c.strip().lower() for c in category.split(',')]
                 aggregated = [
                     agg for agg in aggregated 
-                    if any(agg['product_name'].upper().startswith(cat) for cat in categories)
+                    if extract_smart_category(agg['product_name']).lower() in categories
                 ]
             
             cursor.close()

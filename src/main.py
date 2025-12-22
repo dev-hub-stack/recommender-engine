@@ -3645,6 +3645,7 @@ async def load_models_from_s3(
 async def get_personalize_recommendations_by_location(
     province: Optional[str] = Query(None, description="Filter by province"),
     city: Optional[str] = Query(None, description="Filter by city"),
+    category: Optional[str] = Query(None, description="Filter by category (comma-separated for multiple)"),
     num_results: int = Query(10, description="Number of recommendations per user"),
     limit_users: int = Query(50, description="Number of users to get recommendations for")
 ):
@@ -3774,6 +3775,14 @@ async def get_personalize_recommendations_by_location(
             for agg in aggregated:
                 agg['product_name'] = product_names.get(str(agg['product_id']), f"Product {agg['product_id']}")
             
+            # Apply category filter if specified
+            if category:
+                categories = [c.strip().upper() for c in category.split(',')]
+                aggregated = [
+                    agg for agg in aggregated 
+                    if any(agg['product_name'].upper().startswith(cat) for cat in categories)
+                ]
+            
             # Apply product names to per-user recommendations
             for user_rec in user_recommendations:
                 for rec in user_rec['recommendations']:
@@ -3786,6 +3795,7 @@ async def get_personalize_recommendations_by_location(
             return {
                 "province": province,
                 "city": city,
+                "category": category,
                 "total_users": len(users),
                 "users": user_recommendations,
                 "aggregated_recommendations": aggregated[:20],
@@ -3805,6 +3815,7 @@ async def get_segment_recommendations(
     segment: str = Query(..., description="RFM segment: champions, loyal, potential, new, at_risk, hibernating, lost"),
     province: Optional[str] = Query(None, description="Filter by province"),
     city: Optional[str] = Query(None, description="Filter by city"),
+    category: Optional[str] = Query(None, description="Filter by category (comma-separated for multiple)"),
     limit: int = Query(10, description="Number of recommendations")
 ):
     """
@@ -3928,12 +3939,21 @@ async def get_segment_recommendations(
                 for rec in aggregated:
                     rec['product_name'] = product_names.get(str(rec['product_id']), f"Product {rec['product_id']}")
             
+            # Apply category filter if specified
+            if category:
+                categories = [c.strip().upper() for c in category.split(',')]
+                aggregated = [
+                    agg for agg in aggregated 
+                    if any(agg['product_name'].upper().startswith(cat) for cat in categories)
+                ]
+            
             cursor.close()
             
             return {
                 "segment": segment,
                 "province": province,
                 "city": city,
+                "category": category,
                 "users_in_segment": len(users_with_recs),
                 "aggregated_recommendations": aggregated[:limit],
                 "source": "offline_cache_rfm"

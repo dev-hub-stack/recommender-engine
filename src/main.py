@@ -3043,6 +3043,7 @@ async def get_ml_top_products(
         where_clause = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
         
         # Optimized query with pre-aggregation - extract category from product name prefix
+        # Note: Using f-string for where_clause, so limit must also be in f-string to avoid parameter conflict
         cursor.execute(f"""
             SELECT 
                 oi.product_id,
@@ -3058,8 +3059,8 @@ async def get_ml_top_products(
             GROUP BY oi.product_id
             HAVING COUNT(DISTINCT oi.order_id) >= 3
             ORDER BY total_revenue DESC
-            LIMIT %s
-        """, (limit,))
+            LIMIT {limit}
+        """)
         
         products = cursor.fetchall()
         cursor.close()

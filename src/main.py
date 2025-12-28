@@ -26,6 +26,9 @@ import os
 from collections import defaultdict
 import re
 import sys
+import io
+import csv
+from fastapi.responses import StreamingResponse
 
 # Add config path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -1580,7 +1583,8 @@ async def get_products_by_category(
             {where_clause}
             GROUP BY oi.product_id
             ORDER BY total_revenue DESC
-        """, params)
+            LIMIT %s
+        """, params + (limit,))
         
         results = cursor.fetchall()
         
@@ -2131,7 +2135,9 @@ async def get_analytics_collaborative_products(
                         WHERE oi2.order_id = oi.order_id 
                         AND oi2.product_id != oi.product_id
                     ) THEN o.id 
-                END)::float / NULLIF(COUNT(DISTINCT o.id), 0) as avg_similarity_score
+                END)::float / NULLIF(COUNT(DISTINCT o.id), 0)::numeric, 
+                    3
+                ) as avg_similarity_score
             FROM order_items oi
             JOIN orders o ON oi.order_id = o.id
             {where_clause}
@@ -4931,6 +4937,207 @@ async def get_shopify_popular_products(
     except Exception as e:
         logger.error(f"Shopify popular products error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/export/dashboard-csv")
+async def export_dashboard_csv(
+    time_filter: str = Query("30days", description="Time period filter"),
+    category: str = Query(None, description="Product category filter (e.g., Mattresses, Pillows)"),
+    sections: str = Query("all", description="Sections to export: all, metrics, products, orders")
+):
+    """
+    Export dashboard data as CSV with time and category filters
+    
+    Uses existing filter functions:
+    - get_time_filter_clause() for time filtering
+    - get_category_filter_sql() for category filtering (LIKE patterns on product names)
+    """
+    conn = None
+    try:
+        conn = psycopg2.connect(**get_pg_connection_params())
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Parse sections
+        section_list = sections.split(',') if sections != "all" else ["metrics", "products", "orders"]
+        
+        # Build WHERE clause for time filter
+        where_clause, time_params = get_time_filter_clause(time_filter)
+        
+        # Build category filter SQL (returns empty string or "AND (LIKE patterns)")
+        category_filter_sql = get_category_filter_sql(category) if category else ""
+        
+        # Create CSV in memory
+        output = io.StringIO()
+        writer = csv.writer(output)
+        
+        # =========================================
+        # SECTION 1: Dashboard Metrics
+        # =========================================
+        if "metrics" in section_list:
+            writer.writerow([])
+            writer.writerow(["DASHBOARD OVERVIEW"])
+            writer.writerow(["=" * 50])
+            writer.writerow(["Generated:", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+            writer.writerow(["Time Period:", time_filter])
+            if category:
+                writer.writerow(["Category:", category])
+            writer.writerow([])
+            writer.writerow(["Metric", "Value"])
+            
+            # Query with proper JOINs when category filter is present
+            if category_filter_sql:
+                query = f"""
+                    SELECT 
+                        COUNT(DISTINCT o.id) as total_orders,
+                        COUNT(DISTINCT o.unified_customer_id) as total_customers,
+                        COALESCE(SUM(o.total_price), 0) as total_revenue,
+                        COALESCE(AVG(o.total_price), 0) as avg_order_value
+                    FROM orders o
+                    JOIN order_items oi ON o.id = oi.order_id
+                    {where_clause}
+                    {category_filter_sql}
+                """
+            else:
+                query = f"""
+                    SELECT 
+                        COUNT(DISTINCT o.id) as total_orders,
+                        COUNT(DISTINCT o.unified_customer_id) as total_customers,
+                        COALESCE(SUM(o.total_price), 0) as total_revenue,
+                        COALESCE(AVG(o.total_price), 0) as avg_order_value
+                    FROM orders o
+                    {where_clause}
+                """
+            
+            cursor.execute(query, time_params if time_params else None)
+            metrics = cursor.fetchone()
+            
+            writer.writerow(["Total Orders", f"{metrics['total_orders']:,}"])
+            writer.writerow(["Total Customers", f"{metrics['total_customers']:,}"])
+            writer.writerow(["Total Revenue", f"PKR {metrics['total_revenue']:,.2f}"])
+            writer.writerow(["Average Order Value", f"PKR {metrics['avg_order_value']:,.2f}"])
+        
+        # =========================================
+        # SECTION 2: Top Products
+        # =========================================
+        if "products" in section_list:
+            writer.writerow([])
+            writer.writerow([])
+            writer.writerow(["TOP PERFORMING PRODUCTS"])
+            writer.writerow(["=" * 50])
+            writer.writerow(["Rank", "Product ID", "Product Name", "Orders", "Quantity", "Revenue", "Avg Price"])
+            
+            query = f"""
+                SELECT 
+                    oi.product_id,
+                    oi.product_name,
+                    COUNT(DISTINCT oi.order_id) as order_count,
+                    SUM(oi.quantity) as total_quantity,
+                    SUM(oi.unit_price * oi.quantity) as total_revenue,
+                    AVG(oi.unit_price) as avg_price
+                FROM order_items oi
+                JOIN orders o ON oi.order_id = o.id
+                {where_clause}
+                {category_filter_sql}
+                GROUP BY oi.product_id, oi.product_name
+                ORDER BY total_revenue DESC
+                LIMIT 100
+            """
+            
+            cursor.execute(query, time_params if time_params else None)
+            products = cursor.fetchall()
+            
+            for idx, prod in enumerate(products, 1):
+                writer.writerow([
+                    idx,
+                    prod['product_id'] or 'N/A',
+                    prod['product_name'] or 'N/A',
+                    prod['order_count'],
+                    prod['total_quantity'],
+                    f"PKR {prod['total_revenue']:,.2f}",
+                    f"PKR {prod['avg_price']:,.2f}"
+                ])
+        
+        # =========================================
+        # SECTION 3: Recent Orders
+        # =========================================
+        if "orders" in section_list:
+            writer.writerow([])
+            writer.writerow([])
+            writer.writerow(["RECENT ORDERS"])
+            writer.writerow(["=" * 50])
+            writer.writerow(["Order ID", "Date", "Customer ID", "Total", "Items", "City", "Province"])
+            
+            if category_filter_sql:
+                query = f"""
+                    SELECT DISTINCT
+                        o.id,
+                        o.order_date,
+                        o.unified_customer_id,
+                        o.total_price,
+                        o.customer_city,
+                        o.province,
+                        (SELECT COUNT(*) FROM order_items WHERE order_id = o.id) as item_count
+                    FROM orders o
+                    JOIN order_items oi ON o.id = oi.order_id
+                    {where_clause}
+                    {category_filter_sql}
+                    ORDER BY o.order_date DESC
+                    LIMIT 500
+                """
+            else:
+                query = f"""
+                    SELECT 
+                        o.id,
+                        o.order_date,
+                        o.unified_customer_id,
+                        o.total_price,
+                        o.customer_city,
+                        o.province,
+                        (SELECT COUNT(*) FROM order_items WHERE order_id = o.id) as item_count
+                    FROM orders o
+                    {where_clause}
+                    ORDER BY o.order_date DESC
+                    LIMIT 500
+                """
+            
+            cursor.execute(query, time_params if time_params else None)
+            orders = cursor.fetchall()
+            
+            for order in orders:
+                writer.writerow([
+                    order['id'],
+                    order['order_date'].strftime('%Y-%m-%d %H:%M') if order['order_date'] else 'N/A',
+                    order['unified_customer_id'] or 'N/A',
+                    f"PKR {order['total_price']:,.2f}",
+                    order['item_count'],
+                    order['customer_city'] or 'N/A',
+                    order['province'] or 'N/A'
+                ])
+        
+        # Close cursor
+        cursor.close()
+        
+        # Prepare CSV for download
+        output.seek(0)
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"mastergroup_analytics_{time_filter}"
+        if category:
+            cat_clean = category.replace(' ', '_').replace('&', 'and')[:20]
+            filename += f"_{cat_clean}"
+        filename += f"_{timestamp}.csv"
+        
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+        
+    except Exception as e:
+        logger.error(f"Export CSV error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+    finally:
+        if conn:
+            conn.close()
 
 
 # ============================================================================

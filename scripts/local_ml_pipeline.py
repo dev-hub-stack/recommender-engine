@@ -548,25 +548,43 @@ def train_models() -> Dict:
     user_items = df.groupby('user_id')['item_id'].apply(set).to_dict()
     models['user_items'] = user_items
     
-    # 5. Train SVD
+    # 5. Train SVD (with resource limits to prevent server overload)
     try:
         from surprise import SVD, Dataset, Reader
+        import resource
         
-        logger.info("  Training SVD model...")
+        # Limit memory usage to 2GB for training (prevents OOM)
+        try:
+            soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+            resource.setrlimit(resource.RLIMIT_AS, (2 * 1024 * 1024 * 1024, hard))
+        except:
+            pass  # Skip on systems that don't support resource limits
+        
+        logger.info("  Training SVD model (resource limited)...")
         reader = Reader(rating_scale=(1, df['quantity'].max()))
         surprise_data = Dataset.load_from_df(user_item[['user_id', 'item_id', 'quantity']], reader)
         trainset = surprise_data.build_full_trainset()
         
-        svd = SVD(n_factors=50, n_epochs=20, random_state=42)
+        # Use fewer factors and epochs for production to reduce CPU usage
+        svd = SVD(n_factors=30, n_epochs=10, random_state=42, verbose=False)
         svd.fit(trainset)
+        
+        # Reset resource limits
+        try:
+            resource.setrlimit(resource.RLIMIT_AS, (soft, hard))
+        except:
+            pass
         
         models['svd'] = svd
         models['svd_trainset'] = trainset
-        results['svd'] = {'n_factors': 50, 'n_users': len(users), 'n_items': len(items)}
-        logger.info("  ✅ SVD trained")
+        results['svd'] = {'n_factors': 30, 'n_users': len(users), 'n_items': len(items)}
+        logger.info("  ✅ SVD trained (optimized for production)")
         
     except ImportError:
         logger.warning("  ⚠️ Surprise not installed, skipping SVD")
+        models['svd'] = None
+    except Exception as e:
+        logger.error(f"  ❌ SVD training failed: {e}")
         models['svd'] = None
     
     results['models'] = models
@@ -604,57 +622,65 @@ def generate_and_cache_recommendations(models: Dict, user_limit: int = 25, item_
     item_names = models['item_names']
     
     total = len(users)
-    for i, user_id in enumerate(users):
-        if i % 2000 == 0:
-            logger.info(f"    Processing user {i+1:,}/{total:,} ({100*i/total:.1f}%)")
+    
+    # Process users in batches to avoid memory spikes
+    BATCH_SIZE = 5000
+    for batch_start in range(0, total, BATCH_SIZE):
+        batch_end = min(batch_start + BATCH_SIZE, total)
+        batch_users = users[batch_start:batch_end]
         
-        user_recs = []
-        purchased = user_items.get(user_id, set())
+        logger.info(f"    Processing users {batch_start:,} to {batch_end:,} ({100*batch_end/total:.1f}%)")
         
-        # SVD predictions
-        if svd and trainset:
-            try:
-                for item_id in item_to_idx.keys():
+        for user_id in batch_users:
+            user_recs = []
+            purchased = user_items.get(user_id, set())
+            
+            # SVD predictions (limit to top items for performance)
+            if svd and trainset and len(purchased) > 0:
+                try:
+                    # Only predict for top 100 popular items that user hasn't purchased
+                    top_items = [item for item, _ in sorted(popularity.items(), key=lambda x: -x[1])[:100] if item not in purchased]
+                    for item_id in top_items[:50]:  # Limit predictions
+                        if item_id in item_to_idx:
+                            try:
+                                pred = svd.predict(user_id, item_id)
+                                user_recs.append({'item_id': item_id, 'score': pred.est, 'algorithm': 'SVD'})
+                            except:
+                                pass
+                except:
+                    pass
+            
+            # Item-based collaborative (faster, use recent purchases)
+            if len(user_recs) < user_limit:
+                for purchased_item in list(purchased)[:5]:  # Reduced from 10
+                    if purchased_item not in item_to_idx:
+                        continue
+                    item_idx = item_to_idx[purchased_item]
+                    similarities = item_similarity[item_idx]
+                    for sim_idx in np.argsort(similarities)[::-1][:15]:  # Reduced from 20
+                        sim_item = idx_to_item[sim_idx]
+                        if sim_item not in purchased and similarities[sim_idx] > 0.01:
+                            user_recs.append({'item_id': sim_item, 'score': float(similarities[sim_idx]), 'algorithm': 'ItemSimilarity'})
+            
+            # Popularity fallback
+            if len(user_recs) < user_limit:
+                max_pop = max(popularity.values()) if popularity else 1
+                for item_id, score in sorted(popularity.items(), key=lambda x: -x[1])[:user_limit]:
                     if item_id not in purchased:
-                        try:
-                            pred = svd.predict(user_id, item_id)
-                            user_recs.append({'item_id': item_id, 'score': pred.est, 'algorithm': 'SVD'})
-                        except:
-                            pass
-            except:
-                pass
-        
-        # Item-based collaborative
-        if len(user_recs) < user_limit:
-            for purchased_item in list(purchased)[:10]:
-                if purchased_item not in item_to_idx:
-                    continue
-                item_idx = item_to_idx[purchased_item]
-                similarities = item_similarity[item_idx]
-                for sim_idx in np.argsort(similarities)[::-1][:20]:
-                    sim_item = idx_to_item[sim_idx]
-                    if sim_item not in purchased and similarities[sim_idx] > 0.01:
-                        user_recs.append({'item_id': sim_item, 'score': float(similarities[sim_idx]), 'algorithm': 'ItemSimilarity'})
-        
-        # Popularity fallback
-        if len(user_recs) < user_limit:
-            max_pop = max(popularity.values()) if popularity else 1
-            for item_id, score in sorted(popularity.items(), key=lambda x: -x[1])[:user_limit]:
-                if item_id not in purchased:
-                    user_recs.append({'item_id': item_id, 'score': score / max_pop, 'algorithm': 'Popularity'})
-        
-        # Deduplicate and limit
-        seen = set()
-        unique_recs = []
-        for rec in sorted(user_recs, key=lambda x: -x['score']):
-            if rec['item_id'] not in seen:
-                seen.add(rec['item_id'])
-                rec['item_name'] = item_names.get(rec['item_id'], rec['item_id'])
-                unique_recs.append(rec)
+                        user_recs.append({'item_id': item_id, 'score': score / max_pop, 'algorithm': 'Popularity'})
+            
+                # Deduplicate and limit
+            seen = set()
+            unique_recs = []
+            for rec in sorted(user_recs, key=lambda x: -x['score']):
+                if rec['item_id'] not in seen:
+                    seen.add(rec['item_id'])
+                    rec['item_name'] = item_names.get(rec['item_id'], rec['item_id'])
+                    unique_recs.append(rec)
                 if len(unique_recs) >= user_limit:
                     break
-        
-        user_recommendations[user_id] = unique_recs
+            
+            user_recommendations[user_id] = unique_recs
     
     logger.info(f"  ✅ Generated recommendations for {len(user_recommendations):,} users")
     

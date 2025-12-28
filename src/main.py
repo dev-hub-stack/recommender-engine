@@ -1259,25 +1259,39 @@ async def get_dashboard_metrics(
         
         # Add category filter if specified
         category_filter_raw = get_category_filter_sql(category)
-        category_join = "JOIN order_items oi ON o.id = oi.order_id" if category_filter_raw else ""
         
-        # Handle WHERE clause properly when category filter exists but time filter doesn't
-        if category_filter_raw and not where_clause:
-            category_filter = "WHERE " + category_filter_raw.replace("AND ", "", 1)
+        # CRITICAL FIX: Use subquery to avoid double-counting revenue when joining with order_items
+        # When filtering by category, we need to find orders that contain those products,
+        # but only count the order's total_price ONCE (not per item)
+        if category_filter_raw:
+            # Build subquery to get order IDs that match the category filter
+            category_condition = category_filter_raw.replace("AND ", "", 1)  # Remove leading AND
+            
+            cursor.execute(f"""
+                SELECT 
+                    COUNT(DISTINCT o.id) as total_orders,
+                    COUNT(DISTINCT o.unified_customer_id) as total_customers,
+                    SUM(o.total_price) as total_revenue,
+                    AVG(o.total_price) as avg_order_value
+                FROM orders o
+                {where_clause}
+                AND o.id IN (
+                    SELECT DISTINCT oi.order_id
+                    FROM order_items oi
+                    WHERE {category_condition}
+                )
+            """, params if params else None)
         else:
-            category_filter = category_filter_raw
-        
-        cursor.execute(f"""
-            SELECT 
-                COUNT(DISTINCT o.id) as total_orders,
-                COUNT(DISTINCT o.unified_customer_id) as total_customers,
-                SUM(o.total_price) as total_revenue,
-                AVG(o.total_price) as avg_order_value
-            FROM orders o
-            {category_join}
-            {where_clause}
-            {category_filter}
-        """, params if params else None)
+            # No category filter - simple query
+            cursor.execute(f"""
+                SELECT 
+                    COUNT(DISTINCT o.id) as total_orders,
+                    COUNT(DISTINCT o.unified_customer_id) as total_customers,
+                    SUM(o.total_price) as total_revenue,
+                    AVG(o.total_price) as avg_order_value
+                FROM orders o
+                {where_clause}
+            """, params if params else None)
         
         result = cursor.fetchone()
         

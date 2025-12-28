@@ -377,16 +377,25 @@ def get_time_filter_clause(time_filter: str, table_alias: str = "o") -> tuple:
 
 
 def normalize_province(province: str) -> str:
-    """Normalize province names (merge duplicates like Islamabad variants)"""
+    """Normalize province names (merge duplicates like Islamabad variants and case variations)"""
     if not province:
         return 'Unknown'
+    
+    # Convert to title case first to handle case variations
+    province = province.strip().title()
     
     province_mapping = {
         'Islamabad Capital Territory': 'Islamabad',
         'Islamabad Capital': 'Islamabad',
-        'ICT': 'Islamabad',
-        'KPK': 'Khyber Pakhtunkhwa',
-        'NWFP': 'Khyber Pakhtunkhwa',
+        'Ict': 'Islamabad',
+        'Kpk': 'Khyber Pakhtunkhwa',
+        'Nwfp': 'Khyber Pakhtunkhwa',
+        'Khyber Pakhtunkhwa': 'Khyber Pakhtunkhwa',  # Already correct
+        'Punjab': 'Punjab',  # Already correct
+        'Sindh': 'Sindh',  # Already correct
+        'Balochistan': 'Balochistan',  # Already correct
+        'Azad Kashmir': 'Azad Kashmir',  # Already correct
+        'Gilgit-Baltistan': 'Gilgit-Baltistan',  # Already correct
     }
     return province_mapping.get(province, province)
 
@@ -1353,7 +1362,7 @@ async def get_geographic_distribution(time_filter: str = Query("30days")):
         }
         
         # Cache for 5 minutes
-        set_cache_data(cache_key, response, 300)
+        set_to_cache(cache_key, response, 300)
         
         return response
     except Exception as e:

@@ -200,62 +200,99 @@ def insert_orders_to_db(orders: List[Dict], source: str):
     conn = get_db_connection()
     cursor = conn.cursor()
     
+    inserted_count = 0
     for order in orders:
         try:
-            # Extract order data
-            order_id = order.get('order_id') or order.get('id')
-            customer_id = order.get('customer_id') or order.get('phone')
+            # Extract order data - handle both OE and POS API formats
+            order_id = order.get('order_id') or order.get('id') or order.get('order_name')
+            customer_id = order.get('customer_id') or order.get('customer_phone') or order.get('phone')
             customer_name = order.get('customer_name') or order.get('name', '')
+            customer_city = order.get('customer_city') or order.get('city', '')
+            customer_phone = order.get('customer_phone') or order.get('phone', '')
             order_date = order.get('order_date') or order.get('date')
             total = order.get('total') or order.get('total_price', 0)
+            order_status = order.get('order_status', '')
+            brand_name = order.get('brand_name', '')
+            payment_mode = order.get('payment_mode', '')
+            
+            # Convert total to float if string
+            if isinstance(total, str):
+                total = float(total.replace(',', '')) if total else 0
             
             # Skip if missing required fields
             if not order_id or not customer_id:
+                logger.debug(f"Skipping order - missing order_id or customer_id: {order.get('id')}")
                 continue
             
             # Generate unified customer ID
-            unified_id = f"{customer_id}_{customer_name.split()[0].lower() if customer_name else 'customer'}"
+            first_name = customer_name.split()[0].lower() if customer_name and customer_name.split() else 'customer'
+            unified_id = f"{customer_id}_{first_name}"
             
-            # Upsert order
+            # Upsert order with all fields
             cursor.execute("""
-                INSERT INTO orders (id, unified_customer_id, customer_name, order_date, total_price, source_type)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO orders (id, unified_customer_id, customer_name, customer_phone, customer_city, 
+                                   order_date, total_price, order_status, brand_name, payment_mode, order_type, source_type)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (id) DO UPDATE SET
                     unified_customer_id = EXCLUDED.unified_customer_id,
+                    customer_name = EXCLUDED.customer_name,
+                    customer_phone = EXCLUDED.customer_phone,
+                    customer_city = EXCLUDED.customer_city,
                     total_price = EXCLUDED.total_price,
-                    source_type = EXCLUDED.source_type
-            """, (order_id, unified_id, customer_name, order_date, total, source))
+                    order_status = EXCLUDED.order_status,
+                    brand_name = EXCLUDED.brand_name,
+                    payment_mode = EXCLUDED.payment_mode,
+                    order_type = EXCLUDED.order_type,
+                    source_type = EXCLUDED.source_type,
+                    updated_at = NOW()
+            """, (str(order_id), unified_id, customer_name, customer_phone, customer_city,
+                  order_date, total, order_status, brand_name, payment_mode, source, source))
             
-            # Insert order items
+            inserted_count += 1
+            
+            # Insert order items - handle different API formats
             items = order.get('items') or order.get('order_items') or order.get('has_items', [])
             for item in items:
-                product_id = item.get('product_id') or item.get('id')
+                # Get product_id - OE uses 'id' inside has_items, could also be 'product_id'
+                product_id = item.get('product_id') or item.get('id') or item.get('sku')
                 product_name = item.get('product_name') or item.get('name') or item.get('title', '')
-                sku = item.get('sku')
+                sku = item.get('sku', '')
+                product_type = item.get('product_type', '')
                 
-                # If SKU exists (OE orders), append to name if not already there
+                # Use SKU as product_id if available (more unique)
+                if sku:
+                    product_id = sku
+                
+                # If SKU exists, append to name if not already there
                 if sku and sku not in product_name:
                     product_name = f"{product_name} ({sku})"
                 
                 quantity = item.get('quantity', 1)
                 price = item.get('price') or item.get('unit_price') or item.get('base_price', 0)
                 
+                # Convert price to float if string
+                if isinstance(price, str):
+                    price = float(price.replace(',', '')) if price else 0
+                
                 if product_id:
                     cursor.execute("""
-                        INSERT INTO order_items (order_id, product_id, product_name, quantity, unit_price)
-                        VALUES (%s, %s, %s, %s, %s)
+                        INSERT INTO order_items (order_id, product_id, product_name, quantity, unit_price, total_price)
+                        VALUES (%s, %s, %s, %s, %s, %s)
                         ON CONFLICT (order_id, product_id) DO UPDATE SET
+                            product_name = EXCLUDED.product_name,
                             quantity = EXCLUDED.quantity,
-                            unit_price = EXCLUDED.unit_price
-                    """, (str(order_id), str(product_id), product_name, quantity, price))
+                            unit_price = EXCLUDED.unit_price,
+                            total_price = EXCLUDED.total_price
+                    """, (str(order_id), str(product_id), product_name, quantity, price, price * quantity))
                     
         except Exception as e:
-            logger.debug(f"Order insert error: {e}")
+            logger.warning(f"Order insert error for {order.get('id')}: {e}")
             continue
     
     conn.commit()
     cursor.close()
     conn.close()
+    logger.debug(f"  Inserted/updated {inserted_count} orders from {source}")
 
 
 # =============================================================================
@@ -767,6 +804,19 @@ def run_pipeline(skip_sync: bool = False, export_only: bool = False, train_only:
     print(f"\n  💾 Users with recommendations: {cache_result['users_cached']:,}")
     print(f"  💾 Products with similar items: {cache_result['items_cached']:,}")
     
+    # Step 5: Pre-warm Redis cache for heavy queries
+    print("\n" + "-" * 70)
+    print("  STEP 5: PRE-WARM REDIS CACHE")
+    print("-" * 70)
+    try:
+        import subprocess
+        prewarm_script = project_root / 'scripts' / 'prewarm_cache.py'
+        subprocess.run([sys.executable, str(prewarm_script)], check=True)
+        print("\n  ✅ Cache pre-warming complete")
+    except Exception as e:
+        logger.warning(f"Cache pre-warming failed: {e}")
+        print(f"\n  ⚠️  Cache pre-warming failed (non-critical): {e}")
+    
     # Summary
     duration = (datetime.now() - start_time).total_seconds()
     results['duration_seconds'] = duration
@@ -796,9 +846,24 @@ def main():
     parser.add_argument('--skip-sync', action='store_true', help='Skip Master API sync, use existing DB')
     parser.add_argument('--export-only', action='store_true', help='Only export to CSV, skip training')
     parser.add_argument('--train-only', action='store_true', help='Only train models, skip sync & export')
+    parser.add_argument('--sync-only', action='store_true', help='Only sync data from APIs, skip export and training (lightweight)')
     parser.add_argument('--sync-days', type=int, default=7, help='Days of data to sync from APIs')
     
     args = parser.parse_args()
+    
+    # If sync-only, just run the sync step and exit
+    if args.sync_only:
+        print("\n" + "=" * 70)
+        print("  SYNC-ONLY MODE (Lightweight)")
+        print("=" * 70)
+        start_time = datetime.now()
+        sync_result = fetch_from_master_apis(args.sync_days)
+        duration = (datetime.now() - start_time).total_seconds()
+        print(f"\n  ✅ Sync complete in {duration:.1f} seconds")
+        print(f"  📊 OE Orders: {sync_result['oe_orders']:,}")
+        print(f"  📊 POS Orders: {sync_result['pos_orders']:,}")
+        print("=" * 70 + "\n")
+        return 0
     
     results = run_pipeline(
         skip_sync=args.skip_sync,

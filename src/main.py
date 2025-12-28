@@ -73,7 +73,8 @@ def get_pg_connection_params():
         'port': PG_PORT,
         'database': PG_DB,
         'user': PG_USER,
-        'password': PG_PASSWORD
+        'password': PG_PASSWORD,
+        'options': '-c statement_timeout=30000'  # 30 second query timeout to prevent hung queries
     }
     
     # Add SSL mode from config (required for Heroku, disabled for local)
@@ -311,7 +312,19 @@ def set_to_cache(key: str, data: dict, ttl: int = CACHE_TTL):
 def calculate_date_range(time_filter: str) -> datetime:
     """
     Calculate start date based on time filter
-    Returns None for 'all' time filter
+    Returns None for true 'all' time filter (no date restriction)
+    
+    Available filters:
+    - today: Current day only
+    - 7days: Last 7 days
+    - 30days: Last 30 days
+    - mtd: Month to date
+    - 90days: Last 90 days
+    - 6months: Last 6 months
+    - 1year: Last 1 year
+    - 2years: Last 2 years
+    - 3years: Last 3 years
+    - all: ALL data (no date restriction) - cached for 2 hours
     """
     if time_filter == "today":
         return datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -328,6 +341,14 @@ def calculate_date_range(time_filter: str) -> datetime:
         return datetime.now() - timedelta(days=180)
     elif time_filter == "1year":
         return datetime.now() - timedelta(days=365)
+    elif time_filter == "2years":
+        return datetime.now() - timedelta(days=730)
+    elif time_filter == "3years":
+        return datetime.now() - timedelta(days=1095)
+    elif time_filter == "all":
+        # True "all" - no date restriction, returns None
+        # Results will be heavily cached (2 hours) to avoid performance issues
+        return None
     elif ":" in time_filter:  # Custom date range format: start_date:end_date
         try:
             date_parts = time_filter.split(":")
@@ -336,8 +357,8 @@ def calculate_date_range(time_filter: str) -> datetime:
         except ValueError:
             logger.warning(f"Invalid custom date format: {time_filter}")
             return None
-    # For 'all' or any unrecognized filter
-    return None
+    # For any unrecognized filter, default to 1 year
+    return datetime.now() - timedelta(days=365)
 
 
 def get_time_filter_clause(time_filter: str, table_alias: str = "o") -> tuple:
@@ -842,8 +863,8 @@ async def get_collaborative_recommendations(
         "timestamp": datetime.now().isoformat()
     }
     
-    # Cache the result (shorter TTL for time-filtered data)
-    ttl = 3600 if time_filter == "all" else 300  # 5 minutes for time-filtered data
+    # Cache the result - longer TTL for heavy "all" queries (2 hours vs 5 minutes)
+    ttl = 7200 if time_filter == "all" else 300
     set_to_cache(cache_key, result, ttl=ttl)
     
     return result
@@ -873,8 +894,8 @@ async def get_product_pair_recommendations(
         "timestamp": datetime.now().isoformat()
     }
     
-    # Cache the result (shorter TTL for time-filtered data)
-    ttl = 3600 if time_filter == "all" else 300  # 5 minutes for time-filtered data
+    # Cache the result - longer TTL for heavy "all" queries (2 hours vs 5 minutes)
+    ttl = 7200 if time_filter == "all" else 300
     set_to_cache(cache_key, result, ttl=ttl)
     
     return result
@@ -3027,8 +3048,9 @@ async def get_ml_top_products(
         conn = psycopg2.connect(**get_pg_connection_params())
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
-        time_ranges = {'7days': 7, '30days': 30, '90days': 90, '6months': 180, '1year': 365, 'all': None}
-        days = time_ranges.get(time_filter)
+        # 'all' now defaults to 730 days (2 years) for performance instead of scanning all data
+        time_ranges = {'7days': 7, '30days': 30, '90days': 90, '6months': 180, '1year': 365, 'all': 730}
+        days = time_ranges.get(time_filter, 365)  # Default to 1 year for unknown filters
         
         where_clauses = []
         if days:
@@ -3207,8 +3229,9 @@ async def get_ml_rfm_segments(
         conn = psycopg2.connect(**get_pg_connection_params())
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
-        time_ranges = {'7days': 7, '30days': 30, '90days': 90, '6months': 180, '1year': 365, 'all': None}
-        days = time_ranges.get(time_filter)
+        # 'all' now defaults to 730 days (2 years) for performance
+        time_ranges = {'7days': 7, '30days': 30, '90days': 90, '6months': 180, '1year': 365, 'all': 730}
+        days = time_ranges.get(time_filter, 365)  # Default to 1 year
         
         where_clause = ""
         if days:

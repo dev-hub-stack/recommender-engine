@@ -44,9 +44,22 @@ class LoginRequest(BaseModel):
 
 # Database connection
 def get_db_connection():
-    """Get database connection"""
-    DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:@localhost:5432/mastergroup_recommendations")
-    return psycopg2.connect(DATABASE_URL)
+    """Get database connection using PG_* environment variables"""
+    host = os.getenv('PG_HOST', 'localhost')
+    port = int(os.getenv('PG_PORT', '5432'))
+    database = os.getenv('PG_DB', 'mastergroup_recommendations')
+    user = os.getenv('PG_USER', 'postgres')
+    password = os.getenv('PG_PASSWORD', '')
+    sslmode = os.getenv('PG_SSLMODE', 'prefer' if host == 'localhost' else 'require')
+    
+    return psycopg2.connect(
+        host=host,
+        port=port,
+        database=database,
+        user=user,
+        password=password,
+        sslmode=sslmode
+    )
 
 # Password utilities
 def verify_password(plain_password: str, hashed_password: str) -> bool:

@@ -1629,7 +1629,7 @@ async def get_province_performance(time_filter: str = Query("30days")):
             SELECT 
                 CASE 
                     WHEN UPPER(o.province) IN ('ISLAMABAD', 'ISLAMABAD CAPITAL TERRITORY', 'ISLAMABAD CAPITAL', 'ICT') THEN 'Islamabad'
-                    WHEN UPPER(o.province) IN ('KPK', 'NWFP', 'KHYBER PAKHTUNKHWA') THEN 'Khyber Pakhtunkhwa'
+                    WHEN UPPER(REPLACE(o.province, '.', '')) IN ('KPK', 'NWFP', 'KHYBER PAKHTUNKHWA') THEN 'Khyber Pakhtunkhwa'
                     WHEN UPPER(o.province) = 'PUNJAB' THEN 'Punjab'
                     WHEN UPPER(o.province) = 'SINDH' THEN 'Sindh'
                     WHEN UPPER(o.province) IN ('BALOCHISTAN', 'BALUCHISTAN') THEN 'Balochistan'
@@ -1642,10 +1642,13 @@ async def get_province_performance(time_filter: str = Query("30days")):
                 SUM(o.total_price) as total_revenue
             FROM orders o
             {where_clause}
+                AND o.province IS NOT NULL
+                AND TRIM(o.province) != ''
+                AND UPPER(TRIM(o.province)) NOT IN ('UNKNOWN', 'N/A', 'NA', 'NULL', 'NONE')
             GROUP BY 
                 CASE 
                     WHEN UPPER(o.province) IN ('ISLAMABAD', 'ISLAMABAD CAPITAL TERRITORY', 'ISLAMABAD CAPITAL', 'ICT') THEN 'Islamabad'
-                    WHEN UPPER(o.province) IN ('KPK', 'NWFP', 'KHYBER PAKHTUNKHWA') THEN 'Khyber Pakhtunkhwa'
+                    WHEN UPPER(REPLACE(o.province, '.', '')) IN ('KPK', 'NWFP', 'KHYBER PAKHTUNKHWA') THEN 'Khyber Pakhtunkhwa'
                     WHEN UPPER(o.province) = 'PUNJAB' THEN 'Punjab'
                     WHEN UPPER(o.province) = 'SINDH' THEN 'Sindh'
                     WHEN UPPER(o.province) IN ('BALOCHISTAN', 'BALUCHISTAN') THEN 'Balochistan'
@@ -4309,28 +4312,30 @@ async def get_provinces():
                 SELECT 
                     CASE 
                         WHEN UPPER(province) IN ('ISLAMABAD', 'ISLAMABAD CAPITAL TERRITORY', 'ISLAMABAD CAPITAL', 'ICT') THEN 'Islamabad'
-                        WHEN UPPER(province) IN ('KPK', 'NWFP', 'KHYBER PAKHTUNKHWA') THEN 'Khyber Pakhtunkhwa'
+                        WHEN UPPER(REPLACE(province, '.', '')) IN ('KPK', 'NWFP', 'KHYBER PAKHTUNKHWA') THEN 'Khyber Pakhtunkhwa'
                         WHEN UPPER(province) = 'PUNJAB' THEN 'Punjab'
                         WHEN UPPER(province) = 'SINDH' THEN 'Sindh'
                         WHEN UPPER(province) IN ('BALOCHISTAN', 'BALUCHISTAN') THEN 'Balochistan'
                         WHEN UPPER(province) IN ('GILGIT-BALTISTAN', 'GB') THEN 'Gilgit-Baltistan'
                         WHEN UPPER(province) IN ('AZAD KASHMIR', 'AJK', 'AZAD JAMMU AND KASHMIR') THEN 'Azad Kashmir'
-                        ELSE INITCAP(province)
+                        ELSE INITCAP(TRIM(province))
                     END as province,
                     COUNT(DISTINCT id) as order_count,
                     COUNT(DISTINCT unified_customer_id) as customer_count
                 FROM orders
-                WHERE province IS NOT NULL AND province != ''
+                WHERE province IS NOT NULL 
+                    AND TRIM(province) != '' 
+                    AND UPPER(TRIM(province)) NOT IN ('UNKNOWN', 'N/A', 'NA', 'NULL', 'NONE')
                 GROUP BY 
                     CASE 
                         WHEN UPPER(province) IN ('ISLAMABAD', 'ISLAMABAD CAPITAL TERRITORY', 'ISLAMABAD CAPITAL', 'ICT') THEN 'Islamabad'
-                        WHEN UPPER(province) IN ('KPK', 'NWFP', 'KHYBER PAKHTUNKHWA') THEN 'Khyber Pakhtunkhwa'
+                        WHEN UPPER(REPLACE(province, '.', '')) IN ('KPK', 'NWFP', 'KHYBER PAKHTUNKHWA') THEN 'Khyber Pakhtunkhwa'
                         WHEN UPPER(province) = 'PUNJAB' THEN 'Punjab'
                         WHEN UPPER(province) = 'SINDH' THEN 'Sindh'
                         WHEN UPPER(province) IN ('BALOCHISTAN', 'BALUCHISTAN') THEN 'Balochistan'
                         WHEN UPPER(province) IN ('GILGIT-BALTISTAN', 'GB') THEN 'Gilgit-Baltistan'
                         WHEN UPPER(province) IN ('AZAD KASHMIR', 'AJK', 'AZAD JAMMU AND KASHMIR') THEN 'Azad Kashmir'
-                        ELSE INITCAP(province)
+                        ELSE INITCAP(TRIM(province))
                     END
                 ORDER BY order_count DESC
             """)

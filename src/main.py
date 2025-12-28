@@ -4308,9 +4308,14 @@ async def get_provinces():
             cursor.execute("""
                 SELECT 
                     CASE 
-                        WHEN province IN ('Islamabad', 'Islamabad Capital Territory', 'Islamabad Capital', 'ICT') THEN 'Islamabad'
-                        WHEN province IN ('KPK', 'NWFP') THEN 'Khyber Pakhtunkhwa'
-                        ELSE province
+                        WHEN UPPER(province) IN ('ISLAMABAD', 'ISLAMABAD CAPITAL TERRITORY', 'ISLAMABAD CAPITAL', 'ICT') THEN 'Islamabad'
+                        WHEN UPPER(province) IN ('KPK', 'NWFP', 'KHYBER PAKHTUNKHWA') THEN 'Khyber Pakhtunkhwa'
+                        WHEN UPPER(province) = 'PUNJAB' THEN 'Punjab'
+                        WHEN UPPER(province) = 'SINDH' THEN 'Sindh'
+                        WHEN UPPER(province) IN ('BALOCHISTAN', 'BALUCHISTAN') THEN 'Balochistan'
+                        WHEN UPPER(province) IN ('GILGIT-BALTISTAN', 'GB') THEN 'Gilgit-Baltistan'
+                        WHEN UPPER(province) IN ('AZAD KASHMIR', 'AJK', 'AZAD JAMMU AND KASHMIR') THEN 'Azad Kashmir'
+                        ELSE INITCAP(province)
                     END as province,
                     COUNT(DISTINCT id) as order_count,
                     COUNT(DISTINCT unified_customer_id) as customer_count
@@ -4318,9 +4323,14 @@ async def get_provinces():
                 WHERE province IS NOT NULL AND province != ''
                 GROUP BY 
                     CASE 
-                        WHEN province IN ('Islamabad', 'Islamabad Capital Territory', 'Islamabad Capital', 'ICT') THEN 'Islamabad'
-                        WHEN province IN ('KPK', 'NWFP') THEN 'Khyber Pakhtunkhwa'
-                        ELSE province
+                        WHEN UPPER(province) IN ('ISLAMABAD', 'ISLAMABAD CAPITAL TERRITORY', 'ISLAMABAD CAPITAL', 'ICT') THEN 'Islamabad'
+                        WHEN UPPER(province) IN ('KPK', 'NWFP', 'KHYBER PAKHTUNKHWA') THEN 'Khyber Pakhtunkhwa'
+                        WHEN UPPER(province) = 'PUNJAB' THEN 'Punjab'
+                        WHEN UPPER(province) = 'SINDH' THEN 'Sindh'
+                        WHEN UPPER(province) IN ('BALOCHISTAN', 'BALUCHISTAN') THEN 'Balochistan'
+                        WHEN UPPER(province) IN ('GILGIT-BALTISTAN', 'GB') THEN 'Gilgit-Baltistan'
+                        WHEN UPPER(province) IN ('AZAD KASHMIR', 'AJK', 'AZAD JAMMU AND KASHMIR') THEN 'Azad Kashmir'
+                        ELSE INITCAP(province)
                     END
                 ORDER BY order_count DESC
             """)

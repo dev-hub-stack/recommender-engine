@@ -1624,13 +1624,18 @@ async def get_province_performance(time_filter: str = Query("30days")):
         
         where_clause, params = get_time_filter_clause(time_filter)
         
-        # Use CASE to merge Islamabad variants at SQL level
+        # Use CASE to merge province variants at SQL level with case-insensitive handling
         cursor.execute(f"""
             SELECT 
                 CASE 
-                    WHEN o.province IN ('Islamabad', 'Islamabad Capital Territory', 'Islamabad Capital', 'ICT') THEN 'Islamabad'
-                    WHEN o.province IN ('KPK', 'NWFP') THEN 'Khyber Pakhtunkhwa'
-                    ELSE COALESCE(o.province, 'Unknown')
+                    WHEN UPPER(o.province) IN ('ISLAMABAD', 'ISLAMABAD CAPITAL TERRITORY', 'ISLAMABAD CAPITAL', 'ICT') THEN 'Islamabad'
+                    WHEN UPPER(o.province) IN ('KPK', 'NWFP', 'KHYBER PAKHTUNKHWA') THEN 'Khyber Pakhtunkhwa'
+                    WHEN UPPER(o.province) = 'PUNJAB' THEN 'Punjab'
+                    WHEN UPPER(o.province) = 'SINDH' THEN 'Sindh'
+                    WHEN UPPER(o.province) IN ('BALOCHISTAN', 'BALUCHISTAN') THEN 'Balochistan'
+                    WHEN UPPER(o.province) IN ('GILGIT-BALTISTAN', 'GB') THEN 'Gilgit-Baltistan'
+                    WHEN UPPER(o.province) IN ('AZAD KASHMIR', 'AJK', 'AZAD JAMMU AND KASHMIR') THEN 'Azad Kashmir'
+                    ELSE INITCAP(COALESCE(o.province, 'Unknown'))
                 END as province,
                 COUNT(DISTINCT o.id) as total_orders,
                 COUNT(DISTINCT o.unified_customer_id) as total_customers,
@@ -1639,9 +1644,14 @@ async def get_province_performance(time_filter: str = Query("30days")):
             {where_clause}
             GROUP BY 
                 CASE 
-                    WHEN o.province IN ('Islamabad', 'Islamabad Capital Territory', 'Islamabad Capital', 'ICT') THEN 'Islamabad'
-                    WHEN o.province IN ('KPK', 'NWFP') THEN 'Khyber Pakhtunkhwa'
-                    ELSE COALESCE(o.province, 'Unknown')
+                    WHEN UPPER(o.province) IN ('ISLAMABAD', 'ISLAMABAD CAPITAL TERRITORY', 'ISLAMABAD CAPITAL', 'ICT') THEN 'Islamabad'
+                    WHEN UPPER(o.province) IN ('KPK', 'NWFP', 'KHYBER PAKHTUNKHWA') THEN 'Khyber Pakhtunkhwa'
+                    WHEN UPPER(o.province) = 'PUNJAB' THEN 'Punjab'
+                    WHEN UPPER(o.province) = 'SINDH' THEN 'Sindh'
+                    WHEN UPPER(o.province) IN ('BALOCHISTAN', 'BALUCHISTAN') THEN 'Balochistan'
+                    WHEN UPPER(o.province) IN ('GILGIT-BALTISTAN', 'GB') THEN 'Gilgit-Baltistan'
+                    WHEN UPPER(o.province) IN ('AZAD KASHMIR', 'AJK', 'AZAD JAMMU AND KASHMIR') THEN 'Azad Kashmir'
+                    ELSE INITCAP(COALESCE(o.province, 'Unknown'))
                 END
             ORDER BY total_revenue DESC
         """, params)

@@ -219,6 +219,113 @@ def main():
     r.setex('analytics:product_categories:all', TTL, json.dumps(cat_data))
     print(f'   ✅ Cached {len(categories)} categories\n')
     
+    # 5. RFM SEGMENTS WITH CUSTOMER DETAILS (ALL TIME)
+    print('5. Caching RFM segments with customer details for ALL TIME...')
+    
+    # Query to get RFM metrics for all customers
+    cursor.execute("""
+        WITH customer_rfm AS (
+            SELECT 
+                o.unified_customer_id,
+                MAX(o.customer_name) as customer_name,
+                MAX(o.customer_city) as city,
+                MAX(o.province) as province,
+                EXTRACT(days FROM NOW() - MAX(o.order_date)) as recency_days,
+                COUNT(DISTINCT o.id) as frequency,
+                SUM(o.total_price) as monetary,
+                MAX(o.order_date) as last_order_date
+            FROM orders o
+            GROUP BY o.unified_customer_id
+        ),
+        segmented AS (
+            SELECT 
+                unified_customer_id,
+                customer_name,
+                city,
+                province,
+                recency_days,
+                frequency,
+                monetary,
+                last_order_date,
+                CASE 
+                    WHEN recency_days <= 30 AND frequency >= 5 AND monetary >= 50000 THEN 'Champions'
+                    WHEN recency_days <= 60 AND frequency >= 3 AND monetary >= 30000 THEN 'Loyal'
+                    WHEN recency_days <= 90 AND frequency >= 2 THEN 'Potential'
+                    WHEN frequency = 1 AND recency_days <= 30 THEN 'New'
+                    WHEN recency_days > 180 THEN 'Lost'
+                    WHEN recency_days > 90 THEN 'At Risk'
+                    ELSE 'Regular'
+                END as segment
+            FROM customer_rfm
+        )
+        SELECT * FROM segmented
+        ORDER BY segment, monetary DESC
+    """)
+    
+    all_customers = cursor.fetchall()
+    
+    # Group by segment
+    segments = {}
+    for customer in all_customers:
+        segment = customer['segment']
+        if segment not in segments:
+            segments[segment] = []
+        
+        segments[segment].append({
+            "customer_id": customer['unified_customer_id'],
+            "customer_name": customer['customer_name'],
+            "city": customer['city'],
+            "province": customer['province'],
+            "recency_days": int(customer['recency_days']),
+            "frequency": customer['frequency'],
+            "monetary": float(customer['monetary'] or 0),
+            "last_order_date": customer['last_order_date'].isoformat() if customer['last_order_date'] else None
+        })
+    
+    # Cache each segment separately (for faster segment detail queries)
+    for segment_name, customers in segments.items():
+        segment_data = {
+            "success": True,
+            "segment": segment_name,
+            "customers": customers[:100],  # Cache top 100 per segment
+            "total_count": len(customers),
+            "cached": True,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        cache_key = f"analytics:segment_details:{segment_name}:all"
+        r.setex(cache_key, TTL, json.dumps(segment_data))
+        print(f'   ✅ Cached {segment_name}: {len(customers)} customers')
+    
+    print()
+    
+    # 6. RFM SEGMENT SUMMARY (ALL TIME)
+    print('6. Caching RFM segment summary for ALL TIME...')
+    
+    segment_summary = []
+    for segment_name in segments:
+        customers = segments[segment_name]
+        total_revenue = sum(c['monetary'] for c in customers)
+        avg_value = total_revenue / len(customers) if customers else 0
+        
+        segment_summary.append({
+            "segment": segment_name,
+            "customer_count": len(customers),
+            "total_revenue": total_revenue,
+            "avg_customer_value": avg_value,
+            "avg_orders": sum(c['frequency'] for c in customers) / len(customers) if customers else 0
+        })
+    
+    summary_data = {
+        "success": True,
+        "segments": segment_summary,
+        "cached": True,
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    r.setex("analytics:rfm_segments:all", TTL, json.dumps(summary_data))
+    print(f'   ✅ Cached summary for {len(segment_summary)} RFM segments\n')
+    
     # Close connections
     cursor.close()
     conn.close()

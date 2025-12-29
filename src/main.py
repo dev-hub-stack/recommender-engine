@@ -1798,6 +1798,20 @@ async def get_segment_details(
     limit: int = Query(20)
 ):
     """Get detailed customer list for a specific RFM segment"""
+    # ✅ TRY REDIS CACHE FIRST (FAST PATH - <100ms from cache)
+    if time_filter == "all" and redis_client:
+        try:
+            cache_key = f"analytics:segment_details:{segment_name}:all"
+            cached_data = redis_client.get(cache_key)
+            if cached_data:
+                data = json.loads(cached_data)
+                customers = data.get("customers", [])[:limit]
+                logger.info(f"Segment details from cache: {segment_name}", count=len(customers))
+                return customers
+        except Exception as e:
+            logger.warning(f"Cache lookup failed for {segment_name}: {e}")
+    
+    # Fallback to direct query if cache misses
     conn = None
     try:
         conn = psycopg2.connect(**get_pg_connection_params())

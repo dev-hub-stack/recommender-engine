@@ -2935,33 +2935,103 @@ async def get_ml_collaborative_products(
     use_ml: bool = Query(True, description="Use ML algorithms or SQL fallback")
 ):
     """
-    Get collaborative products - NOW USES REAL DATA FROM ANALYTICS
+    Get collaborative products - Uses SQL-based collaborative analytics
     
     NOTE: Local ML models disabled - using SQL-based collaborative analytics
-    Returns REAL purchase patterns and collaborative signals
+    Returns REAL purchase patterns and collaborative signals with proper fallback
     """
+    conn = None
     try:
-        # Just call the analytics endpoint internally (returns {products: [...]})
-        response = await get_analytics_collaborative_products(time_filter, limit)
-        products = response.get("products", [])
+        # First try the analytics endpoint
+        try:
+            response = await get_analytics_collaborative_products(time_filter, limit)
+            products = response.get("products", [])
+            
+            if products:
+                # Add algorithm field to each product
+                for p in products:
+                    p['algorithm'] = 'sql_collaborative_analytics'
+                
+                result = {
+                    "products": products,
+                    "algorithm": "sql_collaborative",
+                    "time_filter": time_filter,
+                    "count": len(products)
+                }
+                
+                logger.info("Collaborative products from analytics", count=len(products))
+                return result
+        except Exception as analytics_err:
+            logger.warning(f"Analytics endpoint failed, using direct SQL fallback: {analytics_err}")
         
-        # Add algorithm field to each product
-        for p in products:
-            p['algorithm'] = 'sql_collaborative_analytics'
+        # Fallback: Direct SQL query that doesn't depend on pre-calculated tables
+        conn = psycopg2.connect(**get_pg_connection_params())
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        where_clause, params = get_time_filter_clause(time_filter)
+        
+        # Simple but effective collaborative query
+        cursor.execute(f"""
+            SELECT  
+                oi.product_id,
+                MAX(oi.product_name) as product_name,
+                COUNT(DISTINCT o.unified_customer_id) as customer_count,
+                COUNT(DISTINCT o.id) as recommendation_count,
+                SUM(oi.total_price) as total_revenue,
+                AVG(oi.unit_price) as avg_price
+            FROM order_items oi
+            JOIN orders o ON oi.order_id = o.id
+            {where_clause}
+            GROUP BY oi.product_id
+            HAVING COUNT(DISTINCT o.unified_customer_id) >= 2
+            ORDER BY COUNT(DISTINCT o.unified_customer_id) DESC, 
+                     SUM(oi.total_price) DESC
+            LIMIT %s
+        """, params + (limit,) if params else (limit,))
+        
+        results = cursor.fetchall()
+        cursor.close()
+        
+        products = []
+        for r in results:
+            product_name = r['product_name'] or f"Product {r['product_id']}"
+            category = extract_smart_category(product_name)
+            
+            products.append({
+                "product_id": r['product_id'],
+                "product_name": product_name,
+                "category": category,
+                "price": float(r['avg_price'] or 0),
+                "recommendation_count": r['recommendation_count'] or 0,
+                "avg_similarity_score": round(r['customer_count'] / 100, 2) if r['customer_count'] else 0,
+                "total_revenue": float(r['total_revenue'] or 0),
+                "algorithm": "sql_fallback"
+            })
         
         result = {
             "products": products,
-            "algorithm": "sql_collaborative",
+            "algorithm": "sql_fallback",
             "time_filter": time_filter,
             "count": len(products)
         }
         
-        logger.info("Collaborative products from analytics", count=len(products))
+        logger.info("Collaborative products from SQL fallback", count=len(products))
         return result
         
     except Exception as e:
         logger.error("Failed to fetch collaborative products", error=str(e), exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        # Return empty result instead of 500 error
+        return {
+            "products": [],
+            "algorithm": "error_fallback",
+            "time_filter": time_filter,
+            "count": 0,
+            "error": "Failed to load collaborative products. Please train ML models first.",
+            "message": str(e)
+        }
+    finally:
+        if conn:
+            conn.close()
 
 
 @app.get("/api/v1/ab-test/variant")

@@ -1798,10 +1798,13 @@ async def get_segment_details(
     limit: int = Query(20)
 ):
     """Get detailed customer list for a specific RFM segment"""
+    # Normalize segment name (remove " Customers" suffix for cache key compatibility)
+    normalized_segment = segment_name.replace(" Customers", "").replace(" Loyalists", "")
+    
     # ✅ TRY REDIS CACHE FIRST (FAST PATH - <100ms from cache)
     if time_filter == "all" and redis_client:
         try:
-            cache_key = f"analytics:segment_details:{segment_name}:all"
+            cache_key = f"analytics:segment_details:{normalized_segment}:all"
             cached_data = redis_client.get(cache_key)
             if cached_data:
                 data = json.loads(cached_data)

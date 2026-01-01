@@ -326,6 +326,249 @@ def main():
     r.setex("analytics:rfm_segments:all", TTL, json.dumps(summary_data))
     print(f'   ✅ Cached summary for {len(segment_summary)} RFM segments\n')
     
+    # 7. COLLABORATIVE FILTERING METRICS (ALL TIME)
+    print('7. Caching collaborative filtering metrics for ALL TIME...')
+    
+    cursor.execute("""
+        WITH customer_products AS (
+            SELECT 
+                o.unified_customer_id,
+                oi.product_id,
+                COUNT(*) as purchase_count
+            FROM orders o
+            JOIN order_items oi ON o.id = oi.order_id
+            GROUP BY o.unified_customer_id, oi.product_id
+        ),
+        customer_pairs AS (
+            SELECT DISTINCT
+                cp1.unified_customer_id as customer1,
+                cp2.unified_customer_id as customer2,
+                COUNT(DISTINCT cp1.product_id) as shared_products
+            FROM customer_products cp1
+            JOIN customer_products cp2 
+                ON cp1.product_id = cp2.product_id 
+                AND cp1.unified_customer_id < cp2.unified_customer_id
+            GROUP BY cp1.unified_customer_id, cp2.unified_customer_id
+            HAVING COUNT(DISTINCT cp1.product_id) >= 2
+        ),
+        stats AS (
+            SELECT 
+                COUNT(DISTINCT cp.unified_customer_id) as total_users,
+                COUNT(DISTINCT cp.product_id) as total_products,
+                SUM(cp.purchase_count) as total_purchases,
+                COUNT(*) as total_user_product_combinations
+            FROM customer_products cp
+        ),
+        pair_stats AS (
+            SELECT 
+                COUNT(*) as total_pairs,
+                AVG(shared_products) as avg_shared_products
+            FROM customer_pairs
+        )
+        SELECT 
+            s.total_users,
+            s.total_products,
+            s.total_purchases,
+            s.total_user_product_combinations,
+            COALESCE(ps.total_pairs, 0) as active_customer_pairs,
+            COALESCE(ps.avg_shared_products, 0) as avg_shared_products
+        FROM stats s
+        CROSS JOIN pair_stats ps
+    """)
+    
+    result = cursor.fetchone()
+    total_users = int(result['total_users'] or 0)
+    total_products = int(result['total_products'] or 0)
+    active_pairs = int(result['active_customer_pairs'] or 0)
+    avg_shared = float(result['avg_shared_products'] or 0)
+    
+    similarity_score = min(avg_shared / 10.0, 1.0) if avg_shared > 0 else 0.0
+    max_possible_pairs = float((total_users * (total_users - 1)) / 2) if total_users > 1 else 1.0
+    recommendation_coverage = min(float(active_pairs) / max_possible_pairs, 1.0) if max_possible_pairs > 0 else 0.0
+    
+    collab_metrics = {
+        "total_recommendations": result['total_user_product_combinations'] or 0,
+        "avg_similarity_score": round(similarity_score, 3),
+        "active_customer_pairs": active_pairs,
+        "algorithm_accuracy": round(recommendation_coverage, 3),
+        "total_users": total_users,
+        "total_products": total_products,
+        "coverage": round(recommendation_coverage, 3),
+        "time_filter": "all",
+        "cached": True,
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    r.setex("analytics:collaborative_metrics:all", TTL, json.dumps(collab_metrics))
+    print(f'   ✅ Users: {total_users:,}, Products: {total_products:,}, Pairs: {active_pairs:,}\n')
+    
+    # 8. COLLABORATIVE PRODUCT PAIRS (ALL TIME)
+    print('8. Caching collaborative product pairs for ALL TIME...')
+    
+    cursor.execute("""
+        WITH product_pairs AS (
+            SELECT 
+                oi1.product_id as product_a_id,
+                MAX(oi1.product_name) as product_a_name,
+                oi2.product_id as product_b_id,
+                MAX(oi2.product_name) as product_b_name,
+                COUNT(DISTINCT oi1.order_id) as co_purchase_count,
+                SUM(oi1.total_price + oi2.total_price) as combined_revenue
+            FROM order_items oi1
+            JOIN order_items oi2 ON oi1.order_id = oi2.order_id AND oi1.product_id < oi2.product_id
+            GROUP BY oi1.product_id, oi2.product_id
+            HAVING COUNT(DISTINCT oi1.order_id) >= 2
+        )
+        SELECT * FROM product_pairs
+        ORDER BY co_purchase_count DESC
+        LIMIT 20
+    """)
+    
+    pairs_results = cursor.fetchall()
+    
+    pairs_list = []
+    for r in pairs_results:
+        pairs_list.append({
+            "product_a_id": r['product_a_id'],
+            "product_a_name": r['product_a_name'],
+            "product_b_id": r['product_b_id'],
+            "product_b_name": r['product_b_name'],
+            "co_recommendation_count": r['co_purchase_count'],
+            "combined_revenue": float(r['combined_revenue'] or 0)
+        })
+    
+    pairs_data = {
+        "pairs": pairs_list,
+        "cached": True,
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    r.setex("analytics_collab_pairs:all_20", TTL, json.dumps(pairs_data))
+    r.setex("analytics_collab_pairs:all_10", TTL, json.dumps({"pairs": pairs_list[:10], "cached": True, "timestamp": datetime.now().isoformat()}))
+    print(f'   ✅ Cached {len(pairs_list)} product pairs\n')
+    
+    # 9. CUSTOMER SIMILARITY (ALL TIME)
+    print('9. Caching customer similarity for ALL TIME...')
+    
+    cursor.execute("""
+        WITH customer_products AS (
+            SELECT 
+                o.unified_customer_id,
+                MAX(o.customer_name) as customer_name,
+                oi.product_id,
+                MAX(oi.product_name) as product_name,
+                COUNT(*) as purchase_count
+            FROM orders o
+            JOIN order_items oi ON o.id = oi.order_id
+            GROUP BY o.unified_customer_id, oi.product_id
+        ),
+        customer_stats AS (
+            SELECT 
+                cp.unified_customer_id,
+                MAX(cp.customer_name) as customer_name,
+                COUNT(DISTINCT cp.product_id) as unique_products,
+                SUM(cp.purchase_count) as total_purchases
+            FROM customer_products cp
+            GROUP BY cp.unified_customer_id
+        ),
+        similar_customers AS (
+            SELECT 
+                cp1.unified_customer_id,
+                COUNT(DISTINCT cp2.unified_customer_id) as similar_customers_count
+            FROM customer_products cp1
+            LEFT JOIN customer_products cp2 
+                ON cp1.product_id = cp2.product_id 
+                AND cp1.unified_customer_id != cp2.unified_customer_id
+            GROUP BY cp1.unified_customer_id
+        )
+        SELECT 
+            cs.unified_customer_id as customer_id,
+            cs.customer_name,
+            cs.unique_products,
+            cs.total_purchases,
+            COALESCE(sc.similar_customers_count, 0) as similar_customers_count
+        FROM customer_stats cs
+        LEFT JOIN similar_customers sc ON cs.unified_customer_id = sc.unified_customer_id
+        WHERE cs.unique_products >= 2
+        ORDER BY sc.similar_customers_count DESC, cs.total_purchases DESC
+        LIMIT 20
+    """)
+    
+    similarity_results = cursor.fetchall()
+    
+    similarity_list = []
+    for r in similarity_results:
+        similarity_list.append({
+            "customer_id": r['customer_id'],
+            "customer_name": r['customer_name'],
+            "similar_customers_count": r['similar_customers_count'] or 0,
+            "actual_recommendations": r['similar_customers_count'] or 0,
+            "recommendations_generated": r['similar_customers_count'] or 0,
+            "top_shared_products": []
+        })
+    
+    similarity_data = {
+        "customers": similarity_list,
+        "cached": True,
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    r.setex("analytics:customer_similarity:all:20", TTL, json.dumps(similarity_data))
+    r.setex("analytics:customer_similarity:all:10", TTL, json.dumps({"customers": similarity_list[:10], "cached": True, "timestamp": datetime.now().isoformat()}))
+    print(f'   ✅ Cached {len(similarity_list)} customer similarity records\n')
+    
+    # 10. COLLABORATIVE PRODUCTS (ALL TIME)
+    print('10. Caching collaborative products for ALL TIME...')
+    
+    cursor.execute("""
+        SELECT  
+            oi.product_id,
+            MAX(oi.product_name) as product_name,
+            CASE 
+                WHEN MAX(oi.product_name) ILIKE '%%pillow%%' THEN 'Pillows'
+                WHEN MAX(oi.product_name) ILIKE '%%cushion%%' THEN 'Cushions'
+                WHEN MAX(oi.product_name) ILIKE '%%mattress%%' OR MAX(oi.product_name) ILIKE '%%foam%%' THEN 'Mattresses & Foam'
+                WHEN MAX(oi.product_name) ILIKE '%%sheet%%' OR MAX(oi.product_name) ILIKE '%%cover%%' THEN 'Bedding'
+                ELSE 'Home Furnishing'
+            END as category,
+            COUNT(DISTINCT o.unified_customer_id) as customer_count,
+            COUNT(DISTINCT o.id) as recommendation_count,
+            SUM(oi.total_price) as total_revenue,
+            AVG(oi.unit_price) as avg_price
+        FROM order_items oi
+        JOIN orders o ON oi.order_id = o.id
+        GROUP BY oi.product_id
+        HAVING COUNT(DISTINCT o.unified_customer_id) >= 2
+        ORDER BY COUNT(DISTINCT o.unified_customer_id) DESC, 
+                 SUM(oi.total_price) DESC
+        LIMIT 20
+    """)
+    
+    collab_products = cursor.fetchall()
+    
+    products_list = []
+    for p in collab_products:
+        products_list.append({
+            "product_id": p['product_id'],
+            "product_name": p['product_name'],
+            "category": p['category'],
+            "price": float(p['avg_price'] or 0),
+            "recommendation_count": p['recommendation_count'] or 0,
+            "avg_similarity_score": round(p['customer_count'] / 100, 2) if p['customer_count'] else 0,
+            "total_revenue": float(p['total_revenue'] or 0),
+            "algorithm": "sql_collaborative"
+        })
+    
+    collab_products_data = {
+        "products": products_list,
+        "cached": True,
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    r.setex("analytics_collab_products:all_20", TTL, json.dumps(collab_products_data))
+    r.setex("analytics_collab_products:all_10", TTL, json.dumps({"products": products_list[:10], "cached": True, "timestamp": datetime.now().isoformat()}))
+    print(f'   ✅ Cached {len(products_list)} collaborative products\n')
+    
     # Close connections
     cursor.close()
     conn.close()

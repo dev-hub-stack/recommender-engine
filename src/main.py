@@ -1990,6 +1990,16 @@ async def get_brand_performance(
 @app.get("/api/v1/analytics/collaborative-metrics")
 async def get_collaborative_metrics(time_filter: str = Query("30days")):
     """Get collaborative filtering metrics - REAL DATA ONLY"""
+    # ✅ TRY REDIS CACHE FIRST (FAST PATH)
+    if time_filter == "all" and redis_client:
+        try:
+            cached_data = redis_client.get("analytics:collaborative_metrics:all")
+            if cached_data:
+                logger.info("Collaborative metrics from cache")
+                return json.loads(cached_data)
+        except Exception as e:
+            logger.warning(f"Cache lookup failed for collaborative metrics: {e}")
+    
     conn = None
     try:
         conn = psycopg2.connect(**get_pg_connection_params())
@@ -2088,7 +2098,18 @@ async def get_analytics_collaborative_products(
     limit: int = Query(10)
 ):
     """Get top collaborative products with REAL recommendation metrics"""
-    # Check cache first
+    # ✅ TRY REDIS CACHE FIRST (FAST PATH for 'all' time filter)
+    if time_filter == "all" and redis_client:
+        try:
+            cache_key = f"analytics_collab_products:all_{limit}"
+            cached_data = redis_client.get(cache_key)
+            if cached_data:
+                logger.info(f"Collaborative products from cache (limit={limit})")
+                return json.loads(cached_data)
+        except Exception as e:
+            logger.warning(f"Cache lookup failed for collaborative products: {e}")
+    
+    # Check standard cache
     cache_key = get_cache_key("analytics_collab_products", time_filter, limit)
     cached = get_from_cache(cache_key)
     if cached:
@@ -2212,7 +2233,18 @@ async def get_analytics_collaborative_pairs(
     limit: int = Query(10)
 ):
     """Get product pairs frequently bought together with confidence score"""
-    # Check cache first
+    # ✅ TRY REDIS CACHE FIRST (FAST PATH for 'all' time filter)
+    if time_filter == "all" and redis_client:
+        try:
+            cache_key = f"analytics_collab_pairs:all_{limit}"
+            cached_data = redis_client.get(cache_key)
+            if cached_data:
+                logger.info(f"Collaborative pairs from cache (limit={limit})")
+                return json.loads(cached_data)
+        except Exception as e:
+            logger.warning(f"Cache lookup failed for collaborative pairs: {e}")
+    
+    # Check standard cache
     cache_key = get_cache_key("analytics_collab_pairs", time_filter, limit)
     cached = get_from_cache(cache_key)
     if cached:
@@ -2341,6 +2373,17 @@ async def get_analytics_customer_similarity(
     limit: int = Query(10)
 ):
     """Get customer similarity data with REAL collaborative metrics"""
+    # ✅ TRY REDIS CACHE FIRST (FAST PATH)
+    if time_filter == "all" and redis_client:
+        try:
+            cache_key = f"analytics:customer_similarity:all:{limit}"
+            cached_data = redis_client.get(cache_key)
+            if cached_data:
+                logger.info(f"Customer similarity from cache (limit={limit})")
+                return json.loads(cached_data)
+        except Exception as e:
+            logger.warning(f"Cache lookup failed for customer similarity: {e}")
+    
     conn = None
     try:
         conn = psycopg2.connect(**get_pg_connection_params())

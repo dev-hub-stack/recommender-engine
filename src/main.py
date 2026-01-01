@@ -2272,11 +2272,27 @@ async def get_analytics_collaborative_pairs(
     # ✅ TRY REDIS CACHE FIRST (FAST PATH for 'all' time filter)
     if time_filter == "all" and redis_client:
         try:
+            # Try exact limit match first
             cache_key = f"analytics_collab_pairs:all_{limit}"
             cached_data = redis_client.get(cache_key)
             if cached_data:
                 logger.info(f"Collaborative pairs from cache (limit={limit})")
                 return json.loads(cached_data)
+            
+            # If not found, try to get from limit=20 cache and slice
+            if limit <= 20:
+                cache_key_20 = "analytics_collab_pairs:all_20"
+                cached_data_20 = redis_client.get(cache_key_20)
+                if cached_data_20:
+                    data = json.loads(cached_data_20)
+                    sliced_data = {
+                        "pairs": data["pairs"][:limit],
+                        "total_count": limit,
+                        "cached": True,
+                        "timestamp": data.get("timestamp")
+                    }
+                    logger.info(f"Collaborative pairs from cache (sliced from limit=20 to {limit})")
+                    return sliced_data
         except Exception as e:
             logger.warning(f"Cache lookup failed for collaborative pairs: {e}")
     

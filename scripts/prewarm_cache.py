@@ -249,11 +249,12 @@ def main():
                 last_order_date,
                 CASE 
                     WHEN recency_days <= 30 AND frequency >= 5 AND monetary >= 50000 THEN 'Champions'
-                    WHEN recency_days <= 60 AND frequency >= 3 AND monetary >= 30000 THEN 'Loyal'
+                    WHEN recency_days <= 60 AND frequency >= 3 AND monetary >= 20000 THEN 'Loyal'
                     WHEN recency_days <= 90 AND frequency >= 2 THEN 'Potential'
                     WHEN frequency = 1 AND recency_days <= 30 THEN 'New'
-                    WHEN recency_days > 180 THEN 'Lost'
-                    WHEN recency_days > 90 THEN 'At Risk'
+                    WHEN recency_days > 90 AND recency_days <= 180 AND frequency >= 2 THEN 'At Risk'
+                    WHEN recency_days > 180 AND recency_days <= 365 THEN 'Hibernating'
+                    WHEN recency_days > 365 THEN 'Lost'
                     ELSE 'Regular'
                 END as segment
             FROM customer_rfm
@@ -271,15 +272,29 @@ def main():
         if segment not in segments:
             segments[segment] = []
         
+        # Calculate RFM scores (1-5 scale)
+        recency = int(customer['recency_days'])
+        frequency = customer['frequency']
+        monetary = float(customer['monetary'] or 0)
+        
+        r_score = 5 if recency <= 30 else 4 if recency <= 60 else 3 if recency <= 90 else 2 if recency <= 180 else 1
+        f_score = 5 if frequency >= 10 else 4 if frequency >= 5 else 3 if frequency >= 3 else 2 if frequency >= 2 else 1
+        m_score = 5 if monetary >= 100000 else 4 if monetary >= 50000 else 3 if monetary >= 20000 else 2 if monetary >= 5000 else 1
+        
         segments[segment].append({
             "customer_id": customer['unified_customer_id'],
             "customer_name": customer['customer_name'],
-            "city": customer['city'],
-            "province": customer['province'],
-            "recency_days": int(customer['recency_days']),
-            "frequency": customer['frequency'],
-            "monetary": float(customer['monetary'] or 0),
-            "last_order_date": customer['last_order_date'].isoformat() if customer['last_order_date'] else None
+            "customer_city": customer['city'],
+            "segment": segment,
+            "total_orders": frequency,
+            "total_spent": monetary,
+            "last_order_date": customer['last_order_date'].isoformat() if customer['last_order_date'] else None,
+            "days_since_last_order": recency,
+            "rfm_score": {
+                "recency": r_score,
+                "frequency": f_score,
+                "monetary": m_score
+            }
         })
     
     # Cache each segment separately (for faster segment detail queries)

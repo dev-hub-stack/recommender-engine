@@ -320,7 +320,7 @@ def main():
     segment_summary = []
     for segment_name in segments:
         customers = segments[segment_name]
-        total_revenue = sum(c['monetary'] for c in customers)
+        total_revenue = sum(c['total_spent'] for c in customers)
         avg_value = total_revenue / len(customers) if customers else 0
         
         segment_summary.append({
@@ -328,7 +328,7 @@ def main():
             "customer_count": len(customers),
             "total_revenue": total_revenue,
             "avg_customer_value": avg_value,
-            "avg_orders": sum(c['frequency'] for c in customers) / len(customers) if customers else 0
+            "avg_orders": sum(c['total_orders'] for c in customers) / len(customers) if customers else 0
         })
     
     summary_data = {

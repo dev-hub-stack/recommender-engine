@@ -2458,13 +2458,35 @@ async def get_analytics_customer_similarity(
 ):
     """Get customer similarity data with REAL collaborative metrics"""
     # ✅ TRY REDIS CACHE FIRST (FAST PATH)
-    if time_filter == "all" and redis_client:
+    if redis_client:
         try:
-            cache_key = f"analytics:customer_similarity:all:{limit}"
+            # Try specific time filter cache first
+            cache_key = f"analytics:customer_similarity:{time_filter}:{limit}"
             cached_data = redis_client.get(cache_key)
             if cached_data:
-                logger.info(f"Customer similarity from cache (limit={limit})")
+                logger.info(f"Customer similarity from cache ({time_filter}, limit={limit})")
                 return json.loads(cached_data)
+            
+            # Fall back to "all" cache for any time filter (data is comprehensive)
+            cache_key_all = f"analytics:customer_similarity:all:{limit}"
+            cached_data = redis_client.get(cache_key_all)
+            if cached_data:
+                logger.info(f"Customer similarity from 'all' cache (fallback for {time_filter})")
+                data = json.loads(cached_data)
+                return data
+            
+            # Try with different limit values (10 or 20) as fallback
+            for fallback_limit in [10, 20]:
+                if fallback_limit != limit:
+                    cache_key_fb = f"analytics:customer_similarity:all:{fallback_limit}"
+                    cached_data = redis_client.get(cache_key_fb)
+                    if cached_data:
+                        logger.info(f"Customer similarity from 'all' cache (limit={fallback_limit} fallback)")
+                        data = json.loads(cached_data)
+                        # Trim to requested limit
+                        if "customers" in data:
+                            data["customers"] = data["customers"][:limit]
+                        return data
         except Exception as e:
             logger.warning(f"Cache lookup failed for customer similarity: {e}")
     

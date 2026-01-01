@@ -421,6 +421,42 @@ def get_region_for_province(province: str) -> str:
     return regions.get(normalized, 'Central')
 
 
+def get_city_normalization_sql() -> str:
+    """
+    Returns SQL CASE statement to normalize city names.
+    Handles case variations and common duplicates.
+    Use this in SELECT and GROUP BY clauses.
+    """
+    return """
+        INITCAP(TRIM(
+            CASE 
+                -- Normalize "Wah Cantt" variants
+                WHEN LOWER(TRIM(customer_city)) IN ('wah cantt', 'wah cantonment', 'wah') THEN 'Wah Cantonment'
+                -- Normalize "Rahim Yar Khan" variants  
+                WHEN LOWER(TRIM(customer_city)) IN ('rahim yar khan', 'rahimyarkhan', 'rahimyar khan') THEN 'Rahim Yar Khan'
+                -- Normalize "Dera Ghazi Khan" variants
+                WHEN LOWER(TRIM(customer_city)) LIKE 'dera ghazi%' THEN 'Dera Ghazi Khan'
+                -- Normalize "Dera Ismail Khan" variants
+                WHEN LOWER(TRIM(customer_city)) LIKE 'dera ismail%' THEN 'Dera Ismail Khan'
+                -- Normalize "Toba Tek Singh" variants
+                WHEN LOWER(TRIM(customer_city)) LIKE 'toba%tek%' OR LOWER(TRIM(customer_city)) LIKE 'tobatek%' THEN 'Toba Tek Singh'
+                -- Normalize "Mandi Bahauddin" variants
+                WHEN LOWER(TRIM(customer_city)) LIKE 'mandi bahauddin%' THEN 'Mandi Bahauddin'
+                -- Normalize "Gujar Khan" variants
+                WHEN LOWER(TRIM(customer_city)) IN ('gujar khan', 'gujarkhan') THEN 'Gujar Khan'
+                -- Normalize abbreviated city names
+                WHEN LOWER(TRIM(customer_city)) IN ('lhr') THEN 'Lahore'
+                WHEN LOWER(TRIM(customer_city)) IN ('khi') THEN 'Karachi'
+                WHEN LOWER(TRIM(customer_city)) IN ('rwp') THEN 'Rawalpindi'
+                WHEN LOWER(TRIM(customer_city)) IN ('fsd') THEN 'Faisalabad'
+                WHEN LOWER(TRIM(customer_city)) IN ('isb') THEN 'Islamabad'
+                -- Default: Just apply INITCAP to normalize case
+                ELSE customer_city
+            END
+        ))
+    """
+
+
 # Smart category extraction function
 def extract_smart_category(product_name: str, product_type: str = None, order_source: str = "pos") -> str:
     """
@@ -4502,7 +4538,7 @@ async def get_provinces():
 
 @app.get("/api/v1/locations/cities")
 async def get_cities(province: Optional[str] = Query(None, description="Filter by province")):
-    """Get list of cities, optionally filtered by province."""
+    """Get list of cities, optionally filtered by province. City names are normalized (case-insensitive merge)."""
     try:
         if not pg_pool:
             raise HTTPException(status_code=500, detail="Database not connected")
@@ -4511,14 +4547,21 @@ async def get_cities(province: Optional[str] = Query(None, description="Filter b
         try:
             cursor = conn.cursor(cursor_factory=RealDictCursor)
             
+            # Use INITCAP(TRIM()) to normalize city names and merge duplicates
             query = """
                 SELECT 
-                    customer_city as city,
-                    province,
-                    COUNT(DISTINCT id) as order_count,
-                    COUNT(DISTINCT unified_customer_id) as customer_count
-                FROM orders
-                WHERE customer_city IS NOT NULL AND customer_city != ''
+                    INITCAP(TRIM(customer_city)) as city,
+                    MAX(province) as province,
+                    SUM(order_count) as order_count,
+                    SUM(customer_count) as customer_count
+                FROM (
+                    SELECT 
+                        customer_city,
+                        province,
+                        COUNT(DISTINCT id) as order_count,
+                        COUNT(DISTINCT unified_customer_id) as customer_count
+                    FROM orders
+                    WHERE customer_city IS NOT NULL AND TRIM(customer_city) != ''
             """
             params = []
             
@@ -4526,7 +4569,13 @@ async def get_cities(province: Optional[str] = Query(None, description="Filter b
                 query += " AND LOWER(province) = LOWER(%s)"
                 params.append(province)
             
-            query += " GROUP BY customer_city, province ORDER BY order_count DESC LIMIT 100"
+            query += """
+                    GROUP BY customer_city, province
+                ) subq
+                GROUP BY INITCAP(TRIM(customer_city))
+                ORDER BY customer_count DESC 
+                LIMIT 100
+            """
             
             cursor.execute(query, params)
             cities = cursor.fetchall()

@@ -417,25 +417,23 @@ def main():
     r.setex("analytics:collaborative_metrics:all", TTL, json.dumps(collab_metrics))
     print(f'   ✅ Users: {total_users:,}, Products: {total_products:,}, Pairs: {active_pairs:,}\n')
     
-    # 8. COLLABORATIVE PRODUCT PAIRS (ALL TIME)
+    # 8. COLLABORATIVE PRODUCT PAIRS (ALL TIME) - Optimized to use pre-calculated table
     print('8. Caching collaborative product pairs for ALL TIME...')
     
+    # Use pre-calculated product_pairs table for performance
     cursor.execute("""
-        WITH product_pairs AS (
-            SELECT 
-                oi1.product_id as product_a_id,
-                MAX(oi1.product_name) as product_a_name,
-                oi2.product_id as product_b_id,
-                MAX(oi2.product_name) as product_b_name,
-                COUNT(DISTINCT oi1.order_id) as co_purchase_count,
-                SUM(oi1.total_price + oi2.total_price) as combined_revenue
-            FROM order_items oi1
-            JOIN order_items oi2 ON oi1.order_id = oi2.order_id AND oi1.product_id < oi2.product_id
-            GROUP BY oi1.product_id, oi2.product_id
-            HAVING COUNT(DISTINCT oi1.order_id) >= 2
-        )
-        SELECT * FROM product_pairs
-        ORDER BY co_purchase_count DESC
+        SELECT 
+            pp.product_1 as product_a_id,
+            COALESCE(MAX(oi1.product_name), 'Unknown Product') as product_a_name,
+            pp.product_2 as product_b_id,
+            COALESCE(MAX(oi2.product_name), 'Unknown Product') as product_b_name,
+            pp.co_purchase_count,
+            0 as combined_revenue
+        FROM product_pairs pp
+        LEFT JOIN order_items oi1 ON pp.product_1 = oi1.product_id
+        LEFT JOIN order_items oi2 ON pp.product_2 = oi2.product_id
+        GROUP BY pp.product_1, pp.product_2, pp.co_purchase_count
+        ORDER BY pp.co_purchase_count DESC
         LIMIT 20
     """)
     

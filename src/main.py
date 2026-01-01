@@ -2294,22 +2294,21 @@ async def get_analytics_collaborative_pairs(
         
         where_clause, params = get_time_filter_clause(time_filter)
         
-        # OPTIMIZATION: Use pre-calculated table for 'all' time filter with real product names from order_items
+        # OPTIMIZATION: Use pre-calculated table for 'all' time filter
         if time_filter == 'all':
             cursor.execute("""
                 SELECT 
-                    pp.product_1 as product_a_id,
-                    COALESCE(MAX(oi1.product_name), 'Unknown Product') as product_a_name,
-                    pp.product_2 as product_b_id,
-                    COALESCE(MAX(oi2.product_name), 'Unknown Product') as product_b_name,
-                    pp.co_purchase_count,
-                    COALESCE(SUM(oi1.total_price + oi2.total_price), 0) as combined_revenue,
-                    pp.confidence as confidence_score
+                    product_1 as product_a_id,
+                    COALESCE(p1.product_name, 'Unknown Product') as product_a_name,
+                    product_2 as product_b_id,
+                    COALESCE(p2.product_name, 'Unknown Product') as product_b_name,
+                    co_purchase_count,
+                    0 as combined_revenue,
+                    confidence as confidence_score
                 FROM product_pairs pp
-                LEFT JOIN order_items oi1 ON pp.product_1 = oi1.product_id
-                LEFT JOIN order_items oi2 ON pp.product_2 = oi2.product_id
-                GROUP BY pp.product_1, pp.product_2, pp.co_purchase_count, pp.confidence
-                ORDER BY pp.co_purchase_count DESC
+                LEFT JOIN product_statistics p1 ON pp.product_1 = p1.product_id
+                LEFT JOIN product_statistics p2 ON pp.product_2 = p2.product_id
+                ORDER BY co_purchase_count DESC
                 LIMIT %s
             """, (limit,))
             

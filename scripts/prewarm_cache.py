@@ -444,16 +444,16 @@ def main():
     pairs_list = []
     for r in pairs_results:
         pairs_list.append({
-            "product_a_id": r['product_a_id'],
-            "product_a_name": r['product_a_name'],
-            "product_b_id": r['product_b_id'],
-            "product_b_name": r['product_b_name'],
+            "product_a": {"id": r['product_a_id'], "name": r['product_a_name']},
+            "product_b": {"id": r['product_b_id'], "name": r['product_b_name']},
             "co_recommendation_count": r['co_purchase_count'],
-            "combined_revenue": float(r['combined_revenue'] or 0)
+            "combined_revenue": float(r['combined_revenue'] or 0),
+            "confidence_score": 0.0  # Not calculated in prewarm, will be 0
         })
     
     pairs_data = {
         "pairs": pairs_list,
+        "total_count": len(pairs_list),
         "cached": True,
         "timestamp": datetime.now().isoformat()
     }

@@ -2310,21 +2310,30 @@ async def get_analytics_collaborative_pairs(
         
         where_clause, params = get_time_filter_clause(time_filter)
         
-        # OPTIMIZATION: Use pre-calculated table for 'all' time filter
+        # OPTIMIZATION: Use pre-calculated table for 'all' time filter with real product names
         if time_filter == 'all':
             cursor.execute("""
+                WITH product_names AS (
+                    SELECT DISTINCT ON (product_id) 
+                        product_id, 
+                        product_name,
+                        unit_price
+                    FROM order_items
+                    WHERE product_name IS NOT NULL AND product_name != ''
+                    ORDER BY product_id, order_id DESC
+                )
                 SELECT 
-                    product_1 as product_a_id,
-                    COALESCE(p1.product_name, 'Unknown Product') as product_a_name,
-                    product_2 as product_b_id,
-                    COALESCE(p2.product_name, 'Unknown Product') as product_b_name,
-                    co_purchase_count,
-                    0 as combined_revenue,
-                    confidence as confidence_score
+                    pp.product_1 as product_a_id,
+                    COALESCE(pn1.product_name, 'Unknown Product') as product_a_name,
+                    pp.product_2 as product_b_id,
+                    COALESCE(pn2.product_name, 'Unknown Product') as product_b_name,
+                    pp.co_purchase_count,
+                    COALESCE(pn1.unit_price * pp.co_purchase_count + pn2.unit_price * pp.co_purchase_count, 0) as combined_revenue,
+                    pp.confidence as confidence_score
                 FROM product_pairs pp
-                LEFT JOIN product_statistics p1 ON pp.product_1 = p1.product_id
-                LEFT JOIN product_statistics p2 ON pp.product_2 = p2.product_id
-                ORDER BY co_purchase_count DESC
+                LEFT JOIN product_names pn1 ON pp.product_1 = pn1.product_id
+                LEFT JOIN product_names pn2 ON pp.product_2 = pn2.product_id
+                ORDER BY pp.co_purchase_count DESC
                 LIMIT %s
             """, (limit,))
             

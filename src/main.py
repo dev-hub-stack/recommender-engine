@@ -2027,12 +2027,22 @@ async def get_brand_performance(
 async def get_collaborative_metrics(time_filter: str = Query("30days")):
     """Get collaborative filtering metrics - REAL DATA ONLY"""
     # ✅ TRY REDIS CACHE FIRST (FAST PATH)
-    if time_filter == "all" and redis_client:
+    if redis_client:
         try:
+            # Try specific time filter cache first
+            cache_key = f"analytics:collaborative_metrics:{time_filter}"
+            cached_data = redis_client.get(cache_key)
+            if cached_data:
+                logger.info(f"Collaborative metrics from cache: {time_filter}")
+                return json.loads(cached_data)
+            
+            # Fall back to "all" cache for any time filter (data is comprehensive)
             cached_data = redis_client.get("analytics:collaborative_metrics:all")
             if cached_data:
-                logger.info("Collaborative metrics from cache")
-                return json.loads(cached_data)
+                logger.info(f"Collaborative metrics from 'all' cache (fallback for {time_filter})")
+                data = json.loads(cached_data)
+                data["time_filter"] = time_filter  # Update the time_filter in response
+                return data
         except Exception as e:
             logger.warning(f"Cache lookup failed for collaborative metrics: {e}")
     
@@ -2134,14 +2144,27 @@ async def get_analytics_collaborative_products(
     limit: int = Query(10)
 ):
     """Get top collaborative products with REAL recommendation metrics"""
-    # ✅ TRY REDIS CACHE FIRST (FAST PATH for 'all' time filter)
-    if time_filter == "all" and redis_client:
+    # ✅ TRY REDIS CACHE FIRST (FAST PATH)
+    if redis_client:
         try:
-            cache_key = f"analytics_collab_products:all_{limit}"
+            # Try specific time filter cache first
+            cache_key = f"analytics_collab_products:{time_filter}_{limit}"
             cached_data = redis_client.get(cache_key)
             if cached_data:
-                logger.info(f"Collaborative products from cache (limit={limit})")
+                logger.info(f"Collaborative products from cache ({time_filter}, limit={limit})")
                 return json.loads(cached_data)
+            
+            # Fall back to "all" cache with same or larger limit
+            for fallback_limit in [limit, 20, 10]:
+                fallback_key = f"analytics_collab_products:all_{fallback_limit}"
+                cached_data = redis_client.get(fallback_key)
+                if cached_data:
+                    logger.info(f"Collaborative products from 'all' cache (fallback for {time_filter}, limit={fallback_limit})")
+                    data = json.loads(cached_data)
+                    # Slice to requested limit
+                    if "products" in data:
+                        data["products"] = data["products"][:limit]
+                    return data
         except Exception as e:
             logger.warning(f"Cache lookup failed for collaborative products: {e}")
     
@@ -2269,29 +2292,29 @@ async def get_analytics_collaborative_pairs(
     limit: int = Query(10)
 ):
     """Get product pairs frequently bought together with confidence score"""
-    # ✅ TRY REDIS CACHE FIRST (FAST PATH for 'all' time filter)
-    if time_filter == "all" and redis_client:
+    # ✅ TRY REDIS CACHE FIRST (FAST PATH)
+    if redis_client:
         try:
-            # Try exact limit match first
-            cache_key = f"analytics_collab_pairs:all_{limit}"
+            # Try specific time filter cache first
+            cache_key = f"analytics_collab_pairs:{time_filter}_{limit}"
             cached_data = redis_client.get(cache_key)
             if cached_data:
-                logger.info(f"Collaborative pairs from cache (limit={limit})")
+                logger.info(f"Collaborative pairs from cache ({time_filter}, limit={limit})")
                 return json.loads(cached_data)
             
-            # If not found, try to get from limit=20 cache and slice
-            if limit <= 20:
-                cache_key_20 = "analytics_collab_pairs:all_20"
-                cached_data_20 = redis_client.get(cache_key_20)
-                if cached_data_20:
-                    data = json.loads(cached_data_20)
+            # Fall back to "all" cache with exact or larger limit
+            for fallback_limit in [limit, 20, 10]:
+                fallback_key = f"analytics_collab_pairs:all_{fallback_limit}"
+                cached_data = redis_client.get(fallback_key)
+                if cached_data:
+                    data = json.loads(cached_data)
                     sliced_data = {
                         "pairs": data["pairs"][:limit],
-                        "total_count": limit,
+                        "total_count": min(limit, len(data.get("pairs", []))),
                         "cached": True,
                         "timestamp": data.get("timestamp")
                     }
-                    logger.info(f"Collaborative pairs from cache (sliced from limit=20 to {limit})")
+                    logger.info(f"Collaborative pairs from 'all' cache (fallback for {time_filter}, sliced from {fallback_limit} to {limit})")
                     return sliced_data
         except Exception as e:
             logger.warning(f"Cache lookup failed for collaborative pairs: {e}")

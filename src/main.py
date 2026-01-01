@@ -2218,13 +2218,13 @@ async def get_analytics_collaborative_products(
                 SUM(oi.total_price) as total_revenue,
                 -- Calculate how often this product appears with others (collaborative signal)
                 ROUND(
-                    COUNT(DISTINCT CASE 
+                    (COUNT(DISTINCT CASE 
                         WHEN EXISTS (
                             SELECT 1 FROM order_items oi2 
                             WHERE oi2.order_id = oi.order_id 
                             AND oi2.product_id != oi.product_id
                         ) THEN o.id 
-                    END)::float / NULLIF(COUNT(DISTINCT o.id), 0)::numeric, 
+                    END)::numeric / NULLIF(COUNT(DISTINCT o.id), 0)::numeric), 
                     3
                 ) as avg_similarity_score
             FROM order_items oi

@@ -2291,7 +2291,7 @@ async def get_analytics_collaborative_pairs(
     time_filter: str = Query("30days"),
     limit: int = Query(10)
 ):
-    """Get product pairs frequently bought together with confidence score"""
+    """Get product pairs frequently bought together with confidence score and summary metrics"""
     # ✅ TRY REDIS CACHE FIRST (FAST PATH)
     if redis_client:
         try:
@@ -2302,9 +2302,8 @@ async def get_analytics_collaborative_pairs(
                 logger.info(f"Collaborative pairs from cache ({time_filter}, limit={limit})")
                 return json.loads(cached_data)
             
-            # Only fall back to "all" cache for "all" or very long time filters
-            # This ensures short time filters get fresh data from the database
-            if time_filter in ['all', '3years', '2years']:
+            # Only fall back to "all" cache for "all" filter (not 3years/2years - they should query DB)
+            if time_filter == 'all':
                 for fallback_limit in [limit, 20, 10]:
                     fallback_key = f"analytics_collab_pairs:all_{fallback_limit}"
                     cached_data = redis_client.get(fallback_key)
@@ -2312,7 +2311,9 @@ async def get_analytics_collaborative_pairs(
                         data = json.loads(cached_data)
                         sliced_data = {
                             "pairs": data["pairs"][:limit],
-                            "total_count": min(limit, len(data.get("pairs", []))),
+                            "total_count": data.get("actual_total_count", len(data.get("pairs", []))),
+                            "actual_total_count": data.get("actual_total_count", len(data.get("pairs", []))),
+                            "summary": data.get("summary", {}),
                             "cached": True,
                             "timestamp": data.get("timestamp")
                         }
@@ -2337,6 +2338,20 @@ async def get_analytics_collaborative_pairs(
         
         # OPTIMIZATION: Use pre-calculated table for 'all' time filter with real product names
         if time_filter == 'all':
+            # First get total count and summary metrics
+            cursor.execute("""
+                SELECT 
+                    COUNT(*) as total_pairs,
+                    SUM(co_purchase_count) as total_co_purchases,
+                    AVG(confidence) as avg_confidence
+                FROM product_pairs
+                WHERE co_purchase_count >= 2
+            """)
+            summary_row = cursor.fetchone()
+            actual_total_count = summary_row['total_pairs'] or 0
+            total_co_purchases = summary_row['total_co_purchases'] or 0
+            avg_confidence = float(summary_row['avg_confidence'] or 0)
+            
             cursor.execute("""
                 WITH product_names AS (
                     SELECT DISTINCT ON (product_id) 
@@ -2364,6 +2379,10 @@ async def get_analytics_collaborative_pairs(
             
             results = cursor.fetchall()
             
+            # Calculate total revenue from results
+            total_revenue = sum(float(r['combined_revenue'] or 0) for r in results)
+            avg_pair_value = total_revenue / len(results) if results else 0
+            
             response_data = {
                 "pairs": [{
                     "product_a": {"id": r['product_a_id'], "name": r['product_a_name']},
@@ -2372,7 +2391,15 @@ async def get_analytics_collaborative_pairs(
                     "combined_revenue": float(r['combined_revenue'] or 0),
                     "confidence_score": float(r['confidence_score'] or 0)
                 } for r in results],
-                "total_count": len(results)
+                "total_count": len(results),
+                "actual_total_count": actual_total_count,
+                "summary": {
+                    "total_pairs": actual_total_count,
+                    "total_co_purchases": total_co_purchases,
+                    "avg_confidence": round(avg_confidence * 100, 1),
+                    "total_revenue": total_revenue,
+                    "avg_pair_value": avg_pair_value
+                }
             }
             
             set_to_cache(cache_key, response_data, ttl=3600)
@@ -2430,16 +2457,60 @@ async def get_analytics_collaborative_pairs(
         
         results = cursor.fetchall()
         
+        # Get total count of pairs (without LIMIT)
+        count_query = f"""
+            WITH product_pairs AS (
+                SELECT 
+                    oi1.product_id as product_a_id,
+                    oi2.product_id as product_b_id,
+                    COUNT(DISTINCT oi1.order_id) as co_purchase_count,
+                    SUM(oi1.total_price + oi2.total_price) as combined_revenue
+                FROM order_items oi1
+                JOIN order_items oi2 ON oi1.order_id = oi2.order_id AND oi1.product_id < oi2.product_id
+                JOIN orders o ON oi1.order_id = o.id
+                {where_clause}
+                GROUP BY oi1.product_id, oi2.product_id
+                HAVING COUNT(DISTINCT oi1.order_id) >= 2
+            )
+            SELECT 
+                COUNT(*) as total_pairs,
+                SUM(co_purchase_count) as total_co_purchases,
+                SUM(combined_revenue) as total_revenue
+            FROM product_pairs
+        """
+        cursor.execute(count_query, params)
+        count_result = cursor.fetchone()
+        actual_total_count = count_result['total_pairs'] or 0
+        total_co_purchases = count_result['total_co_purchases'] or 0
+        total_revenue_all = float(count_result['total_revenue'] or 0)
+        
+        # Calculate metrics from returned results
+        total_revenue = sum(float(r['combined_revenue'] or 0) for r in results)
+        avg_confidence = sum(float(r['confidence_score'] or 0) for r in results) / len(results) if results else 0
+        avg_pair_value = total_revenue / len(results) if results else 0
+        
         pairs = [{
             "product_a_id": r['product_a_id'],
             "product_a_name": r['product_a_name'],
             "product_b_id": r['product_b_id'],
             "product_b_name": r['product_b_name'],
             "co_recommendation_count": r['co_purchase_count'],
-            "combined_revenue": float(r['combined_revenue'] or 0)
+            "combined_revenue": float(r['combined_revenue'] or 0),
+            "confidence_score": float(r['confidence_score'] or 0)
         } for r in results]
         
-        response_data = {"pairs": pairs}
+        response_data = {
+            "pairs": pairs,
+            "total_count": len(pairs),
+            "actual_total_count": actual_total_count,
+            "summary": {
+                "total_pairs": actual_total_count,
+                "total_co_purchases": total_co_purchases,
+                "avg_confidence": round(avg_confidence * 100, 1),
+                "total_revenue": total_revenue,
+                "avg_pair_value": avg_pair_value
+            }
+        }
         
         # Cache the result
         set_to_cache(cache_key, response_data, ttl=3600)

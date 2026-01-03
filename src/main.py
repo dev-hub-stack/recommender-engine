@@ -3499,10 +3499,10 @@ async def get_ml_product_pairs(
     Product Pairs - NOW USES REAL DATA FROM ANALYTICS
     
     NOTE: Local ML models disabled - using SQL-based collaborative analytics
-    Returns REAL product pairs bought together with confidence scores
+    Returns REAL product pairs bought together with confidence scores and summary metrics
     """
     try:
-        # Call analytics endpoint (returns {pairs: [...]})
+        # Call analytics endpoint (returns {pairs: [...], actual_total_count: ..., summary: {...}})
         response = await get_analytics_collaborative_pairs(time_filter, limit)
         pairs = response.get("pairs", [])
         
@@ -3516,7 +3516,9 @@ async def get_ml_product_pairs(
             "pairs": pairs,
             "algorithm": "sql_collaborative",
             "time_filter": time_filter,
-            "total_count": len(pairs)
+            "total_count": len(pairs),
+            "actual_total_count": response.get("actual_total_count", len(pairs)),
+            "summary": response.get("summary", {})
         }
         
     except Exception as e:

@@ -2302,20 +2302,22 @@ async def get_analytics_collaborative_pairs(
                 logger.info(f"Collaborative pairs from cache ({time_filter}, limit={limit})")
                 return json.loads(cached_data)
             
-            # Fall back to "all" cache with exact or larger limit
-            for fallback_limit in [limit, 20, 10]:
-                fallback_key = f"analytics_collab_pairs:all_{fallback_limit}"
-                cached_data = redis_client.get(fallback_key)
-                if cached_data:
-                    data = json.loads(cached_data)
-                    sliced_data = {
-                        "pairs": data["pairs"][:limit],
-                        "total_count": min(limit, len(data.get("pairs", []))),
-                        "cached": True,
-                        "timestamp": data.get("timestamp")
-                    }
-                    logger.info(f"Collaborative pairs from 'all' cache (fallback for {time_filter}, sliced from {fallback_limit} to {limit})")
-                    return sliced_data
+            # Only fall back to "all" cache for "all" or very long time filters
+            # This ensures short time filters get fresh data from the database
+            if time_filter in ['all', '3years', '2years']:
+                for fallback_limit in [limit, 20, 10]:
+                    fallback_key = f"analytics_collab_pairs:all_{fallback_limit}"
+                    cached_data = redis_client.get(fallback_key)
+                    if cached_data:
+                        data = json.loads(cached_data)
+                        sliced_data = {
+                            "pairs": data["pairs"][:limit],
+                            "total_count": min(limit, len(data.get("pairs", []))),
+                            "cached": True,
+                            "timestamp": data.get("timestamp")
+                        }
+                        logger.info(f"Collaborative pairs from 'all' cache (fallback for {time_filter}, sliced from {fallback_limit} to {limit})")
+                        return sliced_data
         except Exception as e:
             logger.warning(f"Cache lookup failed for collaborative pairs: {e}")
     

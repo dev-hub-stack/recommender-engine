@@ -193,7 +193,7 @@ git clone https://github.com/dev-hub-stack/recommender-engine.git mastergroup-ml
 cd mastergroup-ml
 
 # Checkout production branch
-git checkout main  # or 'dev' if deploying dev version
+git checkout dev  # or 'dev' if deploying dev version
 ```
 
 ### Step 3: Setup Python Environment

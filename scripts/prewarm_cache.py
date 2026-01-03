@@ -420,6 +420,21 @@ def main():
     # 8. COLLABORATIVE PRODUCT PAIRS (ALL TIME) - Optimized with subqueries
     print('8. Caching collaborative product pairs for ALL TIME...')
     
+    # First, get total count and summary metrics for ALL pairs
+    cursor.execute("""
+        SELECT 
+            COUNT(*) as total_pairs,
+            SUM(co_purchase_count) as total_co_purchases,
+            AVG(confidence) as avg_confidence
+        FROM product_pairs
+        WHERE co_purchase_count >= 2
+    """)
+    
+    summary_row = cursor.fetchone()
+    actual_total_count = summary_row['total_pairs'] or 0
+    total_co_purchases = summary_row['total_co_purchases'] or 0
+    avg_confidence = summary_row['avg_confidence'] or 0.0
+    
     # Use subqueries to efficiently get product names without slow joins
     cursor.execute("""
         WITH product_names AS (
@@ -437,10 +452,12 @@ def main():
             pp.product_2 as product_b_id,
             COALESCE(pn2.product_name, 'Unknown Product') as product_b_name,
             pp.co_purchase_count,
+            pp.confidence,
             COALESCE(pn1.unit_price * pp.co_purchase_count + pn2.unit_price * pp.co_purchase_count, 0) as combined_revenue
         FROM product_pairs pp
         LEFT JOIN product_names pn1 ON pp.product_1 = pn1.product_id
         LEFT JOIN product_names pn2 ON pp.product_2 = pn2.product_id
+        WHERE pp.co_purchase_count >= 2
         ORDER BY pp.co_purchase_count DESC
         LIMIT 20
     """)
@@ -448,27 +465,54 @@ def main():
     pairs_results = cursor.fetchall()
     
     pairs_list = []
+    total_revenue = 0
     for r in pairs_results:
+        combined_revenue = float(r['combined_revenue'] or 0)
+        total_revenue += combined_revenue
         pairs_list.append({
             "product_a_id": r['product_a_id'],
             "product_a_name": r['product_a_name'],
             "product_b_id": r['product_b_id'],
             "product_b_name": r['product_b_name'],
             "co_recommendation_count": r['co_purchase_count'],
-            "combined_revenue": float(r['combined_revenue'] or 0),
-            "confidence_score": 0.0  # Not calculated in prewarm, will be 0
+            "combined_revenue": combined_revenue,
+            "confidence_score": float(r['confidence'] or 0)
         })
+    
+    # Calculate average pair value from actual totals
+    avg_pair_value = total_revenue / len(pairs_list) if pairs_list else 0
     
     pairs_data = {
         "pairs": pairs_list,
         "total_count": len(pairs_list),
+        "actual_total_count": actual_total_count,
+        "summary": {
+            "total_pairs": actual_total_count,
+            "total_co_purchases": total_co_purchases,
+            "avg_confidence": round(float(avg_confidence) * 100, 1),
+            "total_revenue": total_revenue,
+            "avg_pair_value": avg_pair_value
+        },
         "cached": True,
         "timestamp": datetime.now().isoformat()
     }
     
     r.setex("analytics_collab_pairs:all_20", TTL, json.dumps(pairs_data))
-    r.setex("analytics_collab_pairs:all_10", TTL, json.dumps({"pairs": pairs_list[:10], "cached": True, "timestamp": datetime.now().isoformat()}))
-    print(f'   ✅ Cached {len(pairs_list)} product pairs\n')
+    
+    # Also cache the 10-item version with same summary data
+    pairs_data_10 = {
+        "pairs": pairs_list[:10],
+        "total_count": 10,
+        "actual_total_count": actual_total_count,
+        "summary": pairs_data["summary"],
+        "cached": True,
+        "timestamp": datetime.now().isoformat()
+    }
+    r.setex("analytics_collab_pairs:all_10", TTL, json.dumps(pairs_data_10))
+    
+    print(f'   ✅ Cached {len(pairs_list)} product pairs')
+    print(f'   📊 Total pairs in DB: {actual_total_count:,}')
+    print(f'   💰 Avg pair value: Rs {avg_pair_value:,.0f}\n')
     
     # 9. CUSTOMER SIMILARITY (ALL TIME)
     print('9. Caching customer similarity for ALL TIME...')

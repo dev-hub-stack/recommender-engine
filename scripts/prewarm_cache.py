@@ -72,7 +72,7 @@ def get_delivered_filter(delivered_only: bool, order_source: str = None) -> str:
         return "AND (o.order_status = 'Delivered Orders' OR o.order_status = 'completed')"
 
 
-def cache_dashboard_metrics(cursor, r, time_filter: str, order_source: str, delivered_only: bool, ttl: int):
+def cache_dashboard_metrics(cursor, redis_client, time_filter: str, order_source: str, delivered_only: bool, ttl: int):
     """Cache dashboard metrics for specific filters"""
     time_clause = get_time_filter_clause(time_filter)
     source_clause = get_order_source_filter(order_source)
@@ -90,46 +90,46 @@ def cache_dashboard_metrics(cursor, r, time_filter: str, order_source: str, deli
         {source_clause}
         {delivered_clause}
     """)
-    result = cursor.fetchone()
+    row = cursor.fetchone()
     
     cache_key = f"analytics:dashboard:{time_filter}:{order_source or 'all'}:{delivered_only}"
     
     dashboard_data = {
         "success": True,
-        "total_orders": result["total_orders"] or 0,
-        "total_customers": result["total_customers"] or 0,
-        "total_revenue": float(result["total_revenue"] or 0),
-        "avg_order_value": float(result["avg_order_value"] or 0),
+        "total_orders": row["total_orders"] or 0,
+        "total_customers": row["total_customers"] or 0,
+        "total_revenue": float(row["total_revenue"] or 0),
+        "avg_order_value": float(row["avg_order_value"] or 0),
         "time_filter": time_filter,
         "order_source": order_source or "all",
         "delivered_only": delivered_only,
-        "totalOrders": result["total_orders"] or 0,
-        "totalCustomers": result["total_customers"] or 0,
-        "totalRevenueAmount": float(result["total_revenue"] or 0),
-        "avgOrderValue": float(result["avg_order_value"] or 0),
+        "totalOrders": row["total_orders"] or 0,
+        "totalCustomers": row["total_customers"] or 0,
+        "totalRevenueAmount": float(row["total_revenue"] or 0),
+        "avgOrderValue": float(row["avg_order_value"] or 0),
         "cached": True,
         "timestamp": datetime.now().isoformat()
     }
     
-    r.setex(cache_key, ttl, json.dumps(dashboard_data))
+    redis_client.setex(cache_key, ttl, json.dumps(dashboard_data))
     return dashboard_data
 
 
 def main():
-    print('=' * 70)
-    print('  REDIS CACHE PRE-WARMING (with OE/POS filters)')
-    print('=' * 70)
-    print()
+    print('=' * 70, flush=True)
+    print('  REDIS CACHE PRE-WARMING (with OE/POS filters)', flush=True)
+    print('=' * 70, flush=True)
+    print(flush=True)
     
     # Connect to Redis
     redis_host = os.getenv('REDIS_HOST', 'localhost')
     redis_port = int(os.getenv('REDIS_PORT', 6379))
     redis_db = int(os.getenv('REDIS_DB', 0))
     
-    print(f'Connecting to Redis at {redis_host}:{redis_port}...')
-    r = redis.Redis(host=redis_host, port=redis_port, db=redis_db)
-    r.ping()
-    print('✅ Redis connected\n')
+    print(f'Connecting to Redis at {redis_host}:{redis_port}...', flush=True)
+    redis_client = redis.Redis(host=redis_host, port=redis_port, db=redis_db)
+    redis_client.ping()
+    print('✅ Redis connected\n', flush=True)
     
     # Connect to Database
     db_params = {
@@ -144,10 +144,10 @@ def main():
     if db_params['host'] != 'localhost':
         db_params['sslmode'] = 'require'
     
-    print(f'Connecting to database at {db_params["host"]}...')
+    print(f'Connecting to database at {db_params["host"]}...', flush=True)
     conn = psycopg2.connect(**db_params)
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-    print('✅ Database connected\n')
+    print('✅ Database connected\n', flush=True)
     
     # Cache TTL for "all" queries (2 hours)
     TTL = 7200
@@ -156,7 +156,7 @@ def main():
     # =========================================================================
     # 1. DASHBOARD METRICS - ALL COMBINATIONS
     # =========================================================================
-    print('1. Caching dashboard metrics for ALL filter combinations...')
+    print('1. Caching dashboard metrics for ALL filter combinations...', flush=True)
     
     time_filters = ['all', '3years', '1year', '6months', '90days', '30days']
     order_sources = [None, 'oe', 'pos']
@@ -168,15 +168,15 @@ def main():
             for delivered in delivered_options:
                 try:
                     ttl = TTL if tf == 'all' else TTL_SHORT
-                    data = cache_dashboard_metrics(cursor, r, tf, os_filter, delivered, ttl)
+                    data = cache_dashboard_metrics(cursor, redis_client, tf, os_filter, delivered, ttl)
                     os_label = os_filter.upper() if os_filter else 'ALL'
                     del_label = "Delivered" if delivered else "All Status"
-                    print(f'   ✅ {tf:10} | {os_label:4} | {del_label:12} | Orders: {data["total_orders"]:>8,} | Revenue: Rs {data["total_revenue"]:>15,.0f}')
+                    print(f'   ✅ {tf:10} | {os_label:4} | {del_label:12} | Orders: {data["total_orders"]:>8,} | Revenue: Rs {data["total_revenue"]:>15,.0f}', flush=True)
                     cached_count += 1
                 except Exception as e:
-                    print(f'   ❌ Error caching {tf}/{os_filter}/{delivered}: {e}')
+                    print(f'   ❌ Error caching {tf}/{os_filter}/{delivered}: {e}', flush=True)
     
-    print(f'   📊 Cached {cached_count} dashboard metric combinations\n')
+    print(f'   📊 Cached {cached_count} dashboard metric combinations\n', flush=True)
     
     # =========================================================================
     # 2. POPULAR PRODUCTS (ALL TIME - base case)
@@ -217,7 +217,7 @@ def main():
         "timestamp": datetime.now().isoformat()
     }
     
-    r.setex("popular_products:30:all:all", TTL, json.dumps(products_data))
+    redis_client.setex("popular_products:30:all:all", TTL, json.dumps(products_data))
     print(f'   ✅ Cached {len(products)} products\n')
     
     # 3. Revenue Trend (ALL TIME - Monthly)
@@ -259,7 +259,7 @@ def main():
         'timestamp': datetime.now().isoformat()
     }
     
-    r.setex('analytics:revenue_trend:all:monthly', TTL, json.dumps(trend_result))
+    redis_client.setex('analytics:revenue_trend:all:monthly', TTL, json.dumps(trend_result))
     print(f'   ✅ Cached {len(trend_data)} months of trend data\n')
     
     # 4. Product Categories (ALL TIME)
@@ -302,7 +302,7 @@ def main():
         "timestamp": datetime.now().isoformat()
     }
     
-    r.setex('analytics:product_categories:all', TTL, json.dumps(cat_data))
+    redis_client.setex('analytics:product_categories:all', TTL, json.dumps(cat_data))
     print(f'   ✅ Cached {len(categories)} categories\n')
     
     # 5. RFM SEGMENTS WITH CUSTOMER DETAILS (ALL TIME)
@@ -395,7 +395,7 @@ def main():
         }
         
         cache_key = f"analytics:segment_details:{segment_name}:all"
-        r.setex(cache_key, TTL, json.dumps(segment_data))
+        redis_client.setex(cache_key, TTL, json.dumps(segment_data))
         print(f'   ✅ Cached {segment_name}: {len(customers)} customers')
     
     print()
@@ -424,7 +424,7 @@ def main():
         "timestamp": datetime.now().isoformat()
     }
     
-    r.setex("analytics:rfm_segments:all", TTL, json.dumps(summary_data))
+    redis_client.setex("analytics:rfm_segments:all", TTL, json.dumps(summary_data))
     print(f'   ✅ Cached summary for {len(segment_summary)} RFM segments\n')
     
     # 7. COLLABORATIVE FILTERING METRICS (ALL TIME)
@@ -500,7 +500,7 @@ def main():
         "timestamp": datetime.now().isoformat()
     }
     
-    r.setex("analytics:collaborative_metrics:all", TTL, json.dumps(collab_metrics))
+    redis_client.setex("analytics:collaborative_metrics:all", TTL, json.dumps(collab_metrics))
     print(f'   ✅ Users: {total_users:,}, Products: {total_products:,}, Pairs: {active_pairs:,}\n')
     
     # 8. COLLABORATIVE PRODUCT PAIRS (ALL TIME) - Optimized with subqueries
@@ -583,7 +583,7 @@ def main():
         "timestamp": datetime.now().isoformat()
     }
     
-    r.setex("analytics_collab_pairs:all_20", TTL, json.dumps(pairs_data))
+    redis_client.setex("analytics_collab_pairs:all_20", TTL, json.dumps(pairs_data))
     
     # Also cache the 10-item version with same summary data
     pairs_data_10 = {
@@ -594,7 +594,7 @@ def main():
         "cached": True,
         "timestamp": datetime.now().isoformat()
     }
-    r.setex("analytics_collab_pairs:all_10", TTL, json.dumps(pairs_data_10))
+    redis_client.setex("analytics_collab_pairs:all_10", TTL, json.dumps(pairs_data_10))
     
     print(f'   ✅ Cached {len(pairs_list)} product pairs')
     print(f'   📊 Total pairs in DB: {actual_total_count:,}')
@@ -666,8 +666,8 @@ def main():
         "timestamp": datetime.now().isoformat()
     }
     
-    r.setex("analytics:customer_similarity:all:20", TTL, json.dumps(similarity_data))
-    r.setex("analytics:customer_similarity:all:10", TTL, json.dumps({"customers": similarity_list[:10], "cached": True, "timestamp": datetime.now().isoformat()}))
+    redis_client.setex("analytics:customer_similarity:all:20", TTL, json.dumps(similarity_data))
+    redis_client.setex("analytics:customer_similarity:all:10", TTL, json.dumps({"customers": similarity_list[:10], "cached": True, "timestamp": datetime.now().isoformat()}))
     print(f'   ✅ Cached {len(similarity_list)} customer similarity records\n')
     
     # 10. COLLABORATIVE PRODUCTS (ALL TIME)
@@ -718,8 +718,8 @@ def main():
         "timestamp": datetime.now().isoformat()
     }
     
-    r.setex("analytics_collab_products:all_20", TTL, json.dumps(collab_products_data))
-    r.setex("analytics_collab_products:all_10", TTL, json.dumps({"products": products_list[:10], "cached": True, "timestamp": datetime.now().isoformat()}))
+    redis_client.setex("analytics_collab_products:all_20", TTL, json.dumps(collab_products_data))
+    redis_client.setex("analytics_collab_products:all_10", TTL, json.dumps({"products": products_list[:10], "cached": True, "timestamp": datetime.now().isoformat()}))
     print(f'   ✅ Cached {len(products_list)} collaborative products\n')
     
     # Close connections

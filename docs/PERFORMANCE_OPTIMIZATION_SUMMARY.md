@@ -83,37 +83,91 @@ ttl = 7200 if time_filter == "all" else 300
 - `3years` - Last 3 years (1095 days)
 - `all` - TRUE all data (no limit, heavily cached)
 
-**Before:** "all" was limited to 2 years
+**Before:** "all" was limited to 2 years  
 **After:** "all" returns ALL data with 2-hour cache
 
 ---
 
-### 3. Cache Pre-warming Script
+### 3. Cache Pre-warming Script Optimization
 
-**File:** `scripts/prewarm_cache.py`
+#### **Original Issues**
+- ❌ `AttributeError: 'RealDictRow' object has no attribute 'setex'` (Redis variable shadowing)
+- ❌ Memory exhaustion from loading ALL customers at once (`fetchall()`)
+- ❌ Timeout errors on heavy RFM segment calculations
+- ❌ No batch processing for large datasets
+- ❌ Poor progress tracking for long-running operations
 
-**Purpose:** Pre-populate Redis cache with results of heavy queries BEFORE users request them.
+#### **Optimizations Implemented**
 
-**What it Caches:**
-1. Dashboard metrics (all time): Orders, customers, revenue, AOV
-2. Popular products (top 30, all time)
-3. Revenue trend (24 months, all time)
-4. Product categories (all time)
+##### 1. **Redis Variable Shadowing Fix**
+```python
+# BEFORE (causing crashes):
+r = redis.Redis(host=redis_host, port=redis_port, db=redis_db)
+for r in results:  # This overwrote the Redis client!
+    r.setex()  # ERROR: RealDictRow has no setex method
 
-**Usage:**
-```bash
-# Manual run
-python3 scripts/prewarm_cache.py
-
-# Runs automatically after ML pipeline
-# Also runs every 2 hours via cron
+# AFTER (fixed):
+redis_client = redis.Redis(host=redis_host, port=redis_port, db=redis_db)
+for row in results:
+    redis_client.setex()  # SUCCESS: Uses proper Redis client
 ```
 
-**Cron Schedule:**
-```bash
-# Every 2 hours (to keep cache fresh)
-0 */2 * * * cd /opt/mastergroup-ml && /opt/mastergroup-ml/venv/bin/python scripts/prewarm_cache.py >> /opt/mastergroup-ml/logs/cache_prewarm.log 2>&1
+##### 2. **Memory-Efficient Batch Processing**
+```python
+# BEFORE (memory intensive):
+cursor.execute("SELECT * FROM customers")  # Load ALL at once
+all_customers = cursor.fetchall()  # 219,964 customers in memory
+
+# AFTER (batch processing):
+BATCH_SIZE_CUSTOMERS = 5000  # Configurable batch size
+for batch_num, batch_customers, is_last_batch, total_batches in process_customers_in_batches(cursor):
+    # Process only 5,000 customers at a time
+    # Memory usage: ~95% reduction
 ```
+
+##### 3. **Optimized Heavy Queries**
+```python
+# Step 7: Collaborative Filtering (10% sampling)
+WITH sample_customers AS (
+    SELECT DISTINCT o.unified_customer_id
+    FROM orders o
+    TABLESAMPLE SYSTEM(10)  -- Sample only 10% of customers
+    LIMIT 5000
+)
+
+# Step 8: Cursor iteration instead of fetchall()
+for row in cursor:  # Memory-efficient iteration
+    process_row(row)
+# Instead of: rows = cursor.fetchall()  # Loads all into memory
+```
+
+##### 4. **Enhanced Configuration & Monitoring**
+```python
+# Configurable batch sizes
+BATCH_SIZE_CUSTOMERS = 5000      # RFM processing
+BATCH_SIZE_PRODUCTS = 1000       # Product processing  
+BATCH_SIZE_ORDERS = 10000        # Order processing
+MAX_CUSTOMERS_PER_SEGMENT = 500  # Memory limit per segment
+
+# Progress tracking with flush=True
+print(f'⏳ Processing batch {batch_num}/{total_batches}...', flush=True)
+print(f'✅ Total processed: {total_customers_processed:,}', flush=True)
+```
+
+#### **Performance Results**
+
+**Before Optimization:**
+- ❌ Script crashed with Redis variable shadowing error
+- ❌ Memory exhaustion on large customer datasets
+- ❌ No progress visibility during long operations
+- ❌ Single-threaded processing of all data at once
+
+**After Optimization:**
+- ✅ **Successfully processes 219,964 customers** in 44 batches
+- ✅ **Memory usage reduced by ~95%** (5,000 vs 219,964 records at once)
+- ✅ **Real-time progress tracking** with batch completion status
+- ✅ **Error-free execution** with proper Redis client handling
+- ✅ **Configurable batch sizes** for different server capacities
 
 ---
 
@@ -347,7 +401,7 @@ ssh ubuntu@YOUR_EC2_IP "sudo systemctl restart mastergroup-api"
 ssh ubuntu@YOUR_EC2_IP "redis-cli INFO stats | grep -E 'keyspace_hits|keyspace_misses'"
 ```
 
-**Good:** Hit rate > 80%
+**Good:** Hit rate > 80%  
 **Investigate:** Hit rate < 50%
 
 ### Check Cache Size
@@ -355,7 +409,7 @@ ssh ubuntu@YOUR_EC2_IP "redis-cli INFO stats | grep -E 'keyspace_hits|keyspace_m
 ssh ubuntu@YOUR_EC2_IP "redis-cli DBSIZE"
 ```
 
-**Normal:** 50-200 keys
+**Normal:** 50-200 keys  
 **Investigate:** >1000 keys (possible memory leak)
 
 ### Check Pre-warm Logs
@@ -422,7 +476,7 @@ If consistently >15, increase pool size in `src/main.py`.
 redis-cli GET "analytics:dashboard:all:all"
 ```
 
-**If null:** Cache not populated
+**If null:** Cache not populated  
 **Solution:** Run `python scripts/prewarm_cache.py`
 
 ### Issue: Cache Not Hitting
@@ -431,15 +485,15 @@ redis-cli GET "analytics:dashboard:all:all"
 redis-cli TTL "analytics:dashboard:all:all"
 ```
 
-**If -2:** Key expired or never set
+**If -2:** Key expired or never set  
 **Solution:** Re-run pre-warm script
 
 ### Issue: Training Taking Too Long
-**Check:** Memory limits in `local_ml_pipeline.py`
+**Check:** Memory limits in `local_ml_pipeline.py`  
 **Solution:** Reduce `n_factors` from 30 to 20
 
 ### Issue: High Memory Usage During Training
-**Check:** `htop` during training
+**Check:** `htop` during training  
 **Solution:** 
 1. Reduce batch size to 2500
 2. Limit SVD to top 30 items instead of 50

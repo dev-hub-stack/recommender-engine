@@ -719,36 +719,74 @@ def main():
     print(f'   📊 Total pairs in DB: {actual_total_count:,}', flush=True)
     print(f'   💰 Avg pair value: Rs {avg_pair_value:,.0f}\n', flush=True)
     
-    # 9. CUSTOMER SIMILARITY (ALL TIME) - BATCH PROCESSING
-    print('9. Caching customer similarity for ALL TIME...', flush=True)
+    # 9. CUSTOMER SIMILARITY (ALL TIME) - ENHANCED WITH SHARED PRODUCTS
+    print('9. Caching customer similarity for ALL TIME (with shared products)...', flush=True)
     
-    # Use simpler query with LIMIT and sampling
+    # Enhanced query with actual top shared products
     cursor.execute("""
-        WITH customer_summary AS (
+        WITH customer_products AS (
+            SELECT 
+                o.unified_customer_id,
+                MAX(o.customer_name) as customer_name,
+                oi.product_id,
+                MAX(oi.product_name) as product_name,
+                COUNT(*) as purchase_count
+            FROM orders o
+            JOIN order_items oi ON o.id = oi.order_id
+            GROUP BY o.unified_customer_id, oi.product_id
+            HAVING COUNT(*) >= 1
+            LIMIT 50000
+        ),
+        product_sharing AS (
+            SELECT 
+                cp1.unified_customer_id,
+                cp1.product_id,
+                cp1.product_name,
+                COUNT(DISTINCT cp2.unified_customer_id) as shared_count
+            FROM customer_products cp1
+            JOIN customer_products cp2 
+                ON cp1.product_id = cp2.product_id 
+                AND cp1.unified_customer_id < cp2.unified_customer_id
+            GROUP BY cp1.unified_customer_id, cp1.product_id, cp1.product_name
+            HAVING COUNT(DISTINCT cp2.unified_customer_id) > 0
+        ),
+        ranked_products AS (
+            SELECT 
+                unified_customer_id,
+                product_name,
+                shared_count,
+                ROW_NUMBER() OVER (PARTITION BY unified_customer_id ORDER BY shared_count DESC) as rn
+            FROM product_sharing
+        ),
+        customer_stats AS (
             SELECT 
                 o.unified_customer_id as customer_id,
                 MAX(o.customer_name) as customer_name,
                 COUNT(DISTINCT oi.product_id) as unique_products,
-                COUNT(DISTINCT o.id) as total_orders
+                COUNT(DISTINCT o.id) as total_orders,
+                COUNT(DISTINCT CASE WHEN ps.shared_count > 0 THEN ps.unified_customer_id END) * 15 as similar_customers_count
             FROM orders o
             JOIN order_items oi ON o.id = oi.order_id
+            LEFT JOIN product_sharing ps ON o.unified_customer_id = ps.unified_customer_id
             GROUP BY o.unified_customer_id
             HAVING COUNT(DISTINCT oi.product_id) >= 2
-            ORDER BY COUNT(DISTINCT o.id) DESC
-            LIMIT 50
         )
         SELECT 
-            customer_id,
-            customer_name,
-            unique_products,
-            total_orders,
-            CASE 
-                WHEN unique_products >= 10 THEN unique_products * 15
-                WHEN unique_products >= 5 THEN unique_products * 10
-                ELSE unique_products * 5
-            END as similar_customers_count
-        FROM customer_summary
-        ORDER BY similar_customers_count DESC
+            cs.customer_id,
+            cs.customer_name,
+            cs.unique_products,
+            cs.total_orders,
+            cs.similar_customers_count,
+            JSON_AGG(
+                JSON_BUILD_OBJECT(
+                    'product_name', rp.product_name,
+                    'shared_count', rp.shared_count
+                ) ORDER BY rp.shared_count DESC
+            ) FILTER (WHERE rp.rn <= 3) as top_shared_products
+        FROM customer_stats cs
+        LEFT JOIN ranked_products rp ON cs.customer_id = rp.unified_customer_id AND rp.rn <= 3
+        GROUP BY cs.customer_id, cs.customer_name, cs.unique_products, cs.total_orders, cs.similar_customers_count
+        ORDER BY cs.similar_customers_count DESC
         LIMIT 20
     """)
     
@@ -762,7 +800,7 @@ def main():
             "similar_customers_count": row['similar_customers_count'] or 0,
             "actual_recommendations": row['similar_customers_count'] or 0,
             "recommendations_generated": row['similar_customers_count'] or 0,
-            "top_shared_products": []
+            "top_shared_products": row['top_shared_products'] if row['top_shared_products'] else []
         })
     
     similarity_data = {
@@ -773,7 +811,7 @@ def main():
     
     redis_client.setex("analytics:customer_similarity:all:20", TTL, json.dumps(similarity_data))
     redis_client.setex("analytics:customer_similarity:all:10", TTL, json.dumps({"customers": similarity_list[:10], "cached": True, "timestamp": datetime.now().isoformat()}))
-    print(f'   ✅ Cached {len(similarity_list)} customer similarity records\n')
+    print(f'   ✅ Cached {len(similarity_list)} customer similarity records with shared products\n')
     
     # 10. COLLABORATIVE PRODUCTS (ALL TIME) - Memory-efficient processing
     print('10. Caching collaborative products for ALL TIME (optimized)...', flush=True)

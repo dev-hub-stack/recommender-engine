@@ -379,6 +379,50 @@ def get_time_filter_clause(time_filter: str, table_alias: str = "o") -> tuple:
     return "", ()
 
 
+def get_order_source_filter(order_source: str, table_alias: str = "o", include_delivered_only: bool = False, has_where_clause: bool = True) -> tuple:
+    """
+    Get SQL filter conditions for order source (OE/POS).
+    
+    Args:
+        order_source: Filter by order source - 'all', 'oe', 'pos'
+        table_alias: Table alias to use (default 'o' for orders table)
+        include_delivered_only: If True, only include delivered/completed orders
+                               OE: order_status = 'Delivered Orders'
+                               POS: order_status = 'completed' (all POS are completed)
+        has_where_clause: If True, returns " AND ..." prefix. If False, returns "WHERE ..."
+    
+    Returns:
+        (sql_condition, params_tuple) - SQL clause and parameters
+        Returns empty strings if no filter needed
+    """
+    conditions = []
+    params = []
+    
+    # Filter by order source type
+    if order_source and order_source.lower() in ['oe', 'pos']:
+        conditions.append(f"UPPER({table_alias}.order_type) = %s")
+        params.append(order_source.upper())
+    
+    # Filter by delivered/fulfilled status
+    if include_delivered_only:
+        if order_source and order_source.lower() == 'oe':
+            # OE orders: only "Delivered Orders"
+            conditions.append(f"{table_alias}.order_status = %s")
+            params.append('Delivered Orders')
+        elif order_source and order_source.lower() == 'pos':
+            # POS orders: all are "completed"
+            conditions.append(f"{table_alias}.order_status = %s")
+            params.append('completed')
+        else:
+            # All sources: include both delivered types
+            conditions.append(f"({table_alias}.order_status = 'Delivered Orders' OR {table_alias}.order_status = 'completed')")
+    
+    if conditions:
+        prefix = " AND " if has_where_clause else " WHERE "
+        return prefix + " AND ".join(conditions), tuple(params)
+    return "", ()
+
+
 def normalize_province(province: str) -> str:
     """Normalize province names (merge duplicates like Islamabad variants and case variations)"""
     if not province:
@@ -1272,10 +1316,12 @@ async def get_training_status():
 @app.get("/api/v1/analytics/dashboard")
 async def get_dashboard_metrics(
     time_filter: str = Query("30days"),
-    category: str = Query(None, description="Filter by product category")
+    category: str = Query(None, description="Filter by product category"),
+    order_source: str = Query(None, description="Filter by order source: 'oe', 'pos', or None for all"),
+    delivered_only: bool = Query(False, description="Only include delivered/completed orders")
 ):
     """Get dashboard summary metrics - with Redis caching and category filter"""
-    cache_key = f"analytics:dashboard:{time_filter}:{category or 'all'}"
+    cache_key = f"analytics:dashboard:{time_filter}:{category or 'all'}:{order_source or 'all'}:{delivered_only}"
     
     # Check cache first
     if redis_client:
@@ -1293,6 +1339,11 @@ async def get_dashboard_metrics(
         
         where_clause, params = get_time_filter_clause(time_filter)
         
+        # Add order source filter - check if we already have a WHERE clause
+        has_where = bool(where_clause)
+        source_filter, source_params = get_order_source_filter(order_source, "o", delivered_only, has_where)
+        params = params + source_params
+        
         # Add category filter if specified
         category_filter_raw = get_category_filter_sql(category)
         
@@ -1303,6 +1354,10 @@ async def get_dashboard_metrics(
             # Build subquery to get order IDs that match the category filter
             category_condition = category_filter_raw.replace("AND ", "", 1)  # Remove leading AND
             
+            # Determine if we need AND or WHERE for the category subquery
+            has_any_clause = bool(where_clause) or bool(source_filter)
+            category_prefix = "AND" if has_any_clause else "WHERE"
+            
             cursor.execute(f"""
                 SELECT 
                     COUNT(DISTINCT o.id) as total_orders,
@@ -1311,7 +1366,8 @@ async def get_dashboard_metrics(
                     AVG(o.total_price) as avg_order_value
                 FROM orders o
                 {where_clause}
-                AND o.id IN (
+                {source_filter}
+                {category_prefix} o.id IN (
                     SELECT DISTINCT oi.order_id
                     FROM order_items oi
                     WHERE {category_condition}
@@ -1327,6 +1383,7 @@ async def get_dashboard_metrics(
                     AVG(o.total_price) as avg_order_value
                 FROM orders o
                 {where_clause}
+                {source_filter}
             """, params if params else None)
         
         result = cursor.fetchone()
@@ -1338,6 +1395,8 @@ async def get_dashboard_metrics(
             "total_revenue": float(result['total_revenue'] or 0),
             "avg_order_value": float(result['avg_order_value'] or 0),
             "time_filter": time_filter,
+            "order_source": order_source or "all",
+            "delivered_only": delivered_only,
             "totalOrders": result['total_orders'] or 0,
             "totalCustomers": result['total_customers'] or 0,
             "totalRevenueAmount": float(result['total_revenue'] or 0),
@@ -1361,9 +1420,13 @@ async def get_dashboard_metrics(
 
 
 @app.get("/api/v1/analytics/geographic-distribution")
-async def get_geographic_distribution(time_filter: str = Query("30days")):
+async def get_geographic_distribution(
+    time_filter: str = Query("30days"),
+    order_source: str = Query(None, description="Filter by order source: 'oe', 'pos', or None for all"),
+    delivered_only: bool = Query(False, description="Only include delivered/completed orders")
+):
     """Get geographic distribution of customers by city - with Redis caching"""
-    cache_key = f"analytics:geographic:{time_filter}"
+    cache_key = f"analytics:geographic:{time_filter}:{order_source or 'all'}:{delivered_only}"
     cached = get_from_cache(cache_key)
     if cached:
         return cached
@@ -1374,6 +1437,13 @@ async def get_geographic_distribution(time_filter: str = Query("30days")):
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
         where_clause, params = get_time_filter_clause(time_filter)
+        has_where = bool(where_clause)
+        source_filter, source_params = get_order_source_filter(order_source, "o", delivered_only, has_where)
+        params = params + source_params
+        
+        # Determine if we need AND or WHERE for the city filter
+        has_any_clause = bool(where_clause) or bool(source_filter)
+        city_prefix = "AND" if has_any_clause else "WHERE"
         
         cursor.execute(f"""
             SELECT 
@@ -1383,7 +1453,8 @@ async def get_geographic_distribution(time_filter: str = Query("30days")):
                 COALESCE(SUM(o.total_price), 0) as revenue
             FROM orders o
             {where_clause}
-                AND o.customer_city IS NOT NULL
+            {source_filter}
+            {city_prefix} o.customer_city IS NOT NULL
                 AND o.customer_city != ''
             GROUP BY o.customer_city
             ORDER BY customer_count DESC
@@ -1429,10 +1500,12 @@ async def get_geographic_distribution(time_filter: str = Query("30days")):
 @app.get("/api/v1/analytics/revenue-trend")
 async def get_revenue_trend(
     time_filter: str = Query("30days"),
-    period: str = Query("daily")
+    period: str = Query("daily"),
+    order_source: str = Query(None, description="Filter by order source: 'oe', 'pos', or None for all"),
+    delivered_only: bool = Query(False, description="Only include delivered/completed orders")
 ):
     """Get revenue trend data - with caching"""
-    cache_key = f"analytics:revenue_trend:{time_filter}:{period}"
+    cache_key = f"analytics:revenue_trend:{time_filter}:{period}:{order_source or 'all'}:{delivered_only}"
     cached = get_from_cache(cache_key)
     if cached:
         return cached
@@ -1443,6 +1516,9 @@ async def get_revenue_trend(
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
         where_clause, params = get_time_filter_clause(time_filter)
+        has_where = bool(where_clause)
+        source_filter, source_params = get_order_source_filter(order_source, "o", delivered_only, has_where)
+        params = params + source_params
         
         if period == "daily":
             group_by = "DATE(o.order_date)"
@@ -1458,6 +1534,7 @@ async def get_revenue_trend(
                 COUNT(DISTINCT o.id) as orders
             FROM orders o
             {where_clause}
+            {source_filter}
             GROUP BY {group_by}
             ORDER BY date DESC
             LIMIT 30
@@ -1468,7 +1545,8 @@ async def get_revenue_trend(
         response = {
             "trend": [{"date": str(r['date']), "revenue": float(r['revenue'] or 0), "orders": r['orders']} for r in results],
             "period": period,
-            "timeFilter": time_filter
+            "timeFilter": time_filter,
+            "orderSource": order_source or "all"
         }
         set_to_cache(cache_key, response, 300)
         return response
@@ -1483,10 +1561,12 @@ async def get_revenue_trend(
 @app.get("/api/v1/analytics/products")
 async def get_product_analytics(
     time_filter: str = Query("30days"),
-    limit: int = Query(10)
+    limit: int = Query(10),
+    order_source: str = Query(None, description="Filter by order source: 'oe', 'pos', or None for all"),
+    delivered_only: bool = Query(False, description="Only include delivered/completed orders")
 ):
     """Get product analytics - with caching"""
-    cache_key = f"analytics:products:{time_filter}:{limit}"
+    cache_key = f"analytics:products:{time_filter}:{limit}:{order_source or 'all'}:{delivered_only}"
     cached = get_from_cache(cache_key)
     if cached:
         return cached
@@ -1497,6 +1577,9 @@ async def get_product_analytics(
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
         where_clause, params = get_time_filter_clause(time_filter)
+        has_where = bool(where_clause)
+        source_filter, source_params = get_order_source_filter(order_source, "o", delivered_only, has_where)
+        params = params + source_params
         
         cursor.execute(f"""
             SELECT 
@@ -1508,6 +1591,7 @@ async def get_product_analytics(
             FROM order_items oi
             JOIN orders o ON oi.order_id = o.id
             {where_clause}
+            {source_filter}
             GROUP BY oi.product_id
             ORDER BY total_revenue DESC
             LIMIT %s
@@ -1523,7 +1607,8 @@ async def get_product_analytics(
                 "totalRevenue": float(r['total_revenue'] or 0),
                 "avgPrice": float(r['avg_price'] or 0)
             } for r in results],
-            "timeFilter": time_filter
+            "timeFilter": time_filter,
+            "orderSource": order_source or "all"
         }
         set_to_cache(cache_key, response, 300)
         return response

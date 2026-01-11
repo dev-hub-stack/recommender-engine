@@ -6,6 +6,8 @@ Pre-warm Redis Cache for Heavy Queries
 This script pre-populates the Redis cache with results from commonly-requested
 heavy queries (especially "all" time filter) to prevent server overload.
 
+Now also caches OE/POS filtered data and common time filters.
+
 Run this after:
 - Initial ML pipeline training
 - Daily data sync
@@ -31,9 +33,91 @@ from psycopg2.extras import RealDictCursor
 import json
 from datetime import datetime, timedelta
 
+
+def get_time_filter_clause(time_filter: str) -> str:
+    """Get SQL WHERE clause for time filtering"""
+    if time_filter == "all":
+        return ""
+    elif time_filter == "30days":
+        return f"AND o.order_date >= NOW() - INTERVAL '30 days'"
+    elif time_filter == "90days":
+        return f"AND o.order_date >= NOW() - INTERVAL '90 days'"
+    elif time_filter == "6months":
+        return f"AND o.order_date >= NOW() - INTERVAL '180 days'"
+    elif time_filter == "1year":
+        return f"AND o.order_date >= NOW() - INTERVAL '365 days'"
+    elif time_filter == "3years":
+        return f"AND o.order_date >= NOW() - INTERVAL '1095 days'"
+    return ""
+
+
+def get_order_source_filter(order_source: str) -> str:
+    """Get SQL filter for order source (OE/POS)"""
+    if order_source == "oe":
+        return "AND UPPER(o.order_type) = 'OE'"
+    elif order_source == "pos":
+        return "AND UPPER(o.order_type) = 'POS'"
+    return ""
+
+
+def get_delivered_filter(delivered_only: bool, order_source: str = None) -> str:
+    """Get SQL filter for delivered/completed orders only"""
+    if not delivered_only:
+        return ""
+    if order_source == "oe":
+        return "AND o.order_status = 'Delivered Orders'"
+    elif order_source == "pos":
+        return "AND o.order_status = 'completed'"
+    else:
+        return "AND (o.order_status = 'Delivered Orders' OR o.order_status = 'completed')"
+
+
+def cache_dashboard_metrics(cursor, r, time_filter: str, order_source: str, delivered_only: bool, ttl: int):
+    """Cache dashboard metrics for specific filters"""
+    time_clause = get_time_filter_clause(time_filter)
+    source_clause = get_order_source_filter(order_source)
+    delivered_clause = get_delivered_filter(delivered_only, order_source)
+    
+    cursor.execute(f"""
+        SELECT 
+            COUNT(DISTINCT o.id) as total_orders,
+            COUNT(DISTINCT o.unified_customer_id) as total_customers,
+            COALESCE(SUM(o.total_price), 0) as total_revenue,
+            COALESCE(AVG(o.total_price), 0) as avg_order_value
+        FROM orders o
+        WHERE 1=1
+        {time_clause}
+        {source_clause}
+        {delivered_clause}
+    """)
+    result = cursor.fetchone()
+    
+    cache_key = f"analytics:dashboard:{time_filter}:{order_source or 'all'}:{delivered_only}"
+    
+    dashboard_data = {
+        "success": True,
+        "total_orders": result["total_orders"] or 0,
+        "total_customers": result["total_customers"] or 0,
+        "total_revenue": float(result["total_revenue"] or 0),
+        "avg_order_value": float(result["avg_order_value"] or 0),
+        "time_filter": time_filter,
+        "order_source": order_source or "all",
+        "delivered_only": delivered_only,
+        "totalOrders": result["total_orders"] or 0,
+        "totalCustomers": result["total_customers"] or 0,
+        "totalRevenueAmount": float(result["total_revenue"] or 0),
+        "avgOrderValue": float(result["avg_order_value"] or 0),
+        "cached": True,
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    r.setex(cache_key, ttl, json.dumps(dashboard_data))
+    return dashboard_data
+
+
 def main():
     print('=' * 70)
-    print('  REDIS CACHE PRE-WARMING')
+    print('  REDIS CACHE PRE-WARMING (with OE/POS filters)')
     print('=' * 70)
     print()
     
@@ -67,34 +151,36 @@ def main():
     
     # Cache TTL for "all" queries (2 hours)
     TTL = 7200
+    TTL_SHORT = 1800  # 30 minutes for more frequent time filters
     
-    # 1. Dashboard Metrics (ALL TIME)
-    print('1. Caching dashboard metrics for ALL TIME...')
-    cursor.execute("""
-        SELECT 
-            COUNT(DISTINCT o.id) as total_orders,
-            COUNT(DISTINCT o.unified_customer_id) as total_customers,
-            SUM(o.total_price) as total_revenue,
-            AVG(o.total_price) as avg_order_value
-        FROM orders o
-    """)
-    result = cursor.fetchone()
+    # =========================================================================
+    # 1. DASHBOARD METRICS - ALL COMBINATIONS
+    # =========================================================================
+    print('1. Caching dashboard metrics for ALL filter combinations...')
     
-    dashboard_data = {
-        "success": True,
-        "total_orders": result["total_orders"] or 0,
-        "total_customers": result["total_customers"] or 0,
-        "total_revenue": float(result["total_revenue"] or 0),
-        "avg_order_value": float(result["avg_order_value"] or 0),
-        "cached": True,
-        "timestamp": datetime.now().isoformat()
-    }
+    time_filters = ['all', '3years', '1year', '6months', '90days', '30days']
+    order_sources = [None, 'oe', 'pos']
+    delivered_options = [False, True]
     
-    r.setex("analytics:dashboard:all:all", TTL, json.dumps(dashboard_data))
-    print(f'   ✅ Orders: {dashboard_data["total_orders"]:,}, Customers: {dashboard_data["total_customers"]:,}')
-    print(f'   ✅ Revenue: Rs {dashboard_data["total_revenue"]:,.0f}\n')
+    cached_count = 0
+    for tf in time_filters:
+        for os_filter in order_sources:
+            for delivered in delivered_options:
+                try:
+                    ttl = TTL if tf == 'all' else TTL_SHORT
+                    data = cache_dashboard_metrics(cursor, r, tf, os_filter, delivered, ttl)
+                    os_label = os_filter.upper() if os_filter else 'ALL'
+                    del_label = "Delivered" if delivered else "All Status"
+                    print(f'   ✅ {tf:10} | {os_label:4} | {del_label:12} | Orders: {data["total_orders"]:>8,} | Revenue: Rs {data["total_revenue"]:>15,.0f}')
+                    cached_count += 1
+                except Exception as e:
+                    print(f'   ❌ Error caching {tf}/{os_filter}/{delivered}: {e}')
     
-    # 2. Popular Products (ALL TIME)
+    print(f'   📊 Cached {cached_count} dashboard metric combinations\n')
+    
+    # =========================================================================
+    # 2. POPULAR PRODUCTS (ALL TIME - base case)
+    # =========================================================================
     print('2. Caching popular products for ALL TIME...')
     cursor.execute("""
         SELECT 

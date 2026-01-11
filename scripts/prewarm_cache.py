@@ -552,17 +552,17 @@ def main():
     
     pairs_list = []
     total_revenue = 0
-    for r in pairs_results:
-        combined_revenue = float(r['combined_revenue'] or 0)
+    for row in pairs_results:
+        combined_revenue = float(row['combined_revenue'] or 0)
         total_revenue += combined_revenue
         pairs_list.append({
-            "product_a_id": r['product_a_id'],
-            "product_a_name": r['product_a_name'],
-            "product_b_id": r['product_b_id'],
-            "product_b_name": r['product_b_name'],
-            "co_recommendation_count": r['co_purchase_count'],
+            "product_a_id": row['product_a_id'],
+            "product_a_name": row['product_a_name'],
+            "product_b_id": row['product_b_id'],
+            "product_b_name": row['product_b_name'],
+            "co_recommendation_count": row['co_purchase_count'],
             "combined_revenue": combined_revenue,
-            "confidence_score": float(r['confidence'] or 0)
+            "confidence_score": float(row['confidence'] or 0)
         })
     
     # Calculate average pair value from actual totals
@@ -650,13 +650,13 @@ def main():
     similarity_results = cursor.fetchall()
     
     similarity_list = []
-    for r in similarity_results:
+    for row in similarity_results:
         similarity_list.append({
-            "customer_id": r['customer_id'],
-            "customer_name": r['customer_name'],
-            "similar_customers_count": r['similar_customers_count'] or 0,
-            "actual_recommendations": r['similar_customers_count'] or 0,
-            "recommendations_generated": r['similar_customers_count'] or 0,
+            "customer_id": row['customer_id'],
+            "customer_name": row['customer_name'],
+            "similar_customers_count": row['similar_customers_count'] or 0,
+            "actual_recommendations": row['similar_customers_count'] or 0,
+            "recommendations_generated": row['similar_customers_count'] or 0,
             "top_shared_products": []
         })
     

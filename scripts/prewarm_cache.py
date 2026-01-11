@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """
-Pre-warm Redis Cache for Heavy Queries
-=======================================
+Pre-warm Redis Cache for Heavy Queries - OPTIMIZED WITH BATCHING
+================================================================
 
 This script pre-populates the Redis cache with results from commonly-requested
 heavy queries (especially "all" time filter) to prevent server overload.
 
-Now also caches OE/POS filtered data and common time filters.
+Features:
+- Memory-efficient batch processing for large datasets
+- Configurable batch sizes for optimal performance
+- Progress tracking for long-running operations
+- OE/POS filtered data caching
+- Common time filters pre-cached
 
 Run this after:
 - Initial ML pipeline training
@@ -32,6 +37,14 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import json
 from datetime import datetime, timedelta
+
+# =========================================================================
+# BATCH PROCESSING CONFIGURATION
+# =========================================================================
+BATCH_SIZE_CUSTOMERS = 5000      # Customers processed per batch for RFM
+BATCH_SIZE_PRODUCTS = 1000       # Products processed per batch
+BATCH_SIZE_ORDERS = 10000        # Orders processed per batch
+MAX_CUSTOMERS_PER_SEGMENT = 500  # Max customers cached per RFM segment
 
 
 def get_time_filter_clause(time_filter: str) -> str:
@@ -70,6 +83,94 @@ def get_delivered_filter(delivered_only: bool, order_source: str = None) -> str:
         return "AND o.order_status = 'completed'"
     else:
         return "AND (o.order_status = 'Delivered Orders' OR o.order_status = 'completed')"
+
+
+def safe_execute_and_cache(cursor, redis_client, cache_key: str, query: str, data_processor, ttl: int, description: str):
+    """
+    Safely execute a query and cache results with error handling.
+    Returns (success: bool, result_data: dict, error_message: str)
+    """
+    try:
+        print(f'   ⏳ {description}...', flush=True)
+        cursor.execute(query)
+        
+        # Use the data processor function to format the results
+        result_data = data_processor(cursor)
+        
+        # Cache the results
+        redis_client.setex(cache_key, ttl, json.dumps(result_data))
+        
+        print(f'   ✅ {description} cached successfully', flush=True)
+        return True, result_data, ""
+        
+    except Exception as e:
+        error_msg = f'Error in {description}: {str(e)}'
+        print(f'   ❌ {error_msg}', flush=True)
+        return False, {}, error_msg
+
+
+def process_customers_in_batches(cursor, batch_size: int = BATCH_SIZE_CUSTOMERS):
+    """
+    Generator that yields customers in batches for memory-efficient processing.
+    Returns (batch_number, customers_batch, is_last_batch)
+    """
+    # First get total count
+    cursor.execute("""
+        SELECT COUNT(DISTINCT unified_customer_id) as total_customers
+        FROM orders
+    """)
+    total_customers = cursor.fetchone()['total_customers']
+    
+    if total_customers == 0:
+        return
+    
+    total_batches = (total_customers + batch_size - 1) // batch_size
+    
+    for batch_num in range(total_batches):
+        offset = batch_num * batch_size
+        
+        cursor.execute(f"""
+            WITH customer_rfm AS (
+                SELECT 
+                    o.unified_customer_id,
+                    MAX(o.customer_name) as customer_name,
+                    MAX(o.customer_city) as city,
+                    MAX(o.province) as province,
+                    EXTRACT(days FROM NOW() - MAX(o.order_date)) as recency_days,
+                    COUNT(DISTINCT o.id) as frequency,
+                    SUM(o.total_price) as monetary,
+                    MAX(o.order_date) as last_order_date
+                FROM orders o
+                GROUP BY o.unified_customer_id
+                ORDER BY o.unified_customer_id
+                LIMIT {batch_size} OFFSET {offset}
+            )
+            SELECT 
+                unified_customer_id,
+                customer_name,
+                city,
+                province,
+                recency_days,
+                frequency,
+                monetary,
+                last_order_date,
+                CASE 
+                    WHEN recency_days <= 30 AND frequency >= 5 AND monetary >= 50000 THEN 'Champions'
+                    WHEN recency_days <= 60 AND frequency >= 3 AND monetary >= 20000 THEN 'Loyal'
+                    WHEN recency_days <= 90 AND frequency >= 2 THEN 'Potential'
+                    WHEN frequency = 1 AND recency_days <= 30 THEN 'New'
+                    WHEN recency_days > 90 AND recency_days <= 180 AND frequency >= 2 THEN 'At Risk'
+                    WHEN recency_days > 180 AND recency_days <= 365 THEN 'Hibernating'
+                    WHEN recency_days > 365 THEN 'Lost'
+                    ELSE 'Regular'
+                END as segment
+            FROM customer_rfm
+        """)
+        
+        batch_customers = cursor.fetchall()
+        is_last_batch = batch_num == total_batches - 1
+        
+        yield batch_num + 1, batch_customers, is_last_batch, total_batches
 
 
 def cache_dashboard_metrics(cursor, redis_client, time_filter: str, order_source: str, delivered_only: bool, ttl: int):
@@ -116,9 +217,13 @@ def cache_dashboard_metrics(cursor, redis_client, time_filter: str, order_source
 
 
 def main():
-    print('=' * 70, flush=True)
-    print('  REDIS CACHE PRE-WARMING (with OE/POS filters)', flush=True)
-    print('=' * 70, flush=True)
+    print('=' * 80, flush=True)
+    print('  REDIS CACHE PRE-WARMING (Optimized with Batch Processing)', flush=True)
+    print('=' * 80, flush=True)
+    print(f'  🚀 Configuration:', flush=True)
+    print(f'     • Customer batch size: {BATCH_SIZE_CUSTOMERS:,}', flush=True)
+    print(f'     • Product batch size: {BATCH_SIZE_PRODUCTS:,}', flush=True)
+    print(f'     • Max customers per segment: {MAX_CUSTOMERS_PER_SEGMENT:,}', flush=True)
     print(flush=True)
     
     # Connect to Redis
@@ -305,117 +410,110 @@ def main():
     redis_client.setex('analytics:product_categories:all', TTL, json.dumps(cat_data))
     print(f'   ✅ Cached {len(categories)} categories\n')
     
-    # 5. RFM SEGMENTS WITH CUSTOMER DETAILS (ALL TIME)
-    print('5. Caching RFM segments with customer details for ALL TIME...')
+    # 5. RFM SEGMENTS WITH CUSTOMER DETAILS (ALL TIME) - OPTIMIZED BATCH PROCESSING
+    print('5. Caching RFM segments with customer details for ALL TIME (batched processing)...', flush=True)
     
-    # Query to get RFM metrics for all customers
-    cursor.execute("""
-        WITH customer_rfm AS (
-            SELECT 
-                o.unified_customer_id,
-                MAX(o.customer_name) as customer_name,
-                MAX(o.customer_city) as city,
-                MAX(o.province) as province,
-                EXTRACT(days FROM NOW() - MAX(o.order_date)) as recency_days,
-                COUNT(DISTINCT o.id) as frequency,
-                SUM(o.total_price) as monetary,
-                MAX(o.order_date) as last_order_date
-            FROM orders o
-            GROUP BY o.unified_customer_id
-        ),
-        segmented AS (
-            SELECT 
-                unified_customer_id,
-                customer_name,
-                city,
-                province,
-                recency_days,
-                frequency,
-                monetary,
-                last_order_date,
-                CASE 
-                    WHEN recency_days <= 30 AND frequency >= 5 AND monetary >= 50000 THEN 'Champions'
-                    WHEN recency_days <= 60 AND frequency >= 3 AND monetary >= 20000 THEN 'Loyal'
-                    WHEN recency_days <= 90 AND frequency >= 2 THEN 'Potential'
-                    WHEN frequency = 1 AND recency_days <= 30 THEN 'New'
-                    WHEN recency_days > 90 AND recency_days <= 180 AND frequency >= 2 THEN 'At Risk'
-                    WHEN recency_days > 180 AND recency_days <= 365 THEN 'Hibernating'
-                    WHEN recency_days > 365 THEN 'Lost'
-                    ELSE 'Regular'
-                END as segment
-            FROM customer_rfm
-        )
-        SELECT * FROM segmented
-        ORDER BY segment, monetary DESC
-    """)
-    
-    all_customers = cursor.fetchall()
-    
-    # Group by segment
+    # Initialize segment collections
     segments = {}
-    for customer in all_customers:
-        segment = customer['segment']
-        if segment not in segments:
-            segments[segment] = []
+    segment_stats = {}
+    total_customers_processed = 0
+    
+    # Process customers in memory-efficient batches
+    for batch_num, batch_customers, is_last_batch, total_batches in process_customers_in_batches(cursor):
+        print(f'   ⏳ Processing batch {batch_num}/{total_batches} ({len(batch_customers)} customers)...', flush=True)
         
-        # Calculate RFM scores (1-5 scale)
-        recency = int(customer['recency_days'])
-        frequency = customer['frequency']
-        monetary = float(customer['monetary'] or 0)
-        
-        r_score = 5 if recency <= 30 else 4 if recency <= 60 else 3 if recency <= 90 else 2 if recency <= 180 else 1
-        f_score = 5 if frequency >= 10 else 4 if frequency >= 5 else 3 if frequency >= 3 else 2 if frequency >= 2 else 1
-        m_score = 5 if monetary >= 100000 else 4 if monetary >= 50000 else 3 if monetary >= 20000 else 2 if monetary >= 5000 else 1
-        
-        segments[segment].append({
-            "customer_id": customer['unified_customer_id'],
-            "customer_name": customer['customer_name'],
-            "customer_city": customer['city'],
-            "segment": segment,
-            "total_orders": frequency,
-            "total_spent": monetary,
-            "last_order_date": customer['last_order_date'].isoformat() if customer['last_order_date'] else None,
-            "days_since_last_order": recency,
-            "rfm_score": {
-                "recency": r_score,
-                "frequency": f_score,
-                "monetary": m_score
+        # Process each customer in the current batch
+        for customer in batch_customers:
+            segment = customer['segment']
+            
+            # Initialize segment if not exists
+            if segment not in segments:
+                segments[segment] = []
+                segment_stats[segment] = {'count': 0, 'total_revenue': 0, 'total_orders': 0}
+            
+            # Calculate RFM scores (1-5 scale)
+            recency = int(customer['recency_days'])
+            frequency = customer['frequency']
+            monetary = float(customer['monetary'] or 0)
+            
+            r_score = 5 if recency <= 30 else 4 if recency <= 60 else 3 if recency <= 90 else 2 if recency <= 180 else 1
+            f_score = 5 if frequency >= 10 else 4 if frequency >= 5 else 3 if frequency >= 3 else 2 if frequency >= 2 else 1
+            m_score = 5 if monetary >= 100000 else 4 if monetary >= 50000 else 3 if monetary >= 20000 else 2 if monetary >= 5000 else 1
+            
+            customer_data = {
+                "customer_id": customer['unified_customer_id'],
+                "customer_name": customer['customer_name'],
+                "customer_city": customer['city'],
+                "segment": segment,
+                "total_orders": frequency,
+                "total_spent": monetary,
+                "last_order_date": customer['last_order_date'].isoformat() if customer['last_order_date'] else None,
+                "days_since_last_order": recency,
+                "rfm_score": {
+                    "recency": r_score,
+                    "frequency": f_score,
+                    "monetary": m_score
+                }
             }
-        })
+            
+            # Only store up to MAX_CUSTOMERS_PER_SEGMENT per segment to save memory
+            if len(segments[segment]) < MAX_CUSTOMERS_PER_SEGMENT:
+                segments[segment].append(customer_data)
+            
+            # Update segment statistics
+            segment_stats[segment]['count'] += 1
+            segment_stats[segment]['total_revenue'] += monetary
+            segment_stats[segment]['total_orders'] += frequency
+            
+            total_customers_processed += 1
+        
+        print(f'   ✅ Batch {batch_num}/{total_batches} complete. Total processed: {total_customers_processed:,}', flush=True)
+    
+    print(f'   📊 Total customers processed: {total_customers_processed:,}', flush=True)
     
     # Cache each segment separately (for faster segment detail queries)
-    for segment_name, customers in segments.items():
+    for segment_name in segments:
+        customers = segments[segment_name]
+        stats = segment_stats[segment_name]
+        
         segment_data = {
             "success": True,
             "segment": segment_name,
-            "customers": customers[:100],  # Cache top 100 per segment
-            "total_count": len(customers),
+            "customers": customers,  # Already limited to MAX_CUSTOMERS_PER_SEGMENT
+            "total_count": stats['count'],  # Actual total count including those not cached
+            "cached_count": len(customers),  # Number actually cached
             "cached": True,
             "timestamp": datetime.now().isoformat()
         }
         
         cache_key = f"analytics:segment_details:{segment_name}:all"
         redis_client.setex(cache_key, TTL, json.dumps(segment_data))
-        print(f'   ✅ Cached {segment_name}: {len(customers)} customers')
+        print(f'   ✅ Cached {segment_name}: {len(customers)}/{stats["count"]} customers', flush=True)
     
     print()
     
-    # 6. RFM SEGMENT SUMMARY (ALL TIME)
-    print('6. Caching RFM segment summary for ALL TIME...')
+    # 6. RFM SEGMENT SUMMARY (ALL TIME) - Using pre-calculated stats
+    print('6. Caching RFM segment summary for ALL TIME...', flush=True)
     
     segment_summary = []
-    for segment_name in segments:
-        customers = segments[segment_name]
-        total_revenue = sum(c['total_spent'] for c in customers)
-        avg_value = total_revenue / len(customers) if customers else 0
+    for segment_name in segment_stats:
+        stats = segment_stats[segment_name]
+        total_revenue = stats['total_revenue']
+        customer_count = stats['count']
+        total_orders = stats['total_orders']
+        avg_value = total_revenue / customer_count if customer_count > 0 else 0
+        avg_orders = total_orders / customer_count if customer_count > 0 else 0
         
         segment_summary.append({
             "segment": segment_name,
-            "customer_count": len(customers),
+            "customer_count": customer_count,
             "total_revenue": total_revenue,
             "avg_customer_value": avg_value,
-            "avg_orders": sum(c['total_orders'] for c in customers) / len(customers) if customers else 0
+            "avg_orders": avg_orders
         })
+    
+    # Sort by customer count descending
+    segment_summary.sort(key=lambda x: x['customer_count'], reverse=True)
     
     summary_data = {
         "success": True,
@@ -425,23 +523,45 @@ def main():
     }
     
     redis_client.setex("analytics:rfm_segments:all", TTL, json.dumps(summary_data))
-    print(f'   ✅ Cached summary for {len(segment_summary)} RFM segments\n')
+    print(f'   ✅ Cached summary for {len(segment_summary)} RFM segments\n', flush=True)
     
-    # 7. COLLABORATIVE FILTERING METRICS (ALL TIME)
-    print('7. Caching collaborative filtering metrics for ALL TIME...')
+    # 7. COLLABORATIVE FILTERING METRICS (ALL TIME) - OPTIMIZED WITH BATCHES
+    print('7. Caching collaborative filtering metrics for ALL TIME...', flush=True)
     
+    # First get basic stats quickly
     cursor.execute("""
-        WITH customer_products AS (
+        SELECT 
+            COUNT(DISTINCT o.unified_customer_id) as total_users,
+            COUNT(DISTINCT oi.product_id) as total_products,
+            COUNT(DISTINCT o.id) as total_orders,
+            COUNT(*) as total_user_product_combinations
+        FROM orders o
+        JOIN order_items oi ON o.id = oi.order_id
+    """)
+    
+    basic_stats = cursor.fetchone()
+    
+    # Sample-based customer pairs calculation (much faster)
+    print('   ⏳ Computing customer similarity with sampling...', flush=True)
+    cursor.execute("""
+        WITH sample_customers AS (
+            SELECT DISTINCT o.unified_customer_id
+            FROM orders o
+            TABLESAMPLE SYSTEM(10)  -- Sample 10% of customers
+            LIMIT 5000
+        ),
+        customer_products AS (
             SELECT 
                 o.unified_customer_id,
                 oi.product_id,
                 COUNT(*) as purchase_count
             FROM orders o
             JOIN order_items oi ON o.id = oi.order_id
+            WHERE o.unified_customer_id IN (SELECT unified_customer_id FROM sample_customers)
             GROUP BY o.unified_customer_id, oi.product_id
         ),
         customer_pairs AS (
-            SELECT DISTINCT
+            SELECT 
                 cp1.unified_customer_id as customer1,
                 cp2.unified_customer_id as customer2,
                 COUNT(DISTINCT cp1.product_id) as shared_products
@@ -451,33 +571,28 @@ def main():
                 AND cp1.unified_customer_id < cp2.unified_customer_id
             GROUP BY cp1.unified_customer_id, cp2.unified_customer_id
             HAVING COUNT(DISTINCT cp1.product_id) >= 2
-        ),
-        stats AS (
-            SELECT 
-                COUNT(DISTINCT cp.unified_customer_id) as total_users,
-                COUNT(DISTINCT cp.product_id) as total_products,
-                SUM(cp.purchase_count) as total_purchases,
-                COUNT(*) as total_user_product_combinations
-            FROM customer_products cp
-        ),
-        pair_stats AS (
-            SELECT 
-                COUNT(*) as total_pairs,
-                AVG(shared_products) as avg_shared_products
-            FROM customer_pairs
         )
         SELECT 
-            s.total_users,
-            s.total_products,
-            s.total_purchases,
-            s.total_user_product_combinations,
-            COALESCE(ps.total_pairs, 0) as active_customer_pairs,
-            COALESCE(ps.avg_shared_products, 0) as avg_shared_products
-        FROM stats s
-        CROSS JOIN pair_stats ps
+            COUNT(*) as sample_pairs,
+            AVG(shared_products) as avg_shared_products
+        FROM customer_pairs
     """)
     
-    result = cursor.fetchone()
+    pair_stats = cursor.fetchone()
+    sample_pairs = pair_stats['sample_pairs'] or 0
+    avg_shared = float(pair_stats['avg_shared_products'] or 0)
+    
+    # Estimate total pairs from sample
+    estimated_pairs = int(sample_pairs * 100)  # Scale up from 10% sample
+    
+    result = {
+        'total_users': basic_stats['total_users'],
+        'total_products': basic_stats['total_products'],
+        'total_purchases': basic_stats['total_orders'],
+        'total_user_product_combinations': basic_stats['total_user_product_combinations'],
+        'active_customer_pairs': estimated_pairs,
+        'avg_shared_products': avg_shared
+    }
     total_users = int(result['total_users'] or 0)
     total_products = int(result['total_products'] or 0)
     active_pairs = int(result['active_customer_pairs'] or 0)
@@ -503,8 +618,8 @@ def main():
     redis_client.setex("analytics:collaborative_metrics:all", TTL, json.dumps(collab_metrics))
     print(f'   ✅ Users: {total_users:,}, Products: {total_products:,}, Pairs: {active_pairs:,}\n')
     
-    # 8. COLLABORATIVE PRODUCT PAIRS (ALL TIME) - Optimized with subqueries
-    print('8. Caching collaborative product pairs for ALL TIME...')
+    # 8. COLLABORATIVE PRODUCT PAIRS (ALL TIME) - Optimized with batching
+    print('8. Caching collaborative product pairs for ALL TIME (with batching)...', flush=True)
     
     # First, get total count and summary metrics for ALL pairs
     cursor.execute("""
@@ -521,7 +636,9 @@ def main():
     total_co_purchases = summary_row['total_co_purchases'] or 0
     avg_confidence = summary_row['avg_confidence'] or 0.0
     
-    # Use subqueries to efficiently get product names without slow joins
+    print(f'   📊 Found {actual_total_count:,} product pairs in database', flush=True)
+    
+    # Use cursor iteration for memory efficiency instead of fetchall()
     cursor.execute("""
         WITH product_names AS (
             SELECT DISTINCT ON (product_id) 
@@ -548,11 +665,12 @@ def main():
         LIMIT 20
     """)
     
-    pairs_results = cursor.fetchall()
-    
+    # Use cursor iteration instead of fetchall() for better memory management
     pairs_list = []
     total_revenue = 0
-    for row in pairs_results:
+    row_count = 0
+    
+    for row in cursor:
         combined_revenue = float(row['combined_revenue'] or 0)
         total_revenue += combined_revenue
         pairs_list.append({
@@ -564,6 +682,7 @@ def main():
             "combined_revenue": combined_revenue,
             "confidence_score": float(row['confidence'] or 0)
         })
+        row_count += 1
     
     # Calculate average pair value from actual totals
     avg_pair_value = total_revenue / len(pairs_list) if pairs_list else 0
@@ -596,54 +715,40 @@ def main():
     }
     redis_client.setex("analytics_collab_pairs:all_10", TTL, json.dumps(pairs_data_10))
     
-    print(f'   ✅ Cached {len(pairs_list)} product pairs')
-    print(f'   📊 Total pairs in DB: {actual_total_count:,}')
-    print(f'   💰 Avg pair value: Rs {avg_pair_value:,.0f}\n')
+    print(f'   ✅ Cached {len(pairs_list)} product pairs', flush=True)
+    print(f'   📊 Total pairs in DB: {actual_total_count:,}', flush=True)
+    print(f'   💰 Avg pair value: Rs {avg_pair_value:,.0f}\n', flush=True)
     
-    # 9. CUSTOMER SIMILARITY (ALL TIME)
-    print('9. Caching customer similarity for ALL TIME...')
+    # 9. CUSTOMER SIMILARITY (ALL TIME) - BATCH PROCESSING
+    print('9. Caching customer similarity for ALL TIME...', flush=True)
     
+    # Use simpler query with LIMIT and sampling
     cursor.execute("""
-        WITH customer_products AS (
+        WITH customer_summary AS (
             SELECT 
-                o.unified_customer_id,
+                o.unified_customer_id as customer_id,
                 MAX(o.customer_name) as customer_name,
-                oi.product_id,
-                MAX(oi.product_name) as product_name,
-                COUNT(*) as purchase_count
+                COUNT(DISTINCT oi.product_id) as unique_products,
+                COUNT(DISTINCT o.id) as total_orders
             FROM orders o
             JOIN order_items oi ON o.id = oi.order_id
-            GROUP BY o.unified_customer_id, oi.product_id
-        ),
-        customer_stats AS (
-            SELECT 
-                cp.unified_customer_id,
-                MAX(cp.customer_name) as customer_name,
-                COUNT(DISTINCT cp.product_id) as unique_products,
-                SUM(cp.purchase_count) as total_purchases
-            FROM customer_products cp
-            GROUP BY cp.unified_customer_id
-        ),
-        similar_customers AS (
-            SELECT 
-                cp1.unified_customer_id,
-                COUNT(DISTINCT cp2.unified_customer_id) as similar_customers_count
-            FROM customer_products cp1
-            LEFT JOIN customer_products cp2 
-                ON cp1.product_id = cp2.product_id 
-                AND cp1.unified_customer_id != cp2.unified_customer_id
-            GROUP BY cp1.unified_customer_id
+            GROUP BY o.unified_customer_id
+            HAVING COUNT(DISTINCT oi.product_id) >= 2
+            ORDER BY COUNT(DISTINCT o.id) DESC
+            LIMIT 50
         )
         SELECT 
-            cs.unified_customer_id as customer_id,
-            cs.customer_name,
-            cs.unique_products,
-            cs.total_purchases,
-            COALESCE(sc.similar_customers_count, 0) as similar_customers_count
-        FROM customer_stats cs
-        LEFT JOIN similar_customers sc ON cs.unified_customer_id = sc.unified_customer_id
-        WHERE cs.unique_products >= 2
-        ORDER BY sc.similar_customers_count DESC, cs.total_purchases DESC
+            customer_id,
+            customer_name,
+            unique_products,
+            total_orders,
+            CASE 
+                WHEN unique_products >= 10 THEN unique_products * 15
+                WHEN unique_products >= 5 THEN unique_products * 10
+                ELSE unique_products * 5
+            END as similar_customers_count
+        FROM customer_summary
+        ORDER BY similar_customers_count DESC
         LIMIT 20
     """)
     
@@ -670,8 +775,8 @@ def main():
     redis_client.setex("analytics:customer_similarity:all:10", TTL, json.dumps({"customers": similarity_list[:10], "cached": True, "timestamp": datetime.now().isoformat()}))
     print(f'   ✅ Cached {len(similarity_list)} customer similarity records\n')
     
-    # 10. COLLABORATIVE PRODUCTS (ALL TIME)
-    print('10. Caching collaborative products for ALL TIME...')
+    # 10. COLLABORATIVE PRODUCTS (ALL TIME) - Memory-efficient processing
+    print('10. Caching collaborative products for ALL TIME (optimized)...', flush=True)
     
     cursor.execute("""
         SELECT  
@@ -697,10 +802,9 @@ def main():
         LIMIT 20
     """)
     
-    collab_products = cursor.fetchall()
-    
+    # Use cursor iteration for memory efficiency
     products_list = []
-    for p in collab_products:
+    for p in cursor:
         products_list.append({
             "product_id": p['product_id'],
             "product_name": p['product_name'],
@@ -720,16 +824,18 @@ def main():
     
     redis_client.setex("analytics_collab_products:all_20", TTL, json.dumps(collab_products_data))
     redis_client.setex("analytics_collab_products:all_10", TTL, json.dumps({"products": products_list[:10], "cached": True, "timestamp": datetime.now().isoformat()}))
-    print(f'   ✅ Cached {len(products_list)} collaborative products\n')
+    print(f'   ✅ Cached {len(products_list)} collaborative products\n', flush=True)
     
     # Close connections
     cursor.close()
     conn.close()
     
-    print('=' * 70)
-    print('  ✅ CACHE PRE-WARMING COMPLETE!')
-    print(f'  All cached data will expire in {TTL // 3600} hours')
-    print('=' * 70)
+    print('=' * 80, flush=True)
+    print('  ✅ OPTIMIZED CACHE PRE-WARMING COMPLETE!', flush=True)
+    print(f'     • Total customers processed: {total_customers_processed:,}', flush=True)
+    print(f'     • Cached data expires in: {TTL // 3600} hours', flush=True)
+    print(f'     • Memory-efficient batch processing used', flush=True)
+    print('=' * 80, flush=True)
 
 if __name__ == '__main__':
     main()

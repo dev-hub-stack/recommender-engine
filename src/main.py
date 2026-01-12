@@ -1821,7 +1821,7 @@ async def get_city_performance(
     time_filter: str = Query("30days"),
     limit: int = Query(10)
 ):
-    """Get city-level performance"""
+    """Get city-level performance with proper province mapping"""
     conn = None
     try:
         conn = psycopg2.connect(**get_pg_connection_params())
@@ -1831,14 +1831,28 @@ async def get_city_performance(
         
         cursor.execute(f"""
             SELECT 
-                COALESCE(o.customer_city, 'Unknown') as city,
-                COALESCE(o.province, 'Unknown') as province,
+                o.customer_city as city,
+                CASE 
+                    WHEN UPPER(o.province) IN ('ISLAMABAD', 'ISLAMABAD CAPITAL TERRITORY', 'ISLAMABAD CAPITAL', 'ICT') THEN 'Islamabad'
+                    WHEN UPPER(REPLACE(o.province, '.', '')) IN ('KPK', 'NWFP', 'KHYBER PAKHTUNKHWA') THEN 'Khyber Pakhtunkhwa'
+                    WHEN UPPER(o.province) = 'PUNJAB' THEN 'Punjab'
+                    WHEN UPPER(o.province) = 'SINDH' THEN 'Sindh'
+                    WHEN UPPER(o.province) IN ('BALOCHISTAN', 'BALUCHISTAN') THEN 'Balochistan'
+                    WHEN UPPER(o.province) IN ('GILGIT-BALTISTAN', 'GB') THEN 'Gilgit-Baltistan'
+                    WHEN UPPER(o.province) IN ('AZAD KASHMIR', 'AJK', 'AZAD JAMMU AND KASHMIR') THEN 'Azad Kashmir'
+                    ELSE o.province
+                END as province,
                 COUNT(DISTINCT o.id) as total_orders,
                 COUNT(DISTINCT o.unified_customer_id) as total_customers,
                 SUM(o.total_price) as total_revenue
             FROM orders o
             {where_clause}
-            GROUP BY o.customer_city, o.province
+                AND o.customer_city IS NOT NULL 
+                AND TRIM(o.customer_city) != ''
+                AND o.province IS NOT NULL
+                AND TRIM(o.province) != ''
+                AND UPPER(TRIM(o.province)) NOT IN ('UNKNOWN', 'N/A', 'NA', 'NULL', 'NONE', '')
+            GROUP BY o.customer_city, province
             ORDER BY total_revenue DESC
             LIMIT %s
         """, params + (limit,))
@@ -5367,7 +5381,10 @@ async def get_shopify_popular_products(
 async def export_dashboard_csv(
     time_filter: str = Query("30days", description="Time period filter"),
     category: str = Query(None, description="Product category filter (e.g., Mattresses, Pillows)"),
-    sections: str = Query("all", description="Sections to export: all, metrics, products, orders")
+    sections: str = Query("all", description="Sections to export: all, metrics, products, orders, dashboard, customer_profiling, collaborative_filtering, cross_selling, geographic_intelligence, rfm_segmentation, ml_recommendations"),
+    categories: str = Query(None, description="Comma-separated list of categories"),
+    order_source: str = Query("all", description="Order source filter: all, oe, pos"),
+    delivered_only: bool = Query(False, description="Filter to only delivered/completed orders")
 ):
     """
     Export dashboard data as CSV with time and category filters
@@ -5375,6 +5392,11 @@ async def export_dashboard_csv(
     Uses existing filter functions:
     - get_time_filter_clause() for time filtering
     - get_category_filter_sql() for category filtering (LIKE patterns on product names)
+    
+    New Parameters:
+    - categories: Comma-separated list of categories (alternative to single category)
+    - order_source: Filter by OE (Online Express) or POS (Point of Sale)
+    - delivered_only: Only include delivered/completed orders
     """
     conn = None
     try:
@@ -5388,7 +5410,19 @@ async def export_dashboard_csv(
         where_clause, time_params = get_time_filter_clause(time_filter)
         
         # Build category filter SQL (returns empty string or "AND (LIKE patterns)")
-        category_filter_sql = get_category_filter_sql(category) if category else ""
+        # Support both single category and comma-separated categories
+        effective_category = category or categories
+        category_filter_sql = get_category_filter_sql(effective_category) if effective_category else ""
+        
+        # Build order source filter
+        order_source_filter = ""
+        if order_source and order_source.lower() != 'all':
+            order_source_filter = f" AND UPPER(o.order_source) = '{order_source.upper()}'"
+        
+        # Build delivered only filter
+        delivered_filter = ""
+        if delivered_only:
+            delivered_filter = " AND UPPER(o.status) IN ('DELIVERED', 'COMPLETED', 'FULFILLED')"
         
         # Create CSV in memory
         output = io.StringIO()
@@ -5397,14 +5431,18 @@ async def export_dashboard_csv(
         # =========================================
         # SECTION 1: Dashboard Metrics
         # =========================================
-        if "metrics" in section_list:
+        if "metrics" in section_list or "dashboard" in section_list:
             writer.writerow([])
             writer.writerow(["DASHBOARD OVERVIEW"])
             writer.writerow(["=" * 50])
             writer.writerow(["Generated:", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
             writer.writerow(["Time Period:", time_filter])
-            if category:
-                writer.writerow(["Category:", category])
+            if effective_category:
+                writer.writerow(["Category:", effective_category])
+            if order_source and order_source.lower() != 'all':
+                writer.writerow(["Order Source:", order_source.upper()])
+            if delivered_only:
+                writer.writerow(["Delivered Only:", "Yes"])
             writer.writerow([])
             writer.writerow(["Metric", "Value"])
             
@@ -5420,6 +5458,8 @@ async def export_dashboard_csv(
                     JOIN order_items oi ON o.id = oi.order_id
                     {where_clause}
                     {category_filter_sql}
+                    {order_source_filter}
+                    {delivered_filter}
                 """
             else:
                 query = f"""
@@ -5430,6 +5470,8 @@ async def export_dashboard_csv(
                         COALESCE(AVG(o.total_price), 0) as avg_order_value
                     FROM orders o
                     {where_clause}
+                    {order_source_filter}
+                    {delivered_filter}
                 """
             
             cursor.execute(query, time_params if time_params else None)
@@ -5443,7 +5485,7 @@ async def export_dashboard_csv(
         # =========================================
         # SECTION 2: Top Products
         # =========================================
-        if "products" in section_list:
+        if "products" in section_list or "dashboard" in section_list:
             writer.writerow([])
             writer.writerow([])
             writer.writerow(["TOP PERFORMING PRODUCTS"])
@@ -5462,6 +5504,8 @@ async def export_dashboard_csv(
                 JOIN orders o ON oi.order_id = o.id
                 {where_clause}
                 {category_filter_sql}
+                {order_source_filter}
+                {delivered_filter}
                 GROUP BY oi.product_id, oi.product_name
                 ORDER BY total_revenue DESC
                 LIMIT 100
@@ -5484,12 +5528,12 @@ async def export_dashboard_csv(
         # =========================================
         # SECTION 3: Recent Orders
         # =========================================
-        if "orders" in section_list:
+        if "orders" in section_list or "dashboard" in section_list:
             writer.writerow([])
             writer.writerow([])
             writer.writerow(["RECENT ORDERS"])
             writer.writerow(["=" * 50])
-            writer.writerow(["Order ID", "Date", "Customer ID", "Total", "Items", "City", "Province"])
+            writer.writerow(["Order ID", "Date", "Customer ID", "Total", "Items", "City", "Province", "Source", "Status"])
             
             if category_filter_sql:
                 query = f"""
@@ -5500,11 +5544,15 @@ async def export_dashboard_csv(
                         o.total_price,
                         o.customer_city,
                         o.province,
+                        o.order_source,
+                        o.status,
                         (SELECT COUNT(*) FROM order_items WHERE order_id = o.id) as item_count
                     FROM orders o
                     JOIN order_items oi ON o.id = oi.order_id
                     {where_clause}
                     {category_filter_sql}
+                    {order_source_filter}
+                    {delivered_filter}
                     ORDER BY o.order_date DESC
                     LIMIT 500
                 """
@@ -5517,9 +5565,13 @@ async def export_dashboard_csv(
                         o.total_price,
                         o.customer_city,
                         o.province,
+                        o.order_source,
+                        o.status,
                         (SELECT COUNT(*) FROM order_items WHERE order_id = o.id) as item_count
                     FROM orders o
                     {where_clause}
+                    {order_source_filter}
+                    {delivered_filter}
                     ORDER BY o.order_date DESC
                     LIMIT 500
                 """
@@ -5535,7 +5587,9 @@ async def export_dashboard_csv(
                     f"PKR {order['total_price']:,.2f}",
                     order['item_count'],
                     order['customer_city'] or 'N/A',
-                    order['province'] or 'N/A'
+                    order['province'] or 'N/A',
+                    order['order_source'] or 'N/A',
+                    order['status'] or 'N/A'
                 ])
         
         # Close cursor
@@ -5544,11 +5598,39 @@ async def export_dashboard_csv(
         # Prepare CSV for download
         output.seek(0)
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f"mastergroup_analytics_{time_filter}"
-        if category:
-            cat_clean = category.replace(' ', '_').replace('&', 'and')[:20]
-            filename += f"_{cat_clean}"
-        filename += f"_{timestamp}.csv"
+        
+        # Build filename with all filter info
+        filename_parts = ["mastergroup"]
+        
+        # Add section name
+        if sections != "all":
+            section_name = sections.split(',')[0].replace(' ', '_')[:30]
+            filename_parts.append(section_name)
+        else:
+            filename_parts.append("analytics")
+        
+        # Add time filter
+        filename_parts.append(time_filter)
+        
+        # Add order source if filtered
+        if order_source and order_source.lower() != 'all':
+            filename_parts.append(order_source.lower())
+        
+        # Add delivered flag if filtered
+        if delivered_only:
+            filename_parts.append("delivered")
+        
+        # Add category info if filtered
+        if effective_category:
+            cat_count = len(effective_category.split(','))
+            if cat_count > 1:
+                filename_parts.append(f"{cat_count}cats")
+            else:
+                cat_clean = effective_category.replace(' ', '_').replace('&', 'and')[:20]
+                filename_parts.append(cat_clean)
+        
+        filename_parts.append(timestamp)
+        filename = "_".join(filename_parts) + ".csv"
         
         return StreamingResponse(
             iter([output.getvalue()]),

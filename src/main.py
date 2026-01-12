@@ -5403,6 +5403,17 @@ async def export_dashboard_csv(
         conn = psycopg2.connect(**get_pg_connection_params())
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
+        # Check if order_source and status columns exist FIRST
+        cursor.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name = 'orders' 
+            AND column_name IN ('order_source', 'status')
+        """)
+        existing_columns = [row['column_name'] for row in cursor.fetchall()]
+        has_order_source = 'order_source' in existing_columns
+        has_status = 'status' in existing_columns
+        
         # Parse sections
         section_list = sections.split(',') if sections != "all" else ["metrics", "products", "orders"]
         
@@ -5414,15 +5425,15 @@ async def export_dashboard_csv(
         effective_category = category or categories
         category_filter_sql = get_category_filter_sql(effective_category) if effective_category else ""
         
-        # Build order source filter
+        # Build order source filter (only if column exists)
         order_source_filter = ""
-        if order_source and order_source.lower() != 'all':
-            order_source_filter = f" AND UPPER(o.order_source) = '{order_source.upper()}'"
+        if order_source and order_source.lower() != 'all' and has_order_source:
+            order_source_filter = f" AND (UPPER(o.order_source) = '{order_source.upper()}' OR o.order_source IS NULL)"
         
-        # Build delivered only filter
+        # Build delivered only filter (only if column exists)
         delivered_filter = ""
-        if delivered_only:
-            delivered_filter = " AND UPPER(o.status) IN ('DELIVERED', 'COMPLETED', 'FULFILLED')"
+        if delivered_only and has_status:
+            delivered_filter = " AND (UPPER(o.status) IN ('DELIVERED', 'COMPLETED', 'FULFILLED') OR o.status IS NULL)"
         
         # Create CSV in memory
         output = io.StringIO()
@@ -5533,45 +5544,52 @@ async def export_dashboard_csv(
             writer.writerow([])
             writer.writerow(["RECENT ORDERS"])
             writer.writerow(["=" * 50])
-            writer.writerow(["Order ID", "Date", "Customer ID", "Total", "Items", "City", "Province", "Source", "Status"])
+            
+            # Dynamic column list based on what exists
+            header_row = ["Order ID", "Date", "Customer ID", "Total", "Items", "City", "Province"]
+            if has_order_source:
+                header_row.append("Source")
+            if has_status:
+                header_row.append("Status")
+            writer.writerow(header_row)
+            
+            # Build SELECT clause
+            select_columns = """
+                o.id,
+                o.order_date,
+                o.unified_customer_id,
+                o.total_price,
+                o.customer_city,
+                o.province
+            """
+            if has_order_source:
+                select_columns += ",\n                        o.order_source"
+            if has_status:
+                select_columns += ",\n                        o.status"
             
             if category_filter_sql:
                 query = f"""
                     SELECT DISTINCT
-                        o.id,
-                        o.order_date,
-                        o.unified_customer_id,
-                        o.total_price,
-                        o.customer_city,
-                        o.province,
-                        o.order_source,
-                        o.status,
+                        {select_columns},
                         (SELECT COUNT(*) FROM order_items WHERE order_id = o.id) as item_count
                     FROM orders o
                     JOIN order_items oi ON o.id = oi.order_id
                     {where_clause}
                     {category_filter_sql}
-                    {order_source_filter}
-                    {delivered_filter}
+                    {order_source_filter if has_order_source else ''}
+                    {delivered_filter if has_status else ''}
                     ORDER BY o.order_date DESC
                     LIMIT 500
                 """
             else:
                 query = f"""
                     SELECT 
-                        o.id,
-                        o.order_date,
-                        o.unified_customer_id,
-                        o.total_price,
-                        o.customer_city,
-                        o.province,
-                        o.order_source,
-                        o.status,
+                        {select_columns},
                         (SELECT COUNT(*) FROM order_items WHERE order_id = o.id) as item_count
                     FROM orders o
                     {where_clause}
-                    {order_source_filter}
-                    {delivered_filter}
+                    {order_source_filter if has_order_source else ''}
+                    {delivered_filter if has_status else ''}
                     ORDER BY o.order_date DESC
                     LIMIT 500
                 """
@@ -5580,17 +5598,20 @@ async def export_dashboard_csv(
             orders = cursor.fetchall()
             
             for order in orders:
-                writer.writerow([
+                row = [
                     order['id'],
                     order['order_date'].strftime('%Y-%m-%d %H:%M') if order['order_date'] else 'N/A',
                     order['unified_customer_id'] or 'N/A',
                     f"PKR {order['total_price']:,.2f}",
                     order['item_count'],
                     order['customer_city'] or 'N/A',
-                    order['province'] or 'N/A',
-                    order['order_source'] or 'N/A',
-                    order['status'] or 'N/A'
-                ])
+                    order['province'] or 'N/A'
+                ]
+                if has_order_source:
+                    row.append(order.get('order_source', 'N/A') or 'N/A')
+                if has_status:
+                    row.append(order.get('status', 'N/A') or 'N/A')
+                writer.writerow(row)
         
         # Close cursor
         cursor.close()

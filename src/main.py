@@ -1870,11 +1870,32 @@ async def get_category_by_province(
         conn = psycopg2.connect(**get_pg_connection_params())
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
-        where_clause, params = get_time_filter_clause(time_filter)
+        where_clause, time_params = get_time_filter_clause(time_filter)
+        params = list(time_params)
         
-        # Add order source filter
-        order_source_clause, order_source_params = get_order_source_filter(order_source, "o")
-        params = list(params) + list(order_source_params)
+        # Build order source filter
+        order_source_clause = ""
+        if order_source and order_source.lower() in ['oe', 'pos']:
+            order_source_clause = "AND UPPER(o.order_type) = %s"
+            params.append(order_source.upper())
+        
+        # Build the WHERE clause properly
+        if where_clause:
+            # We already have a WHERE from time filter
+            full_where = f"""{where_clause}
+                AND o.province IS NOT NULL
+                AND TRIM(o.province) != ''
+                AND UPPER(TRIM(o.province)) NOT IN ('UNKNOWN', 'N/A', 'NA', 'NULL', 'NONE')
+                {order_source_clause}"""
+        else:
+            # No time filter, start fresh WHERE
+            full_where = f"""WHERE o.province IS NOT NULL
+                AND TRIM(o.province) != ''
+                AND UPPER(TRIM(o.province)) NOT IN ('UNKNOWN', 'N/A', 'NA', 'NULL', 'NONE')
+                {order_source_clause}"""
+        
+        # Add limit to params
+        params.append(limit)
         
         cursor.execute(f"""
             SELECT 
@@ -1906,15 +1927,11 @@ async def get_category_by_province(
                 COUNT(DISTINCT o.unified_customer_id) as unique_customers
             FROM orders o
             JOIN order_items oi ON o.id = oi.order_id
-            {where_clause}
-                AND o.province IS NOT NULL
-                AND TRIM(o.province) != ''
-                AND UPPER(TRIM(o.province)) NOT IN ('UNKNOWN', 'N/A', 'NA', 'NULL', 'NONE')
-                {order_source_clause}
+            {full_where}
             GROUP BY 1, 2, 3
             ORDER BY province, total_revenue DESC
             LIMIT %s
-        """, tuple(params) + (limit,))
+        """, tuple(params))
         
         results = cursor.fetchall()
         

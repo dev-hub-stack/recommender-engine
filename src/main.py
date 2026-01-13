@@ -2941,12 +2941,13 @@ async def get_analytics_collaborative_pairs(
                 SUM(co_purchase_count) as total_co_purchases,
                 SUM(combined_revenue) as total_revenue
             FROM product_pairs
+            FROM product_pairs
         """
-        cursor.execute(count_query, tuple(params))
-        count_result = cursor.fetchone()
-        actual_total_count = count_result['total_pairs'] or 0
-        total_co_purchases = count_result['total_co_purchases'] or 0
-        total_revenue_all = float(count_result['total_revenue'] or 0)
+            cursor.execute(count_query, tuple(params))
+            count_result = cursor.fetchone()
+            actual_total_count = count_result['total_pairs'] or 0
+            total_co_purchases = count_result['total_co_purchases'] or 0
+            total_revenue_all = float(count_result['total_revenue'] or 0)
         
         # Calculate metrics from returned results
         total_revenue = sum(float(r['combined_revenue'] or 0) for r in results)

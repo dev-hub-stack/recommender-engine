@@ -1873,6 +1873,8 @@ async def get_category_by_province(
         where_clause, time_params = get_time_filter_clause(time_filter)
         params = list(time_params)
         
+        logger.info(f"category-by-province: time_filter={time_filter}, where_clause={where_clause}, time_params={time_params}")
+        
         # Build order source filter
         order_source_clause = ""
         if order_source and order_source.lower() in ['oe', 'pos']:
@@ -1896,6 +1898,8 @@ async def get_category_by_province(
         
         # Add limit to params
         params.append(limit)
+        
+        logger.info(f"category-by-province: full_where={full_where[:100]}, params={params}")
         
         cursor.execute(f"""
             SELECT 

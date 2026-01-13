@@ -2719,21 +2719,22 @@ async def get_analytics_collaborative_products(
 async def get_analytics_collaborative_pairs(
     time_filter: str = Query("30days"),
     limit: int = Query(10),
-    order_source: str = Query("all", description="Filter by order source: all, oe, pos")
+    order_source: str = Query("all", description="Filter by order source: all, oe, pos"),
+    category: str = Query(None, description="Filter by category")
 ):
     """Get product pairs frequently bought together with confidence score and summary metrics"""
     # ✅ TRY REDIS CACHE FIRST (FAST PATH)
     if redis_client:
         try:
-            # Try specific time filter cache first (include order_source in key)
-            cache_key = f"analytics_collab_pairs:{time_filter}_{order_source}_{limit}"
+            # Try specific time filter cache first (include order_source and category in key)
+            cache_key = f"analytics_collab_pairs:{time_filter}_{order_source}_{limit}_{category or 'all'}"
             cached_data = redis_client.get(cache_key)
             if cached_data:
                 logger.info(f"Collaborative pairs from cache ({time_filter}, {order_source}, limit={limit})")
                 return json.loads(cached_data)
             
             # Only fall back to "all" cache for "all" filter (not 3years/2years - they should query DB)
-            if time_filter == 'all' and order_source == 'all':
+            if time_filter == 'all' and order_source == 'all' and not category:
                 for fallback_limit in [limit, 20, 10]:
                     fallback_key = f"analytics_collab_pairs:all_all_{fallback_limit}"
                     cached_data = redis_client.get(fallback_key)
@@ -2753,7 +2754,7 @@ async def get_analytics_collaborative_pairs(
             logger.warning(f"Cache lookup failed for collaborative pairs: {e}")
     
     # Check standard cache
-    cache_key = get_cache_key("analytics_collab_pairs", time_filter, order_source, limit)
+    cache_key = get_cache_key("analytics_collab_pairs", time_filter, order_source, limit, category or 'all')
     cached = get_from_cache(cache_key)
     if cached:
         logger.info("Returning cached collaborative pairs", time_filter=time_filter, order_source=order_source)
@@ -2782,8 +2783,8 @@ async def get_analytics_collaborative_pairs(
             else:
                 full_where = ""
         
-        # OPTIMIZATION: Use pre-calculated table for 'all' time filter with NO order_source filter
-        if time_filter == 'all' and order_source == 'all':
+        # OPTIMIZATION: Use pre-calculated table for 'all' time filter with NO order_source/category filter
+        if time_filter == 'all' and order_source == 'all' and not category:
             # First get total count and summary metrics
             cursor.execute("""
                 SELECT 
@@ -2898,15 +2899,47 @@ async def get_analytics_collaborative_pairs(
             LIMIT %s
         """
         
+        # Increase limit if filtering by category to ensure we have enough candidates
+        query_limit = limit * 20 if category else limit
+        
         # Duplicate params for the two where clauses
-        query_params = tuple(params) + tuple(params) + (limit,)
+        query_params = tuple(params) + tuple(params) + (query_limit,)
         cursor.execute(query, query_params)
         
         results = cursor.fetchall()
         
+        # Filter by category if specified (Python-side filtering)
+        if category:
+            filtered_results = []
+            target_category = category.lower().strip()
+            
+            for r in results:
+                # Check if either product matches the category
+                # Handle potentially missing product_names (though SQL COALESCE handles it)
+                name_a = r['product_a_name'] or ""
+                name_b = r['product_b_name'] or ""
+                
+                # Pass order_source if needed by extraction logic, though it defaults safely
+                cat_a = extract_smart_category(name_a, order_source=order_source).lower()
+                cat_b = extract_smart_category(name_b, order_source=order_source).lower()
+                
+                if cat_a == target_category or cat_b == target_category:
+                    filtered_results.append(r)
+                    
+                if len(filtered_results) >= limit:
+                    break
+            
+            results = filtered_results
+        
         # Get total count of pairs (without LIMIT)
-        count_query = f"""
-            WITH product_pairs AS (
+        # Skip count query if filtering by category to avoid mismatched totals (or implement complex SQL filtering)
+        if category:
+            actual_total_count = len(results)
+            total_co_purchases = sum(r['co_purchase_count'] for r in results)
+            total_revenue_all = sum(float(r['combined_revenue'] or 0) for r in results)
+        else:
+            count_query = f"""
+                WITH product_pairs AS (
                 SELECT 
                     oi1.product_id as product_a_id,
                     oi2.product_id as product_b_id,
@@ -2957,7 +2990,8 @@ async def get_analytics_collaborative_pairs(
                 "total_revenue": total_revenue,
                 "avg_pair_value": avg_pair_value
             },
-            "order_source": order_source
+            "order_source": order_source,
+            "category": category
         }
         
         # Cache the result
@@ -2975,39 +3009,42 @@ async def get_analytics_collaborative_pairs(
 @app.get("/api/v1/analytics/customer-similarity")
 async def get_analytics_customer_similarity(
     time_filter: str = Query("30days"),
-    limit: int = Query(10)
+    limit: int = Query(10),
+    category: str = Query(None, description="Filter by category")
 ):
     """Get customer similarity data with REAL collaborative metrics"""
     # ✅ TRY REDIS CACHE FIRST (FAST PATH)
     if redis_client:
         try:
-            # Try specific time filter cache first
-            cache_key = f"analytics:customer_similarity:{time_filter}:{limit}"
+            # Try specific time/category filter cache first
+            cache_key = f"analytics:customer_similarity:{time_filter}:{limit}:{category or 'all'}"
             cached_data = redis_client.get(cache_key)
             if cached_data:
-                logger.info(f"Customer similarity from cache ({time_filter}, limit={limit})")
+                logger.info(f"Customer similarity from cache ({time_filter}, limit={limit}, cat={category})")
                 return json.loads(cached_data)
             
-            # Fall back to "all" cache for any time filter (data is comprehensive)
-            cache_key_all = f"analytics:customer_similarity:all:{limit}"
-            cached_data = redis_client.get(cache_key_all)
-            if cached_data:
-                logger.info(f"Customer similarity from 'all' cache (fallback for {time_filter})")
-                data = json.loads(cached_data)
-                return data
+            # If no category, try fallbacks
+            if not category:
+                # Fall back to "all" cache for any time filter (data is comprehensive)
+                cache_key_all = f"analytics:customer_similarity:all:{limit}:all"
+                cached_data = redis_client.get(cache_key_all)
+                if cached_data:
+                    logger.info(f"Customer similarity from 'all' cache (fallback for {time_filter})")
+                    data = json.loads(cached_data)
+                    return data
             
-            # Try with different limit values (10 or 20) as fallback
-            for fallback_limit in [10, 20]:
-                if fallback_limit != limit:
-                    cache_key_fb = f"analytics:customer_similarity:all:{fallback_limit}"
-                    cached_data = redis_client.get(cache_key_fb)
-                    if cached_data:
-                        logger.info(f"Customer similarity from 'all' cache (limit={fallback_limit} fallback)")
-                        data = json.loads(cached_data)
-                        # Trim to requested limit
-                        if "customers" in data:
-                            data["customers"] = data["customers"][:limit]
-                        return data
+                # Try with different limit values (10 or 20) as fallback
+                for fallback_limit in [10, 20]:
+                    if fallback_limit != limit:
+                        cache_key_fb = f"analytics:customer_similarity:all:{fallback_limit}:all"
+                        cached_data = redis_client.get(cache_key_fb)
+                        if cached_data:
+                            logger.info(f"Customer similarity from 'all' cache (limit={fallback_limit} fallback)")
+                            data = json.loads(cached_data)
+                            # Trim to requested limit
+                            if "customers" in data:
+                                data["customers"] = data["customers"][:limit]
+                            return data
         except Exception as e:
             logger.warning(f"Cache lookup failed for customer similarity: {e}")
     
@@ -3017,6 +3054,16 @@ async def get_analytics_customer_similarity(
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
         where_clause, params = get_time_filter_clause(time_filter)
+        
+        # Add category filter if specified
+        category_filter_raw = get_category_filter_sql(category)
+        if category_filter_raw:
+            # Alias product_name to oi.product_name
+            category_filter = category_filter_raw.replace("product_name", "oi.product_name")
+            if where_clause:
+                where_clause += f" {category_filter}"
+            else:
+                where_clause = f"WHERE {category_filter.replace('AND', '', 1).strip()}"
         
         # Calculate actual similar customers based on shared products
         cursor.execute(f"""
@@ -3242,7 +3289,10 @@ async def get_pos_vs_oe_revenue(
 
 
 @app.get("/api/v1/analytics/customer-profiling")
-async def get_customer_profiling(time_filter: str = Query("all")):
+async def get_customer_profiling(
+    time_filter: str = Query("all"),
+    category: str = Query(None, description="Filter by category")
+):
     """Get customer profiling data"""
     conn = None
     try:
@@ -3251,22 +3301,35 @@ async def get_customer_profiling(time_filter: str = Query("all")):
         
         where_clause, params = get_time_filter_clause(time_filter)
         
-        # Get customer composition (new vs returning)
+        # Add category filter if specified
+        category_filter_raw = get_category_filter_sql(category)
+        category_join = "JOIN order_items oi ON o.id = oi.order_id" if category_filter_raw else ""
+        
+        # Handle WHERE clause properly
+        if category_filter_raw and not where_clause:
+            category_filter = "WHERE " + category_filter_raw.replace("AND ", "", 1)
+        else:
+            category_filter = category_filter_raw
+        
+        # Get customer composition (new vs returning) with revenue and order stats
         cursor.execute(f"""
-            WITH customer_orders AS (
+            WITH customer_stats AS (
                 SELECT 
                     o.unified_customer_id,
                     COUNT(*) as order_count,
-                    MIN(o.order_date) as first_order
+                    SUM(o.total_price) as revenue
                 FROM orders o
+                {category_join}
                 {where_clause}
+                {category_filter}
                 GROUP BY o.unified_customer_id
             )
             SELECT 
                 CASE WHEN order_count = 1 THEN 'new' ELSE 'returning' END as customer_type,
                 COUNT(*) as customer_count,
-                AVG(order_count) as avg_orders
-            FROM customer_orders
+                SUM(order_count) as total_orders,
+                SUM(revenue) as total_revenue
+            FROM customer_stats
             GROUP BY CASE WHEN order_count = 1 THEN 'new' ELSE 'returning' END
         """, params)
         
@@ -3283,7 +3346,9 @@ async def get_customer_profiling(time_filter: str = Query("all")):
                 COUNT(DISTINCT o.unified_customer_id) as customer_count,
                 SUM(o.total_price) as total_revenue
             FROM orders o
+            {category_join}
             {where_clause}
+            {category_filter}
             GROUP BY 
                 CASE 
                     WHEN o.province IN ('Islamabad', 'Islamabad Capital Territory', 'Islamabad Capital', 'ICT') THEN 'Islamabad'
@@ -3297,8 +3362,13 @@ async def get_customer_profiling(time_filter: str = Query("all")):
         geographic = cursor.fetchall()
         
         total_customers = sum(c['customer_count'] for c in composition)
+        total_orders = sum(c['total_orders'] for c in composition)
+        total_revenue = sum(float(c['total_revenue'] or 0) for c in composition)
+        
         new_customers = next((c['customer_count'] for c in composition if c['customer_type'] == 'new'), 0)
         returning_customers = next((c['customer_count'] for c in composition if c['customer_type'] == 'returning'), 0)
+        
+        avg_order_value = total_revenue / total_orders if total_orders > 0 else 0
         
         cursor.close()
         conn.close()
@@ -3307,6 +3377,9 @@ async def get_customer_profiling(time_filter: str = Query("all")):
             "success": True,
             "time_filter": time_filter,
             "total_customers": total_customers,
+            "total_orders": total_orders,
+            "total_revenue": total_revenue,
+            "avg_order_value": avg_order_value,
             "new_customers": new_customers,
             "returning_customers": returning_customers,
             "new_percentage": (new_customers / total_customers * 100) if total_customers > 0 else 0,
@@ -3619,7 +3692,8 @@ async def get_ml_status():
 async def get_ml_collaborative_products(
     time_filter: str = Query("30days", description="Time filter"),
     limit: int = Query(20, ge=1, le=100, description="Number of products"),
-    use_ml: bool = Query(True, description="Use ML algorithms or SQL fallback")
+    use_ml: bool = Query(True, description="Use ML algorithms or SQL fallback"),
+    category: str = Query(None, description="Filter by category")
 ):
     """
     Get collaborative products - Uses SQL-based collaborative analytics
@@ -3629,33 +3703,43 @@ async def get_ml_collaborative_products(
     """
     conn = None
     try:
-        # First try the analytics endpoint
-        try:
-            response = await get_analytics_collaborative_products(time_filter, limit)
-            products = response.get("products", [])
-            
-            if products:
-                # Add algorithm field to each product
-                for p in products:
-                    p['algorithm'] = 'sql_collaborative_analytics'
+        # First try the analytics endpoint (ONLY if no category filter, as it might not support it)
+        if not category:
+            try:
+                response = await get_analytics_collaborative_products(time_filter, limit)
+                products = response.get("products", [])
                 
-                result = {
-                    "products": products,
-                    "algorithm": "sql_collaborative",
-                    "time_filter": time_filter,
-                    "count": len(products)
-                }
-                
-                logger.info("Collaborative products from analytics", count=len(products))
-                return result
-        except Exception as analytics_err:
-            logger.warning(f"Analytics endpoint failed, using direct SQL fallback: {analytics_err}")
+                if products:
+                    # Add algorithm field to each product
+                    for p in products:
+                        p['algorithm'] = 'sql_collaborative_analytics'
+                    
+                    result = {
+                        "products": products,
+                        "algorithm": "sql_collaborative",
+                        "time_filter": time_filter,
+                        "count": len(products)
+                    }
+                    
+                    logger.info("Collaborative products from analytics", count=len(products))
+                    return result
+            except Exception as analytics_err:
+                logger.warning(f"Analytics endpoint failed, using direct SQL fallback: {analytics_err}")
         
         # Fallback: Direct SQL query that doesn't depend on pre-calculated tables
         conn = psycopg2.connect(**get_pg_connection_params())
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
         where_clause, params = get_time_filter_clause(time_filter)
+        
+        # Add category filter if specified
+        category_filter_raw = get_category_filter_sql(category)
+        
+        # Handle WHERE clause properly
+        if category_filter_raw and not where_clause:
+            category_filter = "WHERE " + category_filter_raw.replace("AND ", "", 1)
+        else:
+            category_filter = category_filter_raw
         
         # Simple but effective collaborative query
         cursor.execute(f"""
@@ -3669,6 +3753,7 @@ async def get_ml_collaborative_products(
             FROM order_items oi
             JOIN orders o ON oi.order_id = o.id
             {where_clause}
+            {category_filter}
             GROUP BY oi.product_id
             HAVING COUNT(DISTINCT o.unified_customer_id) >= 2
             ORDER BY COUNT(DISTINCT o.unified_customer_id) DESC, 
@@ -3942,7 +4027,8 @@ async def get_ml_top_products(
 async def get_ml_product_pairs(
     time_filter: str = Query("30days", description="Time filter"),
     limit: int = Query(10, ge=1, le=100, description="Number of pairs"),
-    order_source: str = Query("all", description="Filter by order source: all, oe, pos")
+    order_source: str = Query("all", description="Filter by order source: all, oe, pos"),
+    category: str = Query(None, description="Filter by category")
 ):
     """
     Product Pairs - NOW USES REAL DATA FROM ANALYTICS
@@ -3952,7 +4038,7 @@ async def get_ml_product_pairs(
     """
     try:
         # Call analytics endpoint (returns {pairs: [...], actual_total_count: ..., summary: {...}})
-        response = await get_analytics_collaborative_pairs(time_filter, limit, order_source)
+        response = await get_analytics_collaborative_pairs(time_filter, limit, order_source, category)
         pairs = response.get("pairs", [])
         
         # Add algorithm field to each pair
@@ -3966,6 +4052,7 @@ async def get_ml_product_pairs(
             "algorithm": "sql_collaborative",
             "time_filter": time_filter,
             "order_source": order_source,
+            "category": category,
             "total_count": len(pairs),
             "actual_total_count": response.get("actual_total_count", len(pairs)),
             "summary": response.get("summary", {})
@@ -3979,7 +4066,8 @@ async def get_ml_product_pairs(
 @app.get("/api/v1/ml/customer-similarity")
 async def get_ml_customer_similarity(
     time_filter: str = Query("30days", description="Time filter"),
-    limit: int = Query(10, ge=1, le=100, description="Number of customers")
+    limit: int = Query(10, ge=1, le=100, description="Number of customers"),
+    category: str = Query(None, description="Filter by category")
 ):
     """
     Customer Similarity - NOW USES REAL DATA FROM ANALYTICS
@@ -3989,7 +4077,7 @@ async def get_ml_customer_similarity(
     """
     try:
         # Call analytics endpoint (returns {customers: [...]})
-        response = await get_analytics_customer_similarity(time_filter, limit)
+        response = await get_analytics_customer_similarity(time_filter, limit, category)
         customers = response.get("customers", [])
         
         return {
@@ -3997,6 +4085,7 @@ async def get_ml_customer_similarity(
             "customers": customers,
             "algorithm": "sql_collaborative",
             "time_filter": time_filter,
+            "category": category,
             "total_count": len(customers)
         }
         

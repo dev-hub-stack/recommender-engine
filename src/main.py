@@ -2718,23 +2718,24 @@ async def get_analytics_collaborative_products(
 @app.get("/api/v1/analytics/collaborative-pairs")
 async def get_analytics_collaborative_pairs(
     time_filter: str = Query("30days"),
-    limit: int = Query(10)
+    limit: int = Query(10),
+    order_source: str = Query("all", description="Filter by order source: all, oe, pos")
 ):
     """Get product pairs frequently bought together with confidence score and summary metrics"""
     # ✅ TRY REDIS CACHE FIRST (FAST PATH)
     if redis_client:
         try:
-            # Try specific time filter cache first
-            cache_key = f"analytics_collab_pairs:{time_filter}_{limit}"
+            # Try specific time filter cache first (include order_source in key)
+            cache_key = f"analytics_collab_pairs:{time_filter}_{order_source}_{limit}"
             cached_data = redis_client.get(cache_key)
             if cached_data:
-                logger.info(f"Collaborative pairs from cache ({time_filter}, limit={limit})")
+                logger.info(f"Collaborative pairs from cache ({time_filter}, {order_source}, limit={limit})")
                 return json.loads(cached_data)
             
             # Only fall back to "all" cache for "all" filter (not 3years/2years - they should query DB)
-            if time_filter == 'all':
+            if time_filter == 'all' and order_source == 'all':
                 for fallback_limit in [limit, 20, 10]:
-                    fallback_key = f"analytics_collab_pairs:all_{fallback_limit}"
+                    fallback_key = f"analytics_collab_pairs:all_all_{fallback_limit}"
                     cached_data = redis_client.get(fallback_key)
                     if cached_data:
                         data = json.loads(cached_data)
@@ -2752,10 +2753,10 @@ async def get_analytics_collaborative_pairs(
             logger.warning(f"Cache lookup failed for collaborative pairs: {e}")
     
     # Check standard cache
-    cache_key = get_cache_key("analytics_collab_pairs", time_filter, limit)
+    cache_key = get_cache_key("analytics_collab_pairs", time_filter, order_source, limit)
     cached = get_from_cache(cache_key)
     if cached:
-        logger.info("Returning cached collaborative pairs", time_filter=time_filter)
+        logger.info("Returning cached collaborative pairs", time_filter=time_filter, order_source=order_source)
         return cached
 
     conn = None
@@ -2763,10 +2764,26 @@ async def get_analytics_collaborative_pairs(
         conn = psycopg2.connect(**get_pg_connection_params())
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
-        where_clause, params = get_time_filter_clause(time_filter)
+        where_clause, time_params = get_time_filter_clause(time_filter)
+        params = list(time_params)
         
-        # OPTIMIZATION: Use pre-calculated table for 'all' time filter with real product names
-        if time_filter == 'all':
+        # Build order source filter
+        order_source_clause = ""
+        if order_source and order_source.lower() in ['oe', 'pos']:
+            order_source_clause = "AND UPPER(o.order_type) = %s"
+            params.append(order_source.upper())
+        
+        # Build combined WHERE clause
+        if where_clause:
+            full_where = f"{where_clause} {order_source_clause}"
+        else:
+            if order_source_clause:
+                full_where = f"WHERE 1=1 {order_source_clause}"
+            else:
+                full_where = ""
+        
+        # OPTIMIZATION: Use pre-calculated table for 'all' time filter with NO order_source filter
+        if time_filter == 'all' and order_source == 'all':
             # First get total count and summary metrics
             cursor.execute("""
                 SELECT 
@@ -2828,7 +2845,8 @@ async def get_analytics_collaborative_pairs(
                     "avg_confidence": round(avg_confidence * 100, 1),
                     "total_revenue": total_revenue,
                     "avg_pair_value": avg_pair_value
-                }
+                },
+                "order_source": order_source
             }
             
             set_to_cache(cache_key, response_data, ttl=3600)
@@ -2847,7 +2865,7 @@ async def get_analytics_collaborative_pairs(
                 FROM order_items oi1
                 JOIN order_items oi2 ON oi1.order_id = oi2.order_id AND oi1.product_id < oi2.product_id
                 JOIN orders o ON oi1.order_id = o.id
-                {where_clause}
+                {full_where}
                 GROUP BY oi1.product_id, oi2.product_id
                 HAVING COUNT(DISTINCT oi1.order_id) >= 2
             ),
@@ -2857,7 +2875,7 @@ async def get_analytics_collaborative_pairs(
                     COUNT(DISTINCT oi.order_id) as total_orders
                 FROM order_items oi
                 JOIN orders o ON oi.order_id = o.id
-                {where_clause}
+                {full_where}
                 GROUP BY oi.product_id
             )
             SELECT 
@@ -2881,7 +2899,7 @@ async def get_analytics_collaborative_pairs(
         """
         
         # Duplicate params for the two where clauses
-        query_params = params + params + (limit,)
+        query_params = tuple(params) + tuple(params) + (limit,)
         cursor.execute(query, query_params)
         
         results = cursor.fetchall()
@@ -2897,7 +2915,7 @@ async def get_analytics_collaborative_pairs(
                 FROM order_items oi1
                 JOIN order_items oi2 ON oi1.order_id = oi2.order_id AND oi1.product_id < oi2.product_id
                 JOIN orders o ON oi1.order_id = o.id
-                {where_clause}
+                {full_where}
                 GROUP BY oi1.product_id, oi2.product_id
                 HAVING COUNT(DISTINCT oi1.order_id) >= 2
             )
@@ -2907,7 +2925,7 @@ async def get_analytics_collaborative_pairs(
                 SUM(combined_revenue) as total_revenue
             FROM product_pairs
         """
-        cursor.execute(count_query, params)
+        cursor.execute(count_query, tuple(params))
         count_result = cursor.fetchone()
         actual_total_count = count_result['total_pairs'] or 0
         total_co_purchases = count_result['total_co_purchases'] or 0
@@ -2938,7 +2956,8 @@ async def get_analytics_collaborative_pairs(
                 "avg_confidence": round(avg_confidence * 100, 1),
                 "total_revenue": total_revenue,
                 "avg_pair_value": avg_pair_value
-            }
+            },
+            "order_source": order_source
         }
         
         # Cache the result
@@ -3922,7 +3941,8 @@ async def get_ml_top_products(
 @app.get("/api/v1/ml/product-pairs")
 async def get_ml_product_pairs(
     time_filter: str = Query("30days", description="Time filter"),
-    limit: int = Query(10, ge=1, le=100, description="Number of pairs")
+    limit: int = Query(10, ge=1, le=100, description="Number of pairs"),
+    order_source: str = Query("all", description="Filter by order source: all, oe, pos")
 ):
     """
     Product Pairs - NOW USES REAL DATA FROM ANALYTICS
@@ -3932,7 +3952,7 @@ async def get_ml_product_pairs(
     """
     try:
         # Call analytics endpoint (returns {pairs: [...], actual_total_count: ..., summary: {...}})
-        response = await get_analytics_collaborative_pairs(time_filter, limit)
+        response = await get_analytics_collaborative_pairs(time_filter, limit, order_source)
         pairs = response.get("pairs", [])
         
         # Add algorithm field to each pair
@@ -3945,6 +3965,7 @@ async def get_ml_product_pairs(
             "pairs": pairs,
             "algorithm": "sql_collaborative",
             "time_filter": time_filter,
+            "order_source": order_source,
             "total_count": len(pairs),
             "actual_total_count": response.get("actual_total_count", len(pairs)),
             "summary": response.get("summary", {})

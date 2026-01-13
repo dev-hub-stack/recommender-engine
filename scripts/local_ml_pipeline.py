@@ -197,28 +197,29 @@ def fetch_from_master_apis(days: int = 7) -> Dict:
 
 CITY_PROVINCE_MAP = {
     'Punjab': [
-        'Lahore', 'Rawalpindi', 'Faisalabad', 'Multan', 'Gujranwala', 'Sialkot', 'Bahawalpur', 'Sargodha',
+        'Lahore', 'Rawalpindi', 'Faisalabad', 'Multan', 'Gujranwala', 'Sialkot', 'Bahawalpur', 'Sargodha', 'Sargodah',
         'Gujrat', 'Sahiwal', 'Sheikhupura', 'Okara', 'Attock', 'Mianwali', 'Bahawalnagar', 'Jhelum', 
         'Wah', 'Vehari', 'Chakwal', 'Dera Ghazi Khan', 'Kasur', 'Jhang', 'Sadiqabad', 'Hafizabad', 
         'Gojra', 'Kharian', 'Burewala', 'Taxila', 'Bhakkar', 'Daska', 'Chichawatni', 'Mandi Bahauddin', 
-        'Khanewal', 'Layyah', 'Khanpur', 'Raiwind', 'TOBATEK', 'Toba Tek Singh', 'Rahim Yar Khan', 
+        'Khanewal', 'Layyah', 'Khanpur', 'Raiwind', 'TOBATEK', 'Toba Tek Singh', 'Rahim Yar Khan', 'Rahimyarkhan',
         'Wazirabad', 'Jaranwala', 'Narowal', 'Muzaffargarh', 'Kot Addu', 'Kamra', 'Nankana Sahib',
         'Muridke', 'Kamoke', 'Hassan Abdal', 'Arifwala', 'Chishtian', 'Dipalpur', 'Kabirwala', 'Lodhran',
-        'Mailsi', 'Pattoki', 'Samundri', 'Shakargarh', 'Sambrial', 'Shujabad', 'Taunsa', 'Bhalwal'
+        'Mailsi', 'Pattoki', 'Samundri', 'Shakargarh', 'Sambrial', 'Shujabad', 'Taunsa', 'Bhalwal',
+        'Haroonabad', 'Rajanpur', 'Khushab', 'Kamalia', 'Ali Pur Chatta', 'Jouharabad', 'Renala khurd', 'Chiniot', 'Gujarkhan'
     ],
     'Sindh': [
         'Karachi', 'Hyderabad', 'Sukkur', 'Larkana', 'Mirpur', 'Dadu', 'Nawabshah', 'Jacobabad',
         'Shikarpur', 'Khairpur', 'Thatta', 'Badin', 'Ghotki', 'Kandhkot', 'Tando Adam', 'Tando Allahyar',
-        'Umerkot', 'Sehwan'
+        'Umerkot', 'Sehwan', 'Mehar', 'Khipro', 'Jamshoro', 'Kashmore', 'Tando Jam'
     ],
     'Islamabad': ['Islamabad'],
     'Khyber Pakhtunkhwa': [
         'Peshawar', 'Mardan', 'Abbottabad', 'Swat', 'Kohat', 'Mansehra', 'Haripur', 'Bannu', 
         'Nowshera', 'Mingora', 'Charsadda', 'Dera Ismail Khan', 'DI Khan', 'Chitral', 'Swabi',
-        'Batkhela', 'Karak', 'Malakand'
+        'Batkhela', 'Karak', 'Malakand', 'ABBOTABAD', 'Abbotabad'
     ],
     'Balochistan': ['Quetta', 'Gwadar', 'Turbat', 'Sibi', 'Khuzdar', 'Loralai', 'Chaman'],
-    'Azad Kashmir': ['Muzaffarabad', 'Mirpur', 'Rawalakot', 'Bhimber', 'Kotli', 'Bagh'],
+    'Azad Kashmir': ['Muzaffarabad', 'Mirpur', 'Rawalakot', 'Bhimber', 'Kotli', 'Bagh', 'Mir Pur (AJK)'],
     'Gilgit-Baltistan': ['Gilgit', 'Skardu', 'Hunza', 'Chilas']
 }
 

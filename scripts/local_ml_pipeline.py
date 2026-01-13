@@ -196,11 +196,30 @@ def fetch_from_master_apis(days: int = 7) -> Dict:
 
 
 CITY_PROVINCE_MAP = {
-    'Punjab': ['Lahore', 'Rawalpindi', 'Faisalabad', 'Multan', 'Gujranwala', 'Sialkot', 'Bahawalpur', 'Sargodha'],
-    'Sindh': ['Karachi', 'Hyderabad', 'Sukkur', 'Larkana', 'Mirpur'],
+    'Punjab': [
+        'Lahore', 'Rawalpindi', 'Faisalabad', 'Multan', 'Gujranwala', 'Sialkot', 'Bahawalpur', 'Sargodha',
+        'Gujrat', 'Sahiwal', 'Sheikhupura', 'Okara', 'Attock', 'Mianwali', 'Bahawalnagar', 'Jhelum', 
+        'Wah', 'Vehari', 'Chakwal', 'Dera Ghazi Khan', 'Kasur', 'Jhang', 'Sadiqabad', 'Hafizabad', 
+        'Gojra', 'Kharian', 'Burewala', 'Taxila', 'Bhakkar', 'Daska', 'Chichawatni', 'Mandi Bahauddin', 
+        'Khanewal', 'Layyah', 'Khanpur', 'Raiwind', 'TOBATEK', 'Toba Tek Singh', 'Rahim Yar Khan', 
+        'Wazirabad', 'Jaranwala', 'Narowal', 'Muzaffargarh', 'Kot Addu', 'Kamra', 'Nankana Sahib',
+        'Muridke', 'Kamoke', 'Hassan Abdal', 'Arifwala', 'Chishtian', 'Dipalpur', 'Kabirwala', 'Lodhran',
+        'Mailsi', 'Pattoki', 'Samundri', 'Shakargarh', 'Sambrial', 'Shujabad', 'Taunsa', 'Bhalwal'
+    ],
+    'Sindh': [
+        'Karachi', 'Hyderabad', 'Sukkur', 'Larkana', 'Mirpur', 'Dadu', 'Nawabshah', 'Jacobabad',
+        'Shikarpur', 'Khairpur', 'Thatta', 'Badin', 'Ghotki', 'Kandhkot', 'Tando Adam', 'Tando Allahyar',
+        'Umerkot', 'Sehwan'
+    ],
     'Islamabad': ['Islamabad'],
-    'Khyber Pakhtunkhwa': ['Peshawar', 'Mardan', 'Abbottabad', 'Swat'],
-    'Balochistan': ['Quetta']
+    'Khyber Pakhtunkhwa': [
+        'Peshawar', 'Mardan', 'Abbottabad', 'Swat', 'Kohat', 'Mansehra', 'Haripur', 'Bannu', 
+        'Nowshera', 'Mingora', 'Charsadda', 'Dera Ismail Khan', 'DI Khan', 'Chitral', 'Swabi',
+        'Batkhela', 'Karak', 'Malakand'
+    ],
+    'Balochistan': ['Quetta', 'Gwadar', 'Turbat', 'Sibi', 'Khuzdar', 'Loralai', 'Chaman'],
+    'Azad Kashmir': ['Muzaffarabad', 'Mirpur', 'Rawalakot', 'Bhimber', 'Kotli', 'Bagh'],
+    'Gilgit-Baltistan': ['Gilgit', 'Skardu', 'Hunza', 'Chilas']
 }
 
 def get_province_from_city(city):

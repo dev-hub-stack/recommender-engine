@@ -4473,6 +4473,7 @@ async def get_personalize_recommendations_by_location(
     province: Optional[str] = Query(None, description="Filter by province"),
     city: Optional[str] = Query(None, description="Filter by city"),
     category: Optional[str] = Query(None, description="Filter by category (comma-separated for multiple)"),
+    order_source: Optional[str] = Query(None, description="Filter by order source: 'oe', 'pos'"),
     num_results: int = Query(10, description="Number of recommendations per user"),
     limit_users: int = Query(50, description="Number of users to get recommendations for")
 ):
@@ -4508,6 +4509,10 @@ async def get_personalize_recommendations_by_location(
             if city:
                 query += " AND LOWER(o.customer_city) = LOWER(%s)"
                 params.append(city)
+                
+            if order_source and order_source.lower() in ['oe', 'pos']:
+                query += " AND UPPER(o.order_type) = %s"
+                params.append(order_source.upper())
             
             query += f" ORDER BY o.unified_customer_id LIMIT {limit_users}"
             

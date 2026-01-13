@@ -3362,7 +3362,7 @@ async def get_customer_profiling(
         geographic = cursor.fetchall()
         
         total_customers = sum(c['customer_count'] for c in composition)
-        total_orders = sum(c['total_orders'] for c in composition)
+        total_orders = sum(int(c['total_orders'] or 0) for c in composition)
         total_revenue = sum(float(c['total_revenue'] or 0) for c in composition)
         
         new_customers = next((c['customer_count'] for c in composition if c['customer_type'] == 'new'), 0)

@@ -3042,8 +3042,8 @@ async def get_analytics_customer_similarity(
         # Add category filter if specified
         category_filter_raw = get_category_filter_sql(category)
         if category_filter_raw:
-            # Alias product_name to oi.product_name
-            category_filter = category_filter_raw.replace("product_name", "oi.product_name")
+            # category_filter_raw already includes 'oi.product_name' from helper
+            category_filter = category_filter_raw
             if where_clause:
                 where_clause += f" {category_filter}"
             else:

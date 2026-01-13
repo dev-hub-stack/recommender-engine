@@ -1853,6 +1853,129 @@ async def get_province_performance(
         if conn:
             conn.close()
 
+@app.get("/api/v1/analytics/order-status-breakdown")
+async def get_order_status_breakdown(
+    time_filter: str = Query("30days"),
+    order_source: str = Query("all", description="Filter by order source: all, oe, pos")
+):
+    """
+    Get order status breakdown with revenue impact analysis.
+    Shows distribution of orders by status (Delivered, Cancelled, Returned, Pending, etc.)
+    Useful for understanding fulfillment rates and lost revenue analysis.
+    """
+    conn = None
+    try:
+        conn = psycopg2.connect(**get_pg_connection_params())
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        where_clause, time_params = get_time_filter_clause(time_filter)
+        params = list(time_params)
+        
+        # Build order source filter
+        order_source_clause = ""
+        if order_source and order_source.lower() in ['oe', 'pos']:
+            order_source_clause = "AND UPPER(o.order_type) = %s"
+            params.append(order_source.upper())
+        
+        # Build WHERE clause
+        if where_clause:
+            full_where = f"{where_clause} {order_source_clause}"
+        else:
+            if order_source_clause:
+                full_where = f"WHERE 1=1 {order_source_clause}"
+            else:
+                full_where = ""
+        
+        cursor.execute(f"""
+            SELECT 
+                UPPER(o.order_type) as order_type,
+                o.order_status,
+                COUNT(*) as order_count,
+                SUM(o.total_price) as total_revenue,
+                AVG(o.total_price) as avg_order_value,
+                COUNT(DISTINCT o.unified_customer_id) as unique_customers
+            FROM orders o
+            {full_where}
+            WHERE o.order_status IS NOT NULL
+            GROUP BY UPPER(o.order_type), o.order_status
+            ORDER BY order_type, order_count DESC
+        """.replace("WHERE o.order_status IS NOT NULL", 
+                   f"{'AND' if full_where else 'WHERE'} o.order_status IS NOT NULL"), 
+        tuple(params))
+        
+        results = cursor.fetchall()
+        
+        # Organize by order type
+        oe_statuses = []
+        pos_statuses = []
+        totals = {"oe": {"orders": 0, "revenue": 0}, "pos": {"orders": 0, "revenue": 0}}
+        
+        for r in results:
+            status_data = {
+                "status": r['order_status'],
+                "order_count": r['order_count'],
+                "total_revenue": float(r['total_revenue'] or 0),
+                "avg_order_value": float(r['avg_order_value'] or 0),
+                "unique_customers": r['unique_customers']
+            }
+            
+            if r['order_type'] == 'OE':
+                oe_statuses.append(status_data)
+                totals["oe"]["orders"] += r['order_count']
+                totals["oe"]["revenue"] += float(r['total_revenue'] or 0)
+            else:
+                pos_statuses.append(status_data)
+                totals["pos"]["orders"] += r['order_count']
+                totals["pos"]["revenue"] += float(r['total_revenue'] or 0)
+        
+        # Calculate percentages and categorize
+        for status in oe_statuses:
+            status["percentage"] = round(status["order_count"] / max(totals["oe"]["orders"], 1) * 100, 1)
+            # Categorize status
+            if status["status"] in ["Delivered Orders"]:
+                status["category"] = "fulfilled"
+            elif status["status"] in ["Cancelled Orders", "Returned Orders", "Refund Orders"]:
+                status["category"] = "lost"
+            else:
+                status["category"] = "pipeline"
+        
+        for status in pos_statuses:
+            status["percentage"] = round(status["order_count"] / max(totals["pos"]["orders"], 1) * 100, 1)
+            status["category"] = "fulfilled" if status["status"] == "completed" else "other"
+        
+        # Calculate OE fulfillment rate
+        oe_delivered = sum(s["order_count"] for s in oe_statuses if s["category"] == "fulfilled")
+        oe_total = totals["oe"]["orders"]
+        oe_fulfillment_rate = round(oe_delivered / max(oe_total, 1) * 100, 1)
+        
+        # Calculate lost revenue
+        oe_lost_revenue = sum(s["total_revenue"] for s in oe_statuses if s["category"] == "lost")
+        
+        return {
+            "oe": {
+                "statuses": oe_statuses,
+                "total_orders": totals["oe"]["orders"],
+                "total_revenue": totals["oe"]["revenue"],
+                "fulfillment_rate": oe_fulfillment_rate,
+                "lost_revenue": oe_lost_revenue
+            },
+            "pos": {
+                "statuses": pos_statuses,
+                "total_orders": totals["pos"]["orders"],
+                "total_revenue": totals["pos"]["revenue"],
+                "fulfillment_rate": 100.0  # All POS are completed
+            },
+            "time_filter": time_filter,
+            "order_source_filter": order_source
+        }
+        
+    except Exception as e:
+        logger.error(f"Order status breakdown error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            conn.close()
+
 
 @app.get("/api/v1/analytics/geographic/category-by-province")
 async def get_category_by_province(

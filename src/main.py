@@ -1914,14 +1914,14 @@ async def get_category_by_province(
                     ELSE INITCAP(COALESCE(o.province, 'Unknown'))
                 END as province,
                 CASE 
-                    WHEN UPPER(oi.product_name) LIKE '%FOAM%' THEN 'Foam'
-                    WHEN UPPER(oi.product_name) LIKE '%PILLOW%' THEN 'Pillows'
-                    WHEN UPPER(oi.product_name) LIKE '%CELESTE%' THEN 'Celeste'
-                    WHEN UPPER(oi.product_name) LIKE '%MOLTY%' AND UPPER(oi.product_name) NOT LIKE '%FOAM%' THEN 'Molty'
-                    WHEN UPPER(oi.product_name) LIKE '%BED%' THEN 'Beds'
-                    WHEN UPPER(oi.product_name) LIKE '%SOFA%' THEN 'Sofas'
-                    WHEN UPPER(oi.product_name) LIKE '%SPRING%' THEN 'Spring Mattresses'
-                    WHEN UPPER(oi.product_name) LIKE '%MATTRESS%' THEN 'Mattresses'
+                    WHEN UPPER(oi.product_name) LIKE '%%FOAM%%' THEN 'Foam'
+                    WHEN UPPER(oi.product_name) LIKE '%%PILLOW%%' THEN 'Pillows'
+                    WHEN UPPER(oi.product_name) LIKE '%%CELESTE%%' THEN 'Celeste'
+                    WHEN UPPER(oi.product_name) LIKE '%%MOLTY%%' AND UPPER(oi.product_name) NOT LIKE '%%FOAM%%' THEN 'Molty'
+                    WHEN UPPER(oi.product_name) LIKE '%%BED%%' THEN 'Beds'
+                    WHEN UPPER(oi.product_name) LIKE '%%SOFA%%' THEN 'Sofas'
+                    WHEN UPPER(oi.product_name) LIKE '%%SPRING%%' THEN 'Spring Mattresses'
+                    WHEN UPPER(oi.product_name) LIKE '%%MATTRESS%%' THEN 'Mattresses'
                     ELSE 'Other'
                 END as category,
                 UPPER(o.order_type) as order_type,

@@ -2941,7 +2941,6 @@ async def get_analytics_collaborative_pairs(
                 SUM(co_purchase_count) as total_co_purchases,
                 SUM(combined_revenue) as total_revenue
             FROM product_pairs
-            FROM product_pairs
         """
             cursor.execute(count_query, tuple(params))
             count_result = cursor.fetchone()

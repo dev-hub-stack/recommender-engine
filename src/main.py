@@ -1800,9 +1800,6 @@ async def get_province_performance(
                 FROM orders o
                 JOIN order_items oi ON o.id = oi.order_id
                 {where_clause}
-                    AND o.province IS NOT NULL
-                    AND TRIM(o.province) != ''
-                    AND UPPER(TRIM(o.province)) NOT IN ('UNKNOWN', 'N/A', 'NA', 'NULL', 'NONE')
                     {order_source_clause}
                     {category_filter}
                 GROUP BY 1
@@ -1827,9 +1824,6 @@ async def get_province_performance(
                     SUM(o.total_price) as total_revenue
                 FROM orders o
                 {where_clause}
-                    AND o.province IS NOT NULL
-                    AND TRIM(o.province) != ''
-                    AND UPPER(TRIM(o.province)) NOT IN ('UNKNOWN', 'N/A', 'NA', 'NULL', 'NONE')
                     {order_source_clause}
                 GROUP BY 1
                 ORDER BY total_revenue DESC
@@ -2145,11 +2139,6 @@ async def get_city_performance(
                 FROM orders o
                 JOIN order_items oi ON o.id = oi.order_id
                 {where_clause}
-                    AND o.customer_city IS NOT NULL 
-                    AND TRIM(o.customer_city) != ''
-                    AND o.province IS NOT NULL
-                    AND TRIM(o.province) != ''
-                    AND UPPER(TRIM(o.province)) NOT IN ('UNKNOWN', 'N/A', 'NA', 'NULL', 'NONE', '')
                     {order_source_clause}
                     {category_filter}
                 GROUP BY o.customer_city, province
@@ -2175,11 +2164,6 @@ async def get_city_performance(
                     SUM(o.total_price) as total_revenue
                 FROM orders o
                 {where_clause}
-                    AND o.customer_city IS NOT NULL 
-                    AND TRIM(o.customer_city) != ''
-                    AND o.province IS NOT NULL
-                    AND TRIM(o.province) != ''
-                    AND UPPER(TRIM(o.province)) NOT IN ('UNKNOWN', 'N/A', 'NA', 'NULL', 'NONE', '')
                     {order_source_clause}
                 GROUP BY o.customer_city, province
                 ORDER BY total_revenue DESC

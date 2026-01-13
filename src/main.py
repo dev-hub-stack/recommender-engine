@@ -1754,8 +1754,12 @@ async def get_products_by_category(
 
 
 @app.get("/api/v1/analytics/geographic/provinces")
-async def get_province_performance(time_filter: str = Query("30days")):
-    """Get province-level performance with merged Islamabad variants"""
+async def get_province_performance(
+    time_filter: str = Query("30days"),
+    order_source: str = Query("all", description="Filter by order source: all, oe, pos"),
+    category: str = Query(None, description="Filter by product category")
+):
+    """Get province-level performance with merged Islamabad variants, optional OE/POS and category filters"""
     conn = None
     try:
         conn = psycopg2.connect(**get_pg_connection_params())
@@ -1763,41 +1767,75 @@ async def get_province_performance(time_filter: str = Query("30days")):
         
         where_clause, params = get_time_filter_clause(time_filter)
         
-        # Use CASE to merge province variants at SQL level with case-insensitive handling
-        cursor.execute(f"""
-            SELECT 
-                CASE 
-                    WHEN UPPER(o.province) IN ('ISLAMABAD', 'ISLAMABAD CAPITAL TERRITORY', 'ISLAMABAD CAPITAL', 'ICT') THEN 'Islamabad'
-                    WHEN UPPER(REPLACE(o.province, '.', '')) IN ('KPK', 'NWFP', 'KHYBER PAKHTUNKHWA') THEN 'Khyber Pakhtunkhwa'
-                    WHEN UPPER(o.province) = 'PUNJAB' THEN 'Punjab'
-                    WHEN UPPER(o.province) = 'SINDH' THEN 'Sindh'
-                    WHEN UPPER(o.province) IN ('BALOCHISTAN', 'BALUCHISTAN') THEN 'Balochistan'
-                    WHEN UPPER(o.province) IN ('GILGIT-BALTISTAN', 'GB') THEN 'Gilgit-Baltistan'
-                    WHEN UPPER(o.province) IN ('AZAD KASHMIR', 'AJK', 'AZAD JAMMU AND KASHMIR') THEN 'Azad Kashmir'
-                    ELSE INITCAP(COALESCE(o.province, 'Unknown'))
-                END as province,
-                COUNT(DISTINCT o.id) as total_orders,
-                COUNT(DISTINCT o.unified_customer_id) as total_customers,
-                SUM(o.total_price) as total_revenue
-            FROM orders o
-            {where_clause}
-                AND o.province IS NOT NULL
-                AND TRIM(o.province) != ''
-                AND UPPER(TRIM(o.province)) NOT IN ('UNKNOWN', 'N/A', 'NA', 'NULL', 'NONE')
-            GROUP BY 
-                CASE 
-                    WHEN UPPER(o.province) IN ('ISLAMABAD', 'ISLAMABAD CAPITAL TERRITORY', 'ISLAMABAD CAPITAL', 'ICT') THEN 'Islamabad'
-                    WHEN UPPER(REPLACE(o.province, '.', '')) IN ('KPK', 'NWFP', 'KHYBER PAKHTUNKHWA') THEN 'Khyber Pakhtunkhwa'
-                    WHEN UPPER(o.province) = 'PUNJAB' THEN 'Punjab'
-                    WHEN UPPER(o.province) = 'SINDH' THEN 'Sindh'
-                    WHEN UPPER(o.province) IN ('BALOCHISTAN', 'BALUCHISTAN') THEN 'Balochistan'
-                    WHEN UPPER(o.province) IN ('GILGIT-BALTISTAN', 'GB') THEN 'Gilgit-Baltistan'
-                    WHEN UPPER(o.province) IN ('AZAD KASHMIR', 'AJK', 'AZAD JAMMU AND KASHMIR') THEN 'Azad Kashmir'
-                    ELSE INITCAP(COALESCE(o.province, 'Unknown'))
-                END
-            ORDER BY total_revenue DESC
-        """, params)
+        # Add order source filter
+        order_source_clause, order_source_params = get_order_source_filter(order_source, "o")
+        params = list(params) + list(order_source_params)
         
+        # Determine if we need to join order_items for category filtering
+        needs_items_join = category and category.strip()
+        
+        # Build category filter
+        category_filter = ""
+        if needs_items_join:
+            category_filter = get_category_filter_sql(category)
+        
+        # Base query structure
+        if needs_items_join:
+            # Join with order_items for category filtering
+            query = f"""
+                SELECT 
+                    CASE 
+                        WHEN UPPER(o.province) IN ('ISLAMABAD', 'ISLAMABAD CAPITAL TERRITORY', 'ISLAMABAD CAPITAL', 'ICT') THEN 'Islamabad'
+                        WHEN UPPER(REPLACE(o.province, '.', '')) IN ('KPK', 'NWFP', 'KHYBER PAKHTUNKHWA') THEN 'Khyber Pakhtunkhwa'
+                        WHEN UPPER(o.province) = 'PUNJAB' THEN 'Punjab'
+                        WHEN UPPER(o.province) = 'SINDH' THEN 'Sindh'
+                        WHEN UPPER(o.province) IN ('BALOCHISTAN', 'BALUCHISTAN') THEN 'Balochistan'
+                        WHEN UPPER(o.province) IN ('GILGIT-BALTISTAN', 'GB') THEN 'Gilgit-Baltistan'
+                        WHEN UPPER(o.province) IN ('AZAD KASHMIR', 'AJK', 'AZAD JAMMU AND KASHMIR') THEN 'Azad Kashmir'
+                        ELSE INITCAP(COALESCE(o.province, 'Unknown'))
+                    END as province,
+                    COUNT(DISTINCT o.id) as total_orders,
+                    COUNT(DISTINCT o.unified_customer_id) as total_customers,
+                    SUM(oi.total_price) as total_revenue
+                FROM orders o
+                JOIN order_items oi ON o.id = oi.order_id
+                {where_clause}
+                    AND o.province IS NOT NULL
+                    AND TRIM(o.province) != ''
+                    AND UPPER(TRIM(o.province)) NOT IN ('UNKNOWN', 'N/A', 'NA', 'NULL', 'NONE')
+                    {order_source_clause}
+                    {category_filter}
+                GROUP BY 1
+                ORDER BY total_revenue DESC
+            """
+        else:
+            # No category filter - use simpler query
+            query = f"""
+                SELECT 
+                    CASE 
+                        WHEN UPPER(o.province) IN ('ISLAMABAD', 'ISLAMABAD CAPITAL TERRITORY', 'ISLAMABAD CAPITAL', 'ICT') THEN 'Islamabad'
+                        WHEN UPPER(REPLACE(o.province, '.', '')) IN ('KPK', 'NWFP', 'KHYBER PAKHTUNKHWA') THEN 'Khyber Pakhtunkhwa'
+                        WHEN UPPER(o.province) = 'PUNJAB' THEN 'Punjab'
+                        WHEN UPPER(o.province) = 'SINDH' THEN 'Sindh'
+                        WHEN UPPER(o.province) IN ('BALOCHISTAN', 'BALUCHISTAN') THEN 'Balochistan'
+                        WHEN UPPER(o.province) IN ('GILGIT-BALTISTAN', 'GB') THEN 'Gilgit-Baltistan'
+                        WHEN UPPER(o.province) IN ('AZAD KASHMIR', 'AJK', 'AZAD JAMMU AND KASHMIR') THEN 'Azad Kashmir'
+                        ELSE INITCAP(COALESCE(o.province, 'Unknown'))
+                    END as province,
+                    COUNT(DISTINCT o.id) as total_orders,
+                    COUNT(DISTINCT o.unified_customer_id) as total_customers,
+                    SUM(o.total_price) as total_revenue
+                FROM orders o
+                {where_clause}
+                    AND o.province IS NOT NULL
+                    AND TRIM(o.province) != ''
+                    AND UPPER(TRIM(o.province)) NOT IN ('UNKNOWN', 'N/A', 'NA', 'NULL', 'NONE')
+                    {order_source_clause}
+                GROUP BY 1
+                ORDER BY total_revenue DESC
+            """
+        
+        cursor.execute(query, tuple(params))
         results = cursor.fetchall()
         
         return [{
@@ -1816,12 +1854,17 @@ async def get_province_performance(time_filter: str = Query("30days")):
             conn.close()
 
 
-@app.get("/api/v1/analytics/geographic/cities")
-async def get_city_performance(
+@app.get("/api/v1/analytics/geographic/category-by-province")
+async def get_category_by_province(
     time_filter: str = Query("30days"),
-    limit: int = Query(10)
+    order_source: str = Query("all", description="Filter by order source: all, oe, pos"),
+    limit: int = Query(50, description="Maximum results to return")
 ):
-    """Get city-level performance with proper province mapping"""
+    """
+    Get category performance breakdown by province.
+    Shows which categories sell best in each region, with OE/POS comparison.
+    Perfect for answering: "Which category sells most in which region?"
+    """
     conn = None
     try:
         conn = psycopg2.connect(**get_pg_connection_params())
@@ -1829,9 +1872,12 @@ async def get_city_performance(
         
         where_clause, params = get_time_filter_clause(time_filter)
         
+        # Add order source filter
+        order_source_clause, order_source_params = get_order_source_filter(order_source, "o")
+        params = list(params) + list(order_source_params)
+        
         cursor.execute(f"""
             SELECT 
-                o.customer_city as city,
                 CASE 
                     WHEN UPPER(o.province) IN ('ISLAMABAD', 'ISLAMABAD CAPITAL TERRITORY', 'ISLAMABAD CAPITAL', 'ICT') THEN 'Islamabad'
                     WHEN UPPER(REPLACE(o.province, '.', '')) IN ('KPK', 'NWFP', 'KHYBER PAKHTUNKHWA') THEN 'Khyber Pakhtunkhwa'
@@ -1840,23 +1886,163 @@ async def get_city_performance(
                     WHEN UPPER(o.province) IN ('BALOCHISTAN', 'BALUCHISTAN') THEN 'Balochistan'
                     WHEN UPPER(o.province) IN ('GILGIT-BALTISTAN', 'GB') THEN 'Gilgit-Baltistan'
                     WHEN UPPER(o.province) IN ('AZAD KASHMIR', 'AJK', 'AZAD JAMMU AND KASHMIR') THEN 'Azad Kashmir'
-                    ELSE o.province
+                    ELSE INITCAP(COALESCE(o.province, 'Unknown'))
                 END as province,
+                CASE 
+                    WHEN UPPER(oi.product_name) LIKE '%FOAM%' THEN 'Foam'
+                    WHEN UPPER(oi.product_name) LIKE '%PILLOW%' THEN 'Pillows'
+                    WHEN UPPER(oi.product_name) LIKE '%CELESTE%' THEN 'Celeste'
+                    WHEN UPPER(oi.product_name) LIKE '%MOLTY%' AND UPPER(oi.product_name) NOT LIKE '%FOAM%' THEN 'Molty'
+                    WHEN UPPER(oi.product_name) LIKE '%BED%' THEN 'Beds'
+                    WHEN UPPER(oi.product_name) LIKE '%SOFA%' THEN 'Sofas'
+                    WHEN UPPER(oi.product_name) LIKE '%SPRING%' THEN 'Spring Mattresses'
+                    WHEN UPPER(oi.product_name) LIKE '%MATTRESS%' THEN 'Mattresses'
+                    ELSE 'Other'
+                END as category,
+                UPPER(o.order_type) as order_type,
                 COUNT(DISTINCT o.id) as total_orders,
-                COUNT(DISTINCT o.unified_customer_id) as total_customers,
-                SUM(o.total_price) as total_revenue
+                SUM(oi.quantity) as total_items,
+                SUM(oi.total_price) as total_revenue,
+                COUNT(DISTINCT o.unified_customer_id) as unique_customers
             FROM orders o
+            JOIN order_items oi ON o.id = oi.order_id
             {where_clause}
-                AND o.customer_city IS NOT NULL 
-                AND TRIM(o.customer_city) != ''
                 AND o.province IS NOT NULL
                 AND TRIM(o.province) != ''
-                AND UPPER(TRIM(o.province)) NOT IN ('UNKNOWN', 'N/A', 'NA', 'NULL', 'NONE', '')
-            GROUP BY o.customer_city, province
-            ORDER BY total_revenue DESC
+                AND UPPER(TRIM(o.province)) NOT IN ('UNKNOWN', 'N/A', 'NA', 'NULL', 'NONE')
+                {order_source_clause}
+            GROUP BY 1, 2, 3
+            ORDER BY province, total_revenue DESC
             LIMIT %s
-        """, params + (limit,))
+        """, tuple(params) + (limit,))
         
+        results = cursor.fetchall()
+        
+        # Transform to more useful format - group by province
+        province_data = {}
+        for r in results:
+            province = r['province']
+            if province not in province_data:
+                province_data[province] = {
+                    "province": province,
+                    "region": get_region_for_province(province),
+                    "categories": [],
+                    "total_revenue": 0,
+                    "total_orders": 0
+                }
+            
+            province_data[province]["categories"].append({
+                "category": r['category'],
+                "order_type": r['order_type'] or 'ALL',
+                "total_orders": r['total_orders'],
+                "total_items": r['total_items'] or 0,
+                "total_revenue": float(r['total_revenue'] or 0),
+                "unique_customers": r['unique_customers']
+            })
+            province_data[province]["total_revenue"] += float(r['total_revenue'] or 0)
+            province_data[province]["total_orders"] += r['total_orders']
+        
+        # Sort provinces by total revenue
+        sorted_provinces = sorted(province_data.values(), key=lambda x: x['total_revenue'], reverse=True)
+        
+        return sorted_provinces
+        
+    except Exception as e:
+        logger.error(f"Category by province error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            conn.close()
+
+@app.get("/api/v1/analytics/geographic/cities")
+async def get_city_performance(
+    time_filter: str = Query("30days"),
+    order_source: str = Query("all", description="Filter by order source: all, oe, pos"),
+    category: str = Query(None, description="Filter by product category"),
+    limit: int = Query(10)
+):
+    """Get city-level performance with proper province mapping, optional OE/POS and category filters"""
+    conn = None
+    try:
+        conn = psycopg2.connect(**get_pg_connection_params())
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        where_clause, params = get_time_filter_clause(time_filter)
+        
+        # Add order source filter
+        order_source_clause, order_source_params = get_order_source_filter(order_source, "o")
+        params = list(params) + list(order_source_params)
+        
+        # Determine if we need to join order_items for category filtering
+        needs_items_join = category and category.strip()
+        
+        # Build category filter
+        category_filter = ""
+        if needs_items_join:
+            category_filter = get_category_filter_sql(category)
+        
+        if needs_items_join:
+            query = f"""
+                SELECT 
+                    o.customer_city as city,
+                    CASE 
+                        WHEN UPPER(o.province) IN ('ISLAMABAD', 'ISLAMABAD CAPITAL TERRITORY', 'ISLAMABAD CAPITAL', 'ICT') THEN 'Islamabad'
+                        WHEN UPPER(REPLACE(o.province, '.', '')) IN ('KPK', 'NWFP', 'KHYBER PAKHTUNKHWA') THEN 'Khyber Pakhtunkhwa'
+                        WHEN UPPER(o.province) = 'PUNJAB' THEN 'Punjab'
+                        WHEN UPPER(o.province) = 'SINDH' THEN 'Sindh'
+                        WHEN UPPER(o.province) IN ('BALOCHISTAN', 'BALUCHISTAN') THEN 'Balochistan'
+                        WHEN UPPER(o.province) IN ('GILGIT-BALTISTAN', 'GB') THEN 'Gilgit-Baltistan'
+                        WHEN UPPER(o.province) IN ('AZAD KASHMIR', 'AJK', 'AZAD JAMMU AND KASHMIR') THEN 'Azad Kashmir'
+                        ELSE o.province
+                    END as province,
+                    COUNT(DISTINCT o.id) as total_orders,
+                    COUNT(DISTINCT o.unified_customer_id) as total_customers,
+                    SUM(oi.total_price) as total_revenue
+                FROM orders o
+                JOIN order_items oi ON o.id = oi.order_id
+                {where_clause}
+                    AND o.customer_city IS NOT NULL 
+                    AND TRIM(o.customer_city) != ''
+                    AND o.province IS NOT NULL
+                    AND TRIM(o.province) != ''
+                    AND UPPER(TRIM(o.province)) NOT IN ('UNKNOWN', 'N/A', 'NA', 'NULL', 'NONE', '')
+                    {order_source_clause}
+                    {category_filter}
+                GROUP BY o.customer_city, province
+                ORDER BY total_revenue DESC
+                LIMIT %s
+            """
+        else:
+            query = f"""
+                SELECT 
+                    o.customer_city as city,
+                    CASE 
+                        WHEN UPPER(o.province) IN ('ISLAMABAD', 'ISLAMABAD CAPITAL TERRITORY', 'ISLAMABAD CAPITAL', 'ICT') THEN 'Islamabad'
+                        WHEN UPPER(REPLACE(o.province, '.', '')) IN ('KPK', 'NWFP', 'KHYBER PAKHTUNKHWA') THEN 'Khyber Pakhtunkhwa'
+                        WHEN UPPER(o.province) = 'PUNJAB' THEN 'Punjab'
+                        WHEN UPPER(o.province) = 'SINDH' THEN 'Sindh'
+                        WHEN UPPER(o.province) IN ('BALOCHISTAN', 'BALUCHISTAN') THEN 'Balochistan'
+                        WHEN UPPER(o.province) IN ('GILGIT-BALTISTAN', 'GB') THEN 'Gilgit-Baltistan'
+                        WHEN UPPER(o.province) IN ('AZAD KASHMIR', 'AJK', 'AZAD JAMMU AND KASHMIR') THEN 'Azad Kashmir'
+                        ELSE o.province
+                    END as province,
+                    COUNT(DISTINCT o.id) as total_orders,
+                    COUNT(DISTINCT o.unified_customer_id) as total_customers,
+                    SUM(o.total_price) as total_revenue
+                FROM orders o
+                {where_clause}
+                    AND o.customer_city IS NOT NULL 
+                    AND TRIM(o.customer_city) != ''
+                    AND o.province IS NOT NULL
+                    AND TRIM(o.province) != ''
+                    AND UPPER(TRIM(o.province)) NOT IN ('UNKNOWN', 'N/A', 'NA', 'NULL', 'NONE', '')
+                    {order_source_clause}
+                GROUP BY o.customer_city, province
+                ORDER BY total_revenue DESC
+                LIMIT %s
+            """
+        
+        cursor.execute(query, tuple(params) + (limit,))
         results = cursor.fetchall()
         
         return [{

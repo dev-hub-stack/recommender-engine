@@ -5613,6 +5613,400 @@ async def export_dashboard_csv(
                     row.append(order.get('status', 'N/A') or 'N/A')
                 writer.writerow(row)
         
+        # =========================================
+        # SECTION 4: Customer Profiling
+        # =========================================
+        if "customer_profiling" in section_list:
+            writer.writerow([])
+            writer.writerow([])
+            writer.writerow(["CUSTOMER PROFILING"])
+            writer.writerow(["=" * 50])
+            writer.writerow(["Generated:", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+            writer.writerow(["Time Period:", time_filter])
+            writer.writerow([])
+            writer.writerow(["Customer ID", "Customer Name", "City", "Segment", "Total Orders", 
+                           "Unique Products", "Total Spent (PKR)", "Avg Order Value (PKR)", 
+                           "First Order Date", "Last Order Date"])
+            
+            cursor.execute("""
+                SELECT 
+                    customer_id,
+                    customer_name,
+                    customer_city,
+                    customer_segment,
+                    total_orders,
+                    unique_products,
+                    total_spent,
+                    avg_order_value,
+                    first_order_date,
+                    last_order_date
+                FROM customer_statistics
+                ORDER BY total_spent DESC
+                LIMIT 1000
+            """)
+            customers = cursor.fetchall()
+            
+            for cust in customers:
+                writer.writerow([
+                    cust['customer_id'] or 'N/A',
+                    cust['customer_name'] or 'N/A',
+                    cust['customer_city'] or 'N/A',
+                    cust['customer_segment'] or 'N/A',
+                    cust['total_orders'] or 0,
+                    cust['unique_products'] or 0,
+                    f"{float(cust['total_spent'] or 0):,.2f}",
+                    f"{float(cust['avg_order_value'] or 0):,.2f}",
+                    cust['first_order_date'].strftime('%Y-%m-%d') if cust['first_order_date'] else 'N/A',
+                    cust['last_order_date'].strftime('%Y-%m-%d') if cust['last_order_date'] else 'N/A'
+                ])
+        
+        # =========================================
+        # SECTION 5: RFM Segmentation
+        # =========================================
+        if "rfm_segmentation" in section_list:
+            writer.writerow([])
+            writer.writerow([])
+            writer.writerow(["RFM SEGMENTATION ANALYSIS"])
+            writer.writerow(["=" * 50])
+            writer.writerow(["Generated:", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+            writer.writerow([])
+            
+            # Segment Summary
+            writer.writerow(["SEGMENT SUMMARY"])
+            writer.writerow(["Segment", "Customer Count", "Total Revenue (PKR)", "Avg Order Value (PKR)", "Avg Orders/Customer"])
+            
+            cursor.execute("""
+                SELECT 
+                    customer_segment as segment,
+                    COUNT(*) as customer_count,
+                    SUM(total_spent) as total_revenue,
+                    AVG(avg_order_value) as avg_order_value,
+                    AVG(total_orders) as avg_orders
+                FROM customer_statistics
+                WHERE customer_segment IS NOT NULL
+                GROUP BY customer_segment
+                ORDER BY total_revenue DESC
+            """)
+            segments = cursor.fetchall()
+            
+            for seg in segments:
+                writer.writerow([
+                    seg['segment'],
+                    seg['customer_count'],
+                    f"{float(seg['total_revenue'] or 0):,.2f}",
+                    f"{float(seg['avg_order_value'] or 0):,.2f}",
+                    f"{float(seg['avg_orders'] or 0):.1f}"
+                ])
+            
+            # Detailed customer list by segment
+            writer.writerow([])
+            writer.writerow(["CUSTOMERS BY SEGMENT (Top 500)"])
+            writer.writerow(["Customer ID", "Customer Name", "City", "Segment", "Total Orders", 
+                           "Total Spent (PKR)", "Last Order Date", "Days Since Last Order"])
+            
+            cursor.execute("""
+                SELECT 
+                    customer_id,
+                    customer_name,
+                    customer_city,
+                    customer_segment,
+                    total_orders,
+                    total_spent,
+                    last_order_date,
+                    EXTRACT(DAY FROM NOW() - last_order_date) as days_since
+                FROM customer_statistics
+                WHERE customer_segment IS NOT NULL
+                ORDER BY customer_segment, total_spent DESC
+                LIMIT 500
+            """)
+            customers = cursor.fetchall()
+            
+            for cust in customers:
+                writer.writerow([
+                    cust['customer_id'] or 'N/A',
+                    cust['customer_name'] or 'N/A',
+                    cust['customer_city'] or 'N/A',
+                    cust['customer_segment'] or 'N/A',
+                    cust['total_orders'] or 0,
+                    f"{float(cust['total_spent'] or 0):,.2f}",
+                    cust['last_order_date'].strftime('%Y-%m-%d') if cust['last_order_date'] else 'N/A',
+                    int(cust['days_since']) if cust['days_since'] else 'N/A'
+                ])
+        
+        # =========================================
+        # SECTION 6: Geographic Intelligence
+        # =========================================
+        if "geographic_intelligence" in section_list:
+            writer.writerow([])
+            writer.writerow([])
+            writer.writerow(["GEOGRAPHIC INTELLIGENCE"])
+            writer.writerow(["=" * 50])
+            writer.writerow(["Generated:", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+            writer.writerow(["Time Period:", time_filter])
+            writer.writerow([])
+            
+            # Province Summary
+            writer.writerow(["PROVINCE PERFORMANCE"])
+            writer.writerow(["Province", "Total Orders", "Unique Customers", "Total Revenue (PKR)", "Avg Order Value (PKR)"])
+            
+            query = f"""
+                SELECT 
+                    COALESCE(province, 'Unknown') as province,
+                    COUNT(*) as total_orders,
+                    COUNT(DISTINCT unified_customer_id) as unique_customers,
+                    SUM(total_price) as total_revenue,
+                    AVG(total_price) as avg_order_value
+                FROM orders o
+                {where_clause}
+                {order_source_filter}
+                {delivered_filter}
+                GROUP BY province
+                ORDER BY total_revenue DESC
+            """
+            cursor.execute(query, time_params if time_params else None)
+            provinces = cursor.fetchall()
+            
+            for prov in provinces:
+                writer.writerow([
+                    prov['province'] or 'Unknown',
+                    prov['total_orders'],
+                    prov['unique_customers'],
+                    f"{float(prov['total_revenue'] or 0):,.2f}",
+                    f"{float(prov['avg_order_value'] or 0):,.2f}"
+                ])
+            
+            # City Summary
+            writer.writerow([])
+            writer.writerow(["TOP CITIES"])
+            writer.writerow(["City", "Province", "Total Orders", "Unique Customers", "Total Revenue (PKR)"])
+            
+            query = f"""
+                SELECT 
+                    COALESCE(customer_city, 'Unknown') as city,
+                    COALESCE(province, 'Unknown') as province,
+                    COUNT(*) as total_orders,
+                    COUNT(DISTINCT unified_customer_id) as unique_customers,
+                    SUM(total_price) as total_revenue
+                FROM orders o
+                {where_clause}
+                {order_source_filter}
+                {delivered_filter}
+                GROUP BY customer_city, province
+                ORDER BY total_revenue DESC
+                LIMIT 100
+            """
+            cursor.execute(query, time_params if time_params else None)
+            cities = cursor.fetchall()
+            
+            for city in cities:
+                writer.writerow([
+                    city['city'] or 'Unknown',
+                    city['province'] or 'Unknown',
+                    city['total_orders'],
+                    city['unique_customers'],
+                    f"{float(city['total_revenue'] or 0):,.2f}"
+                ])
+        
+        # =========================================
+        # SECTION 7: Collaborative Filtering / Product Insights
+        # =========================================
+        if "collaborative_filtering" in section_list or "product_insights" in section_list:
+            writer.writerow([])
+            writer.writerow([])
+            writer.writerow(["COLLABORATIVE FILTERING - PRODUCT INSIGHTS"])
+            writer.writerow(["=" * 50])
+            writer.writerow(["Generated:", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+            writer.writerow([])
+            
+            # Product Statistics
+            writer.writerow(["PRODUCT PERFORMANCE"])
+            writer.writerow(["Product ID", "Product Name", "Order Count", "Total Quantity", "Total Revenue (PKR)", "Unique Customers"])
+            
+            query = f"""
+                SELECT 
+                    oi.product_id,
+                    oi.product_name,
+                    COUNT(DISTINCT oi.order_id) as order_count,
+                    SUM(oi.quantity) as total_quantity,
+                    SUM(oi.unit_price * oi.quantity) as total_revenue,
+                    COUNT(DISTINCT o.unified_customer_id) as unique_customers
+                FROM order_items oi
+                JOIN orders o ON oi.order_id = o.id
+                {where_clause}
+                {category_filter_sql}
+                {order_source_filter}
+                GROUP BY oi.product_id, oi.product_name
+                ORDER BY order_count DESC
+                LIMIT 200
+            """
+            cursor.execute(query, time_params if time_params else None)
+            products = cursor.fetchall()
+            
+            for prod in products:
+                writer.writerow([
+                    prod['product_id'] or 'N/A',
+                    prod['product_name'] or 'N/A',
+                    prod['order_count'],
+                    prod['total_quantity'] or 0,
+                    f"{float(prod['total_revenue'] or 0):,.2f}",
+                    prod['unique_customers']
+                ])
+            
+            # Similar Items
+            writer.writerow([])
+            writer.writerow(["PRODUCT SIMILARITY (Top Similar Items)"])
+            writer.writerow(["Product ID", "Similar Product ID", "Similar Product Name", "Similarity Score"])
+            
+            cursor.execute("""
+                SELECT product_id, similar_products
+                FROM offline_similar_items
+                LIMIT 100
+            """)
+            similar_items = cursor.fetchall()
+            
+            for item in similar_items:
+                if item['similar_products']:
+                    sims = item['similar_products']
+                    if isinstance(sims, str):
+                        import json
+                        sims = json.loads(sims)
+                    for sim in sims[:3]:  # Top 3 similar per product
+                        writer.writerow([
+                            item['product_id'],
+                            sim.get('item_id', 'N/A'),
+                            sim.get('item_name', 'N/A'),
+                            f"{sim.get('score', 0):.4f}"
+                        ])
+        
+        # =========================================
+        # SECTION 8: Cross-Selling
+        # =========================================
+        if "cross_selling" in section_list or "cross-selling" in section_list:
+            writer.writerow([])
+            writer.writerow([])
+            writer.writerow(["CROSS-SELLING OPPORTUNITIES"])
+            writer.writerow(["=" * 50])
+            writer.writerow(["Generated:", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+            writer.writerow([])
+            writer.writerow(["FREQUENTLY BOUGHT TOGETHER"])
+            writer.writerow(["Product 1 ID", "Product 2 ID", "Co-Purchase Count", "Confidence Score"])
+            
+            cursor.execute("""
+                SELECT 
+                    product_1,
+                    product_2,
+                    co_purchase_count,
+                    confidence
+                FROM product_pairs
+                ORDER BY co_purchase_count DESC
+                LIMIT 500
+            """)
+            pairs = cursor.fetchall()
+            
+            for pair in pairs:
+                writer.writerow([
+                    pair['product_1'],
+                    pair['product_2'],
+                    pair['co_purchase_count'],
+                    f"{float(pair['confidence'] or 0):.4f}"
+                ])
+            
+            # Add product names if we can join
+            writer.writerow([])
+            writer.writerow(["TOP CROSS-SELL PAIRS WITH DETAILS"])
+            writer.writerow(["Product 1 Name", "Product 2 Name", "Co-Purchases", "Confidence"])
+            
+            cursor.execute("""
+                SELECT DISTINCT ON (pp.product_1, pp.product_2)
+                    oi1.product_name as product_1_name,
+                    oi2.product_name as product_2_name,
+                    pp.co_purchase_count,
+                    pp.confidence
+                FROM product_pairs pp
+                LEFT JOIN order_items oi1 ON pp.product_1 = oi1.product_id
+                LEFT JOIN order_items oi2 ON pp.product_2 = oi2.product_id
+                WHERE oi1.product_name IS NOT NULL AND oi2.product_name IS NOT NULL
+                ORDER BY pp.product_1, pp.product_2, pp.co_purchase_count DESC
+                LIMIT 200
+            """)
+            detailed_pairs = cursor.fetchall()
+            
+            for pair in detailed_pairs:
+                writer.writerow([
+                    pair['product_1_name'] or 'N/A',
+                    pair['product_2_name'] or 'N/A',
+                    pair['co_purchase_count'],
+                    f"{float(pair['confidence'] or 0):.4f}"
+                ])
+        
+        # =========================================
+        # SECTION 9: ML Recommendations
+        # =========================================
+        if "ml_recommendations" in section_list:
+            writer.writerow([])
+            writer.writerow([])
+            writer.writerow(["ML RECOMMENDATIONS"])
+            writer.writerow(["=" * 50])
+            writer.writerow(["Generated:", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+            writer.writerow([])
+            
+            # User recommendations summary
+            writer.writerow(["USER RECOMMENDATIONS SUMMARY"])
+            writer.writerow(["Total Users with Recommendations:", ""])
+            
+            cursor.execute("SELECT COUNT(*) FROM offline_user_recommendations")
+            user_count = cursor.fetchone()
+            writer.writerow(["", user_count[0] if user_count else 0])
+            
+            writer.writerow([])
+            writer.writerow(["SAMPLE USER RECOMMENDATIONS (Top 100 Users)"])
+            writer.writerow(["User ID", "Recommendation 1", "Recommendation 2", "Recommendation 3"])
+            
+            cursor.execute("""
+                SELECT user_id, recommendations
+                FROM offline_user_recommendations
+                LIMIT 100
+            """)
+            user_recs = cursor.fetchall()
+            
+            for urec in user_recs:
+                recs = urec['recommendations'] or []
+                if isinstance(recs, str):
+                    import json
+                    recs = json.loads(recs)
+                rec_names = [r.get('item_name', r.get('item_id', 'N/A')) for r in recs[:3]]
+                while len(rec_names) < 3:
+                    rec_names.append('N/A')
+                writer.writerow([urec['user_id']] + rec_names)
+            
+            # Popular products (ML basis)
+            writer.writerow([])
+            writer.writerow(["POPULAR PRODUCTS (ML Training Basis)"])
+            writer.writerow(["Product ID", "Product Name", "Purchase Count", "Unique Buyers"])
+            
+            cursor.execute("""
+                SELECT 
+                    oi.product_id,
+                    oi.product_name,
+                    COUNT(*) as purchase_count,
+                    COUNT(DISTINCT o.unified_customer_id) as unique_buyers
+                FROM order_items oi
+                JOIN orders o ON oi.order_id = o.id
+                WHERE o.order_date >= NOW() - INTERVAL '90 days'
+                GROUP BY oi.product_id, oi.product_name
+                ORDER BY purchase_count DESC
+                LIMIT 100
+            """)
+            popular = cursor.fetchall()
+            
+            for prod in popular:
+                writer.writerow([
+                    prod['product_id'] or 'N/A',
+                    prod['product_name'] or 'N/A',
+                    prod['purchase_count'],
+                    prod['unique_buyers']
+                ])
+        
         # Close cursor
         cursor.close()
         

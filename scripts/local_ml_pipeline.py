@@ -195,6 +195,23 @@ def fetch_from_master_apis(days: int = 7) -> Dict:
     return results
 
 
+CITY_PROVINCE_MAP = {
+    'Punjab': ['Lahore', 'Rawalpindi', 'Faisalabad', 'Multan', 'Gujranwala', 'Sialkot', 'Bahawalpur', 'Sargodha'],
+    'Sindh': ['Karachi', 'Hyderabad', 'Sukkur', 'Larkana', 'Mirpur'],
+    'Islamabad': ['Islamabad'],
+    'Khyber Pakhtunkhwa': ['Peshawar', 'Mardan', 'Abbottabad', 'Swat'],
+    'Balochistan': ['Quetta']
+}
+
+def get_province_from_city(city):
+    if not city: return None
+    for prov, cities in CITY_PROVINCE_MAP.items():
+        for c in cities:
+            if c.lower() in city.lower():
+                return prov
+    return None
+
+
 def insert_orders_to_db(orders: List[Dict], source: str):
     """Insert orders into PostgreSQL (upsert)"""
     conn = get_db_connection()
@@ -208,6 +225,7 @@ def insert_orders_to_db(orders: List[Dict], source: str):
             customer_id = order.get('customer_id') or order.get('customer_phone') or order.get('phone')
             customer_name = order.get('customer_name') or order.get('name', '')
             customer_city = order.get('customer_city') or order.get('city', '')
+            customer_province = order.get('customer_province') or order.get('province') or get_province_from_city(customer_city)
             customer_phone = order.get('customer_phone') or order.get('phone', '')
             order_date = order.get('order_date') or order.get('date')
             total = order.get('total') or order.get('total_price', 0)
@@ -230,14 +248,15 @@ def insert_orders_to_db(orders: List[Dict], source: str):
             
             # Upsert order with all fields
             cursor.execute("""
-                INSERT INTO orders (id, unified_customer_id, customer_name, customer_phone, customer_city, 
+                INSERT INTO orders (id, unified_customer_id, customer_name, customer_phone, customer_city, province,
                                    order_date, total_price, order_status, brand_name, payment_mode, order_type, source_type)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (id) DO UPDATE SET
                     unified_customer_id = EXCLUDED.unified_customer_id,
                     customer_name = EXCLUDED.customer_name,
                     customer_phone = EXCLUDED.customer_phone,
                     customer_city = EXCLUDED.customer_city,
+                    province = EXCLUDED.province,
                     total_price = EXCLUDED.total_price,
                     order_status = EXCLUDED.order_status,
                     brand_name = EXCLUDED.brand_name,
@@ -245,7 +264,7 @@ def insert_orders_to_db(orders: List[Dict], source: str):
                     order_type = EXCLUDED.order_type,
                     source_type = EXCLUDED.source_type,
                     updated_at = NOW()
-            """, (str(order_id), unified_id, customer_name, customer_phone, customer_city,
+            """, (str(order_id), unified_id, customer_name, customer_phone, customer_city, customer_province,
                   order_date, total, order_status, brand_name, payment_mode, source, source))
             
             inserted_count += 1

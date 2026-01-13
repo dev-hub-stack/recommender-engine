@@ -5159,7 +5159,10 @@ async def get_personalize_status():
 
 
 @app.get("/api/v1/locations/provinces")
-async def get_provinces():
+async def get_provinces(
+    order_source: str = Query("all", description="Filter by order source: all, oe, pos"),
+    category: str = Query(None, description="Filter by product category")
+):
     """Get list of all provinces with order counts."""
     try:
         if not pg_pool:
@@ -5168,37 +5171,44 @@ async def get_provinces():
         conn = pg_pool.getconn()
         try:
             cursor = conn.cursor(cursor_factory=RealDictCursor)
-            cursor.execute("""
+            
+            # Filters
+            order_source_clause, order_source_params = get_order_source_filter(order_source, "o")
+            params = list(order_source_params)
+            
+            needs_items_join = category and category.strip()
+            category_filter = ""
+            if needs_items_join:
+                category_filter = get_category_filter_sql(category)
+            
+            # Build Query
+            table_clause = "orders o"
+            if needs_items_join:
+                table_clause += " JOIN order_items oi ON o.id = oi.order_id"
+                
+            query = f"""
                 SELECT 
                     CASE 
-                        WHEN UPPER(province) IN ('ISLAMABAD', 'ISLAMABAD CAPITAL TERRITORY', 'ISLAMABAD CAPITAL', 'ICT') THEN 'Islamabad'
-                        WHEN UPPER(REPLACE(province, '.', '')) IN ('KPK', 'NWFP', 'KHYBER PAKHTUNKHWA') THEN 'Khyber Pakhtunkhwa'
-                        WHEN UPPER(province) = 'PUNJAB' THEN 'Punjab'
-                        WHEN UPPER(province) = 'SINDH' THEN 'Sindh'
-                        WHEN UPPER(province) IN ('BALOCHISTAN', 'BALUCHISTAN') THEN 'Balochistan'
-                        WHEN UPPER(province) IN ('GILGIT-BALTISTAN', 'GB') THEN 'Gilgit-Baltistan'
-                        WHEN UPPER(province) IN ('AZAD KASHMIR', 'AJK', 'AZAD JAMMU AND KASHMIR') THEN 'Azad Kashmir'
-                        ELSE INITCAP(TRIM(province))
+                        WHEN UPPER(o.province) IN ('ISLAMABAD', 'ISLAMABAD CAPITAL TERRITORY', 'ISLAMABAD CAPITAL', 'ICT') THEN 'Islamabad'
+                        WHEN UPPER(REPLACE(o.province, '.', '')) IN ('KPK', 'NWFP', 'KHYBER PAKHTUNKHWA') THEN 'Khyber Pakhtunkhwa'
+                        WHEN UPPER(o.province) = 'PUNJAB' THEN 'Punjab'
+                        WHEN UPPER(o.province) = 'SINDH' THEN 'Sindh'
+                        WHEN UPPER(o.province) IN ('BALOCHISTAN', 'BALUCHISTAN') THEN 'Balochistan'
+                        WHEN UPPER(o.province) IN ('GILGIT-BALTISTAN', 'GB') THEN 'Gilgit-Baltistan'
+                        WHEN UPPER(o.province) IN ('AZAD KASHMIR', 'AJK', 'AZAD JAMMU AND KASHMIR') THEN 'Azad Kashmir'
+                        ELSE INITCAP(COALESCE(o.province, 'Unknown'))
                     END as province,
-                    COUNT(DISTINCT id) as order_count,
-                    COUNT(DISTINCT unified_customer_id) as customer_count
-                FROM orders
-                WHERE province IS NOT NULL 
-                    AND TRIM(province) != '' 
-                    AND UPPER(TRIM(province)) NOT IN ('UNKNOWN', 'N/A', 'NA', 'NULL', 'NONE')
-                GROUP BY 
-                    CASE 
-                        WHEN UPPER(province) IN ('ISLAMABAD', 'ISLAMABAD CAPITAL TERRITORY', 'ISLAMABAD CAPITAL', 'ICT') THEN 'Islamabad'
-                        WHEN UPPER(REPLACE(province, '.', '')) IN ('KPK', 'NWFP', 'KHYBER PAKHTUNKHWA') THEN 'Khyber Pakhtunkhwa'
-                        WHEN UPPER(province) = 'PUNJAB' THEN 'Punjab'
-                        WHEN UPPER(province) = 'SINDH' THEN 'Sindh'
-                        WHEN UPPER(province) IN ('BALOCHISTAN', 'BALUCHISTAN') THEN 'Balochistan'
-                        WHEN UPPER(province) IN ('GILGIT-BALTISTAN', 'GB') THEN 'Gilgit-Baltistan'
-                        WHEN UPPER(province) IN ('AZAD KASHMIR', 'AJK', 'AZAD JAMMU AND KASHMIR') THEN 'Azad Kashmir'
-                        ELSE INITCAP(TRIM(province))
-                    END
+                    COUNT(DISTINCT o.id) as order_count,
+                    COUNT(DISTINCT o.unified_customer_id) as customer_count
+                FROM {table_clause}
+                WHERE 1=1
+                    {order_source_clause}
+                    {category_filter}
+                GROUP BY 1
                 ORDER BY order_count DESC
-            """)
+            """
+            
+            cursor.execute(query, tuple(params))
             provinces = cursor.fetchall()
             cursor.close()
             return {"provinces": provinces}

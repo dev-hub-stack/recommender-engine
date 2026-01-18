@@ -5894,9 +5894,6 @@ async def get_shopify_popular_products(
             """
             params.append(limit)
             
-            logger.info(f"Executing popular query with params: {params}")
-            # logger.info(f"Query: {query}")
-            
             cursor.execute(query, params)
             results = cursor.fetchall()
             cursor.close()

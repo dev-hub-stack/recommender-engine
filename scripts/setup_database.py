@@ -205,7 +205,8 @@ def verify_setup(conn):
         'product_pairs', 'product_statistics', 'customer_statistics',
         'recommendation_cache', 'sync_metadata',
         'offline_user_recommendations', 'offline_similar_items',
-        'offline_item_affinity', 'city_province_mapping'
+        'offline_item_affinity', 'city_province_mapping',
+        'shopify_product_mapping', 'shopify_customer_mapping'
     ]
     
     print("\n📋 Table Status:")

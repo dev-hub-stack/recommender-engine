@@ -189,7 +189,7 @@
 
 <!-- MasterGroup AI Cart Recommendations - START -->
 <div class="mg-recommendations-wrapper" style="margin: 40px auto; padding: 30px; background: linear-gradient(135deg, #fff8f0 0%, #ffe9c0 100%); border-radius: 12px; max-width: 1200px;">
-  <h3 style="margin-bottom: 20px; font-size: 1.4rem; font-weight: bold; color: #ed1c24; text-align: center;">Complete Your Sleep Set (AI Picks)</h3>
+  <h3 style="margin-bottom: 20px; font-size: 1.4rem; font-weight: bold; color: #ed1c24; text-align: center;">Complete Your Order</h3>
   <div id="mg-cart-recs" style="display: flex; gap: 20px; flex-wrap: wrap; justify-content: center;"></div>
 </div>
 
@@ -200,30 +200,109 @@
   
   container.innerHTML = '<p style="color: #666; text-align: center;">Finding perfect matches...</p>';
   
-  var apiBase = 'https://master-dashabord.netlify.app/api/v1/shopify';
+  // MasterGroup Recommendation API - Production Server  
+  var API_BASE = 'http://3.209.80.206:8001/api/v1/shopify';
+  
+  // Get cart item IDs
+  var cartItems = [
+    {% for item in cart.items %}'{{ item.product.id }}'{% unless forloop.last %},{% endunless %}{% endfor %}
+  ];
+  
+  // Customer data for personalized recommendations
+  var customerData = {
+    phone: '{{ customer.phone | default: "" }}',
+    email: '{{ customer.email | default: "" }}',
+    city: '{{ customer.default_address.city | default: "" }}',
+    province: '{{ customer.default_address.province | default: "" }}'
+  };
   
   function renderProducts(products) {
-    container.innerHTML = products.map(function(item) {
+    if (!products || products.length === 0) {
+      container.parentElement.style.display = 'none';
+      return;
+    }
+    container.innerHTML = products.slice(0, 4).map(function(item) {
       var name = item.item_name || item.product_name || 'Product';
       var score = item.score || 0;
-      return '<div style="flex: 1 1 220px; max-width: 260px; padding: 20px; background: white; border: 1px solid #e0e0e0; border-radius: 10px; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.08);">' +
-        '<div style="font-weight: 600; font-size: 0.95rem; margin-bottom: 10px; color: #333; line-height: 1.4;">' + name + '</div>' +
-        '<div style="color: #ed1c24; font-size: 0.85rem; font-weight: 500;">' + 
-          (score <= 1 && score > 0 ? 'AI Match: ' + Math.round(score * 100) + '%' : '🔥 Trending') + 
-        '</div>' +
+      var scoreLabel = score <= 1 && score > 0 ? 'AI Match: ' + Math.round(score * 100) + '%' : '🔥 Popular';
+      var imageUrl = item.image_url || '';
+      var handle = item.shopify_handle || '';
+      var productLink = handle ? '/products/' + handle : '#';
+      
+      // Build product card with image
+      var imageHtml = imageUrl 
+        ? '<a href="' + productLink + '"><img src="' + imageUrl + '" alt="' + name + '" style="width: 100%; height: 150px; object-fit: contain; margin-bottom: 12px; border-radius: 6px;"></a>'
+        : '<div style="width: 100%; height: 150px; background: #f5f5f5; border-radius: 6px; margin-bottom: 12px; display: flex; align-items: center; justify-content: center; color: #999; font-size: 0.8rem;">No image</div>';
+      
+      return '<div style="flex: 1 1 220px; max-width: 260px; padding: 15px; background: white; border: 1px solid #e0e0e0; border-radius: 10px; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.08); transition: transform 0.2s, box-shadow 0.2s; cursor: pointer;" onmouseover="this.style.transform=\'translateY(-3px)\';this.style.boxShadow=\'0 4px 15px rgba(0,0,0,0.12)\';" onmouseout="this.style.transform=\'none\';this.style.boxShadow=\'0 2px 8px rgba(0,0,0,0.08)\';" onclick="if(\'' + productLink + '\' !== \'#\') window.location.href=\'' + productLink + '\';">' +
+        imageHtml +
+        '<a href="' + productLink + '" style="text-decoration: none; color: inherit;"><div style="font-weight: 600; font-size: 0.95rem; margin-bottom: 8px; color: #333; line-height: 1.4; min-height: 45px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;">' + name + '</div></a>' +
+        '<div style="color: #ed1c24; font-size: 0.85rem; font-weight: 500;">' + scoreLabel + '</div>' +
       '</div>';
     }).join('');
   }
   
-  // Use popular products (Shopify IDs don't match internal IDs)
-  fetch(apiBase + '/popular?limit=4')
-    .then(function(res) { return res.json(); })
-    .then(function(data) {
-      if (data.success && data.popular_products && data.popular_products.length > 0) {
-        renderProducts(data.popular_products);
-      } else { container.parentElement.style.display = 'none'; }
-    })
-    .catch(function(err) { container.parentElement.style.display = 'none'; });
+  // Try to get recommendations based on cart items
+  if (cartItems.length > 0) {
+    // Use first cart item for similar products
+    fetch(API_BASE + '/similar/' + cartItems[0] + '?limit=4')
+      .then(function(res) { return res.json(); })
+      .then(function(data) {
+        if (data.success && data.similar_products && data.similar_products.length > 0) {
+          renderProducts(data.similar_products);
+        } else {
+          // Fallback to personalized recommendations
+          if (customerData.phone || customerData.email) {
+            return fetch(API_BASE + '/recommendations', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                customer_phone: customerData.phone,
+                customer_email: customerData.email,
+                cart_items: cartItems,
+                limit: 4
+              })
+            }).then(function(res) { return res.json(); });
+          } else {
+            return fetch(API_BASE + '/popular?limit=4').then(function(res) { return res.json(); });
+          }
+        }
+      })
+      .then(function(data) {
+        if (data) {
+          var products = data.recommendations || data.popular_products || data.similar_products;
+          if (products && products.length > 0) {
+            renderProducts(products);
+          }
+        }
+      })
+      .catch(function(err) {
+        console.error('MasterGroup Cart Recommendations error:', err);
+        // Final fallback to popular
+        fetch(API_BASE + '/popular?limit=4')
+          .then(function(res) { return res.json(); })
+          .then(function(data) {
+            if (data.success && data.popular_products) {
+              renderProducts(data.popular_products);
+            } else {
+              container.parentElement.style.display = 'none';
+            }
+          })
+          .catch(function() { container.parentElement.style.display = 'none'; });
+      });
+  } else {
+    // Empty cart - show popular products
+    fetch(API_BASE + '/popular?limit=4')
+      .then(function(res) { return res.json(); })
+      .then(function(data) {
+        if (data.success && data.popular_products && data.popular_products.length > 0) {
+          renderProducts(data.popular_products);
+        } else {
+          container.parentElement.style.display = 'none';
+        }
+      })
+      .catch(function() { container.parentElement.style.display = 'none'; });
+  }
 })();
 </script>
 <!-- MasterGroup AI Cart Recommendations - END -->

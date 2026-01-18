@@ -134,6 +134,15 @@ def match_products(shopify_products, mg_products, mg_names):
         handle = sp.get('handle') or ''
         shopify_id = sp['id']
         
+        # Get product image URL
+        images = sp.get('images') or sp.get('image') or []
+        if isinstance(images, dict):
+            image_url = images.get('src', '')
+        elif isinstance(images, list) and len(images) > 0:
+            image_url = images[0].get('src', '')
+        else:
+            image_url = ''
+        
         matched_mg_id = None
         matched_mg_name = None
         match_type = None
@@ -175,6 +184,7 @@ def match_products(shopify_products, mg_products, mg_names):
             'shopify_title': sp.get('title', '')[:255],
             'shopify_sku': sku[:100] if sku else None,
             'shopify_handle': handle[:255] if handle else None,
+            'shopify_image_url': image_url if image_url else None,
             'mastergroup_product_id': matched_mg_id,
             'mastergroup_product_name': matched_mg_name[:255] if matched_mg_name else None,
             'match_confidence': confidence if matched_mg_id else 0.0,
@@ -196,12 +206,13 @@ def insert_mappings(conn, mappings, refresh=False):
     # Insert new mappings
     insert_sql = """
         INSERT INTO shopify_product_mapping 
-        (shopify_product_id, shopify_title, shopify_sku, shopify_handle,
+        (shopify_product_id, shopify_title, shopify_sku, shopify_handle, shopify_image_url,
          mastergroup_product_id, mastergroup_product_name, match_confidence, match_method)
         VALUES %s
         ON CONFLICT (shopify_product_id) DO UPDATE SET
             shopify_title = EXCLUDED.shopify_title,
             shopify_sku = EXCLUDED.shopify_sku,
+            shopify_image_url = EXCLUDED.shopify_image_url,
             mastergroup_product_id = EXCLUDED.mastergroup_product_id,
             mastergroup_product_name = EXCLUDED.mastergroup_product_name,
             match_confidence = EXCLUDED.match_confidence,
@@ -211,8 +222,8 @@ def insert_mappings(conn, mappings, refresh=False):
     
     values = [
         (m['shopify_product_id'], m['shopify_title'], m['shopify_sku'], 
-         m['shopify_handle'], m['mastergroup_product_id'], m['mastergroup_product_name'],
-         m['match_confidence'], m['match_method'])
+         m['shopify_handle'], m['shopify_image_url'], m['mastergroup_product_id'], 
+         m['mastergroup_product_name'], m['match_confidence'], m['match_method'])
         for m in mappings
     ]
     

@@ -5582,6 +5582,22 @@ async def get_shopify_similar_products(
                     import json
                     sims = json.loads(sims)
                 
+                # Enrich with Shopify images
+                product_ids = [str(s.get('item_id', s.get('product_id', ''))) for s in sims[:limit]]
+                if product_ids:
+                    cursor.execute("""
+                        SELECT mastergroup_product_id, shopify_image_url, shopify_title, shopify_handle
+                        FROM shopify_product_mapping 
+                        WHERE mastergroup_product_id = ANY(%s) AND is_active = TRUE
+                    """, (product_ids,))
+                    image_map = {r['mastergroup_product_id']: r for r in cursor.fetchall()}
+                    
+                    for sim in sims[:limit]:
+                        pid = str(sim.get('item_id', sim.get('product_id', '')))
+                        if pid in image_map:
+                            sim['image_url'] = image_map[pid].get('shopify_image_url')
+                            sim['shopify_handle'] = image_map[pid].get('shopify_handle')
+                
                 cursor.close()
                 return {
                     "success": True,
@@ -5591,15 +5607,17 @@ async def get_shopify_similar_products(
                     "count": len(sims[:limit])
                 }
             
-            # Fallback: get popular products
+            # Fallback: get popular products with images
             cursor.execute("""
-                SELECT oi.product_id, oi.product_name, COUNT(*) as score
+                SELECT oi.product_id, oi.product_name, COUNT(*) as score,
+                       spm.shopify_image_url, spm.shopify_handle
                 FROM order_items oi
                 JOIN orders o ON o.id::text = oi.order_id
+                LEFT JOIN shopify_product_mapping spm ON spm.mastergroup_product_id = oi.product_id
                 WHERE o.order_date >= NOW() - INTERVAL '90 days'
                 AND oi.product_id != %s
                 AND oi.product_id IS NOT NULL
-                GROUP BY oi.product_id, oi.product_name
+                GROUP BY oi.product_id, oi.product_name, spm.shopify_image_url, spm.shopify_handle
                 ORDER BY score DESC
                 LIMIT %s
             """, (str(internal_product_id), limit))
@@ -5612,7 +5630,13 @@ async def get_shopify_similar_products(
                 "product_id": product_id,
                 "internal_product_id": internal_product_id if internal_product_id != product_id else None,
                 "similar_products": [
-                    {"item_id": r['product_id'], "item_name": r['product_name'], "score": r['score']}
+                    {
+                        "item_id": r['product_id'], 
+                        "item_name": r['product_name'], 
+                        "score": r['score'],
+                        "image_url": r.get('shopify_image_url'),
+                        "shopify_handle": r.get('shopify_handle')
+                    }
                     for r in results
                 ],
                 "count": len(results),
@@ -5805,9 +5829,11 @@ async def get_shopify_popular_products(
             cursor = conn.cursor(cursor_factory=RealDictCursor)
             
             query = """
-                SELECT oi.product_id, oi.product_name, COUNT(*) as purchase_count
+                SELECT oi.product_id, oi.product_name, COUNT(*) as purchase_count,
+                       spm.shopify_image_url, spm.shopify_handle
                 FROM order_items oi
                 JOIN orders o ON o.id::text = oi.order_id
+                LEFT JOIN shopify_product_mapping spm ON spm.mastergroup_product_id = oi.product_id
                 WHERE o.order_date >= NOW() - INTERVAL '%s days'
                 AND oi.product_id IS NOT NULL
             """
@@ -5822,7 +5848,7 @@ async def get_shopify_popular_products(
                 params.append(province)
             
             query += """
-                GROUP BY oi.product_id, oi.product_name
+                GROUP BY oi.product_id, oi.product_name, spm.shopify_image_url, spm.shopify_handle
                 ORDER BY purchase_count DESC
                 LIMIT %s
             """
@@ -5835,7 +5861,13 @@ async def get_shopify_popular_products(
             return {
                 "success": True,
                 "popular_products": [
-                    {"item_id": r['product_id'], "item_name": r['product_name'], "score": r['purchase_count']}
+                    {
+                        "item_id": r['product_id'], 
+                        "item_name": r['product_name'], 
+                        "score": r['purchase_count'],
+                        "image_url": r.get('shopify_image_url'),
+                        "shopify_handle": r.get('shopify_handle')
+                    }
                     for r in results
                 ],
                 "count": len(results),

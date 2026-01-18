@@ -1,7 +1,7 @@
 """create shopify mapping tables
 
 Revision ID: a1c2e3f4g5h6
-Revises: fix_rebuild_customer_statistics_preserve_segments
+Revises: a1b2c3d4e5f6
 Create Date: 2026-01-18 23:15:00.000000
 
 This migration creates tables for Shopify integration:
@@ -25,62 +25,64 @@ depends_on = None
 def upgrade():
     """Create Shopify integration tables."""
     
-    # ===========================================
-    # shopify_product_mapping
-    # Maps Shopify products to MasterGroup products
-    # ===========================================
-    op.create_table('shopify_product_mapping',
-        sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
-        sa.Column('shopify_product_id', sa.BigInteger(), nullable=False),
-        sa.Column('shopify_title', sa.String(length=255), nullable=True),
-        sa.Column('shopify_sku', sa.String(length=100), nullable=True),
-        sa.Column('shopify_handle', sa.String(length=255), nullable=True),
-        sa.Column('mastergroup_product_id', sa.String(length=100), nullable=True),
-        sa.Column('mastergroup_product_name', sa.String(length=255), nullable=True),
-        sa.Column('match_confidence', sa.Float(), server_default='1.0', nullable=True),
-        sa.Column('match_method', sa.String(length=50), nullable=True),
-        sa.Column('is_active', sa.Boolean(), server_default='true', nullable=True),
-        sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
-        sa.Column('updated_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
-        sa.PrimaryKeyConstraint('id'),
-        sa.UniqueConstraint('shopify_product_id')
-    )
+    # Use raw SQL with IF NOT EXISTS for idempotency
+    op.execute("""
+        -- ===========================================
+        -- shopify_product_mapping
+        -- Maps Shopify products to MasterGroup products
+        -- ===========================================
+        CREATE TABLE IF NOT EXISTS shopify_product_mapping (
+            id SERIAL PRIMARY KEY,
+            shopify_product_id BIGINT UNIQUE NOT NULL,
+            shopify_title VARCHAR(255),
+            shopify_sku VARCHAR(100),
+            shopify_handle VARCHAR(255),
+            mastergroup_product_id VARCHAR(100),
+            mastergroup_product_name VARCHAR(255),
+            match_confidence FLOAT DEFAULT 1.0,
+            match_method VARCHAR(50),
+            is_active BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        
+        -- Indexes for fast lookups (use IF NOT EXISTS pattern)
+        CREATE INDEX IF NOT EXISTS idx_shopify_product_mapping_shopify_id 
+            ON shopify_product_mapping(shopify_product_id);
+        CREATE INDEX IF NOT EXISTS idx_shopify_product_mapping_mg_id 
+            ON shopify_product_mapping(mastergroup_product_id);
+        CREATE INDEX IF NOT EXISTS idx_shopify_product_mapping_sku 
+            ON shopify_product_mapping(shopify_sku);
+        CREATE INDEX IF NOT EXISTS idx_shopify_product_mapping_active 
+            ON shopify_product_mapping(is_active);
+    """)
     
-    # Indexes for fast lookups
-    op.create_index('idx_shopify_product_mapping_shopify_id', 
-                    'shopify_product_mapping', ['shopify_product_id'], unique=True)
-    op.create_index('idx_shopify_product_mapping_mg_id', 
-                    'shopify_product_mapping', ['mastergroup_product_id'], unique=False)
-    op.create_index('idx_shopify_product_mapping_sku', 
-                    'shopify_product_mapping', ['shopify_sku'], unique=False)
-    op.create_index('idx_shopify_product_mapping_active', 
-                    'shopify_product_mapping', ['is_active'], unique=False)
-    
-    # ===========================================
-    # shopify_customer_mapping
-    # Maps Shopify customers to MasterGroup customers
-    # ===========================================
-    op.create_table('shopify_customer_mapping',
-        sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
-        sa.Column('shopify_customer_id', sa.BigInteger(), nullable=True),
-        sa.Column('shopify_email', sa.String(length=255), nullable=True),
-        sa.Column('shopify_phone', sa.String(length=50), nullable=True),
-        sa.Column('mastergroup_user_id', sa.String(length=100), nullable=True),
-        sa.Column('match_method', sa.String(length=50), nullable=True),
-        sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
-        sa.Column('updated_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
-        sa.PrimaryKeyConstraint('id')
-    )
-    
-    # Indexes for fast lookups
-    op.create_index('idx_shopify_customer_mapping_shopify_id', 
-                    'shopify_customer_mapping', ['shopify_customer_id'], unique=True)
-    op.create_index('idx_shopify_customer_mapping_phone', 
-                    'shopify_customer_mapping', ['shopify_phone'], unique=False)
-    op.create_index('idx_shopify_customer_mapping_email', 
-                    'shopify_customer_mapping', ['shopify_email'], unique=False)
-    op.create_index('idx_shopify_customer_mapping_mg_user', 
-                    'shopify_customer_mapping', ['mastergroup_user_id'], unique=False)
+    op.execute("""
+        -- ===========================================
+        -- shopify_customer_mapping
+        -- Maps Shopify customers to MasterGroup customers
+        -- ===========================================
+        CREATE TABLE IF NOT EXISTS shopify_customer_mapping (
+            id SERIAL PRIMARY KEY,
+            shopify_customer_id BIGINT UNIQUE,
+            shopify_email VARCHAR(255),
+            shopify_phone VARCHAR(50),
+            mastergroup_user_id VARCHAR(100),
+            match_method VARCHAR(50),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        
+        -- Indexes for fast lookups
+        CREATE INDEX IF NOT EXISTS idx_shopify_customer_mapping_shopify_id 
+            ON shopify_customer_mapping(shopify_customer_id);
+        CREATE INDEX IF NOT EXISTS idx_shopify_customer_mapping_phone 
+            ON shopify_customer_mapping(shopify_phone);
+        CREATE INDEX IF NOT EXISTS idx_shopify_customer_mapping_email 
+            ON shopify_customer_mapping(shopify_email);
+        CREATE INDEX IF NOT EXISTS idx_shopify_customer_mapping_mg_user 
+            ON shopify_customer_mapping(mastergroup_user_id);
+    """)
     
     print("✅ Created shopify_product_mapping and shopify_customer_mapping tables")
 
@@ -88,18 +90,9 @@ def upgrade():
 def downgrade():
     """Remove Shopify integration tables."""
     
-    # Drop customer mapping table and indexes
-    op.drop_index('idx_shopify_customer_mapping_mg_user', table_name='shopify_customer_mapping')
-    op.drop_index('idx_shopify_customer_mapping_email', table_name='shopify_customer_mapping')
-    op.drop_index('idx_shopify_customer_mapping_phone', table_name='shopify_customer_mapping')
-    op.drop_index('idx_shopify_customer_mapping_shopify_id', table_name='shopify_customer_mapping')
-    op.drop_table('shopify_customer_mapping')
-    
-    # Drop product mapping table and indexes
-    op.drop_index('idx_shopify_product_mapping_active', table_name='shopify_product_mapping')
-    op.drop_index('idx_shopify_product_mapping_sku', table_name='shopify_product_mapping')
-    op.drop_index('idx_shopify_product_mapping_mg_id', table_name='shopify_product_mapping')
-    op.drop_index('idx_shopify_product_mapping_shopify_id', table_name='shopify_product_mapping')
-    op.drop_table('shopify_product_mapping')
+    op.execute("""
+        DROP TABLE IF EXISTS shopify_customer_mapping CASCADE;
+        DROP TABLE IF EXISTS shopify_product_mapping CASCADE;
+    """)
     
     print("✅ Dropped shopify_product_mapping and shopify_customer_mapping tables")

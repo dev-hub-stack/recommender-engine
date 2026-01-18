@@ -5411,11 +5411,23 @@ async def get_shopify_recommendations(
                 product_id = current_product or (cart_items[0] if cart_items else None)
                 
                 if product_id:
+                    # Translate Shopify ID to MasterGroup ID if needed
+                    internal_product_id = product_id
+                    if str(product_id).isdigit() and len(str(product_id)) > 10:
+                        cursor.execute("""
+                            SELECT mastergroup_product_id 
+                            FROM shopify_product_mapping 
+                            WHERE shopify_product_id = %s AND is_active = TRUE
+                        """, (int(product_id),))
+                        mapping = cursor.fetchone()
+                        if mapping and mapping['mastergroup_product_id']:
+                            internal_product_id = mapping['mastergroup_product_id']
+                    
                     cursor.execute("""
                         SELECT similar_products 
                         FROM offline_similar_items 
                         WHERE product_id = %s
-                    """, (str(product_id),))
+                    """, (str(internal_product_id),))
                     sim_result = cursor.fetchone()
                     
                     if sim_result and sim_result['similar_products']:
@@ -5521,12 +5533,16 @@ async def get_shopify_recommendations(
 
 @app.get("/api/v1/shopify/similar/{product_id}")
 async def get_shopify_similar_products(
-    product_id: str = Path(..., description="Shopify Product ID"),
+    product_id: str = Path(..., description="Shopify Product ID or MasterGroup Product ID"),
     limit: int = Query(10, description="Number of similar products")
 ):
     """
     Get similar products for Shopify product pages.
     Use this for "You might also like" sections.
+    
+    Accepts both Shopify product IDs (long numeric, e.g., 10045012017458) 
+    and MasterGroup product IDs (short, e.g., 1328).
+    Automatically translates Shopify IDs using the mapping table.
     """
     try:
         if not pg_pool:
@@ -5536,12 +5552,28 @@ async def get_shopify_similar_products(
         try:
             cursor = conn.cursor(cursor_factory=RealDictCursor)
             
-            # Get similar products from cache
+            # Translate Shopify ID to MasterGroup ID if needed
+            original_product_id = product_id
+            internal_product_id = product_id
+            
+            # Check if it's a Shopify ID (long numeric string > 10 digits)
+            if product_id.isdigit() and len(product_id) > 10:
+                cursor.execute("""
+                    SELECT mastergroup_product_id, shopify_title 
+                    FROM shopify_product_mapping 
+                    WHERE shopify_product_id = %s AND is_active = TRUE
+                """, (int(product_id),))
+                mapping = cursor.fetchone()
+                if mapping and mapping['mastergroup_product_id']:
+                    internal_product_id = mapping['mastergroup_product_id']
+                    logger.info(f"Translated Shopify ID {product_id} -> MasterGroup ID {internal_product_id}")
+            
+            # Get similar products from cache using internal ID
             cursor.execute("""
                 SELECT similar_products 
                 FROM offline_similar_items 
                 WHERE product_id = %s
-            """, (str(product_id),))
+            """, (str(internal_product_id),))
             result = cursor.fetchone()
             
             if result and result['similar_products']:
@@ -5554,6 +5586,7 @@ async def get_shopify_similar_products(
                 return {
                     "success": True,
                     "product_id": product_id,
+                    "internal_product_id": internal_product_id if internal_product_id != product_id else None,
                     "similar_products": sims[:limit],
                     "count": len(sims[:limit])
                 }
@@ -5569,7 +5602,7 @@ async def get_shopify_similar_products(
                 GROUP BY oi.product_id, oi.product_name
                 ORDER BY score DESC
                 LIMIT %s
-            """, (str(product_id), limit))
+            """, (str(internal_product_id), limit))
             
             results = cursor.fetchall()
             cursor.close()
@@ -5577,6 +5610,7 @@ async def get_shopify_similar_products(
             return {
                 "success": True,
                 "product_id": product_id,
+                "internal_product_id": internal_product_id if internal_product_id != product_id else None,
                 "similar_products": [
                     {"item_id": r['product_id'], "item_name": r['product_name'], "score": r['score']}
                     for r in results
@@ -5813,6 +5847,127 @@ async def get_shopify_popular_products(
             
     except Exception as e:
         logger.error(f"Shopify popular products error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/shopify/product-mappings")
+async def get_shopify_product_mappings(
+    limit: int = Query(100, description="Maximum number of mappings to return"),
+    unmatched_only: bool = Query(False, description="Only return unmatched products")
+):
+    """
+    Get the current Shopify to MasterGroup product mappings.
+    Useful for debugging and verifying product translation.
+    """
+    try:
+        if not pg_pool:
+            raise HTTPException(status_code=500, detail="Database not connected")
+        
+        conn = pg_pool.getconn()
+        try:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            
+            if unmatched_only:
+                cursor.execute("""
+                    SELECT shopify_product_id, shopify_title, shopify_sku, 
+                           mastergroup_product_id, match_method
+                    FROM shopify_product_mapping 
+                    WHERE mastergroup_product_id IS NULL
+                    ORDER BY shopify_title
+                    LIMIT %s
+                """, (limit,))
+            else:
+                cursor.execute("""
+                    SELECT shopify_product_id, shopify_title, shopify_sku, 
+                           mastergroup_product_id, mastergroup_product_name,
+                           match_confidence, match_method, is_active
+                    FROM shopify_product_mapping 
+                    ORDER BY match_confidence DESC, shopify_title
+                    LIMIT %s
+                """, (limit,))
+            
+            results = cursor.fetchall()
+            
+            # Get counts
+            cursor.execute("""
+                SELECT 
+                    COUNT(*) as total,
+                    COUNT(mastergroup_product_id) as matched,
+                    COUNT(*) - COUNT(mastergroup_product_id) as unmatched
+                FROM shopify_product_mapping
+            """)
+            counts = cursor.fetchone()
+            cursor.close()
+            
+            return {
+                "success": True,
+                "summary": {
+                    "total_products": counts['total'],
+                    "matched": counts['matched'],
+                    "unmatched": counts['unmatched'],
+                    "match_rate": f"{(counts['matched'] / counts['total'] * 100):.1f}%" if counts['total'] > 0 else "0%"
+                },
+                "mappings": [dict(r) for r in results],
+                "count": len(results)
+            }
+            
+        finally:
+            pg_pool.putconn(conn)
+            
+    except Exception as e:
+        logger.error(f"Product mappings error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/shopify/translate-product/{shopify_product_id}")
+async def translate_shopify_product_id(
+    shopify_product_id: str = Path(..., description="Shopify Product ID to translate")
+):
+    """
+    Translate a single Shopify product ID to MasterGroup product ID.
+    Useful for debugging product lookups.
+    """
+    try:
+        if not pg_pool:
+            raise HTTPException(status_code=500, detail="Database not connected")
+        
+        conn = pg_pool.getconn()
+        try:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            
+            cursor.execute("""
+                SELECT shopify_product_id, shopify_title, shopify_sku,
+                       mastergroup_product_id, mastergroup_product_name,
+                       match_confidence, match_method
+                FROM shopify_product_mapping 
+                WHERE shopify_product_id = %s
+            """, (int(shopify_product_id),))
+            result = cursor.fetchone()
+            cursor.close()
+            
+            if result:
+                return {
+                    "success": True,
+                    "shopify_product_id": str(result['shopify_product_id']),
+                    "shopify_title": result['shopify_title'],
+                    "mastergroup_product_id": result['mastergroup_product_id'],
+                    "mastergroup_product_name": result['mastergroup_product_name'],
+                    "match_confidence": result['match_confidence'],
+                    "match_method": result['match_method'],
+                    "is_mapped": result['mastergroup_product_id'] is not None
+                }
+            else:
+                return {
+                    "success": False,
+                    "message": f"No mapping found for Shopify product ID: {shopify_product_id}",
+                    "is_mapped": False
+                }
+            
+        finally:
+            pg_pool.putconn(conn)
+            
+    except Exception as e:
+        logger.error(f"Translate product error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

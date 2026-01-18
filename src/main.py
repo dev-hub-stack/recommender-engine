@@ -5649,7 +5649,7 @@ async def get_shopify_similar_products(
                 JOIN orders o ON o.id::text = oi.order_id
                 LEFT JOIN shopify_product_mapping spm ON (
                     LOWER(spm.mastergroup_product_name) = LOWER(SPLIT_PART(oi.product_name, ' (', 1))
-                    OR LOWER(spm.shopify_title) LIKE '%' || LOWER(SPLIT_PART(oi.product_name, ' (', 1)) || '%'
+                    OR LOWER(spm.shopify_title) LIKE '%%' || LOWER(SPLIT_PART(oi.product_name, ' (', 1)) || '%%'
                 )
                 WHERE o.order_date >= NOW() - INTERVAL '90 days'
                 AND oi.product_id != %s
@@ -5872,7 +5872,7 @@ async def get_shopify_popular_products(
                 JOIN orders o ON o.id::text = oi.order_id
                 LEFT JOIN shopify_product_mapping spm ON (
                     LOWER(spm.mastergroup_product_name) = LOWER(SPLIT_PART(oi.product_name, ' (', 1))
-                    OR LOWER(spm.shopify_title) LIKE '%' || LOWER(SPLIT_PART(oi.product_name, ' (', 1)) || '%'
+                    OR LOWER(spm.shopify_title) LIKE '%%' || LOWER(SPLIT_PART(oi.product_name, ' (', 1)) || '%%'
                 )
                 WHERE o.order_date >= NOW() - (INTERVAL '1 day' * %s)
                 AND oi.product_id IS NOT NULL

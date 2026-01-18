@@ -5582,21 +5582,55 @@ async def get_shopify_similar_products(
                     import json
                     sims = json.loads(sims)
                 
-                # Enrich with Shopify images
-                product_ids = [str(s.get('item_id', s.get('product_id', ''))) for s in sims[:limit]]
-                if product_ids:
-                    cursor.execute("""
-                        SELECT mastergroup_product_id, shopify_image_url, shopify_title, shopify_handle
+                # Enrich with Shopify images - match by product name
+                product_names = [s.get('item_name', s.get('product_name', '')) for s in sims[:limit]]
+                product_names_clean = [name.split(' (')[0].lower().strip() for name in product_names if name]
+                
+                if product_names_clean:
+                    # Build query to match names
+                    name_conditions = ' OR '.join([
+                        f"LOWER(mastergroup_product_name) = %s OR LOWER(shopify_title) LIKE %s"
+                        for _ in product_names_clean
+                    ])
+                    query_params = []
+                    for name in product_names_clean:
+                        query_params.append(name)
+                        query_params.append(f'%{name}%')
+                    
+                    cursor.execute(f"""
+                        SELECT mastergroup_product_name, shopify_image_url, shopify_title, shopify_handle
                         FROM shopify_product_mapping 
-                        WHERE mastergroup_product_id = ANY(%s) AND is_active = TRUE
-                    """, (product_ids,))
-                    image_map = {r['mastergroup_product_id']: r for r in cursor.fetchall()}
+                        WHERE ({name_conditions}) AND is_active = TRUE
+                    """, query_params)
+                    
+                    # Build map by normalized name
+                    image_map = {}
+                    for r in cursor.fetchall():
+                        key = (r['mastergroup_product_name'] or '').lower().strip()
+                        image_map[key] = r
+                        # Also add by shopify_title for matching
+                        title_key = (r['shopify_title'] or '').lower().strip()
+                        if title_key:
+                            image_map[title_key] = r
                     
                     for sim in sims[:limit]:
-                        pid = str(sim.get('item_id', sim.get('product_id', '')))
-                        if pid in image_map:
-                            sim['image_url'] = image_map[pid].get('shopify_image_url')
-                            sim['shopify_handle'] = image_map[pid].get('shopify_handle')
+                        name = sim.get('item_name', sim.get('product_name', ''))
+                        name_clean = name.split(' (')[0].lower().strip() if name else ''
+                        
+                        # Try exact match first, then partial
+                        matching_entry = None
+                        if name_clean in image_map:
+                            matching_entry = image_map[name_clean]
+                        else:
+                            # Try to find partial match
+                            for key, val in image_map.items():
+                                if name_clean in key or key in name_clean:
+                                    matching_entry = val
+                                    break
+                        
+                        if matching_entry:
+                            sim['image_url'] = matching_entry.get('shopify_image_url')
+                            sim['shopify_handle'] = matching_entry.get('shopify_handle')
                 
                 cursor.close()
                 return {
@@ -5613,7 +5647,10 @@ async def get_shopify_similar_products(
                        spm.shopify_image_url, spm.shopify_handle
                 FROM order_items oi
                 JOIN orders o ON o.id::text = oi.order_id
-                LEFT JOIN shopify_product_mapping spm ON spm.mastergroup_product_id = oi.product_id
+                LEFT JOIN shopify_product_mapping spm ON (
+                    LOWER(spm.mastergroup_product_name) = LOWER(SPLIT_PART(oi.product_name, ' (', 1))
+                    OR LOWER(spm.shopify_title) LIKE '%' || LOWER(SPLIT_PART(oi.product_name, ' (', 1)) || '%'
+                )
                 WHERE o.order_date >= NOW() - INTERVAL '90 days'
                 AND oi.product_id != %s
                 AND oi.product_id IS NOT NULL
@@ -5833,7 +5870,10 @@ async def get_shopify_popular_products(
                        spm.shopify_image_url, spm.shopify_handle
                 FROM order_items oi
                 JOIN orders o ON o.id::text = oi.order_id
-                LEFT JOIN shopify_product_mapping spm ON spm.mastergroup_product_id = oi.product_id
+                LEFT JOIN shopify_product_mapping spm ON (
+                    LOWER(spm.mastergroup_product_name) = LOWER(SPLIT_PART(oi.product_name, ' (', 1))
+                    OR LOWER(spm.shopify_title) LIKE '%' || LOWER(SPLIT_PART(oi.product_name, ' (', 1)) || '%'
+                )
                 WHERE o.order_date >= NOW() - INTERVAL '%s days'
                 AND oi.product_id IS NOT NULL
             """

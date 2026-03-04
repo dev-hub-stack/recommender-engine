@@ -1,0 +1,337 @@
+# MasterGroup RecommendationSystem — Deep Codebase Analysis
+
+> **Repos:** `recommendation-engine-service` (backend) · `mastergroup-analytics-dashboard` (frontend)  
+> **Analyzed:** 2026-03-04
+
+---
+
+## 1. High-Level Architecture
+
+```
+Internet
+   │
+   ▼
+┌──────────┐     Port 80      ┌────────────────────┐
+│  Nginx   │ ── /api/* ──►   │  FastAPI (Uvicorn)  │  :8001
+│ (Reverse │ ── / ────────►  │  mastergroup-api    │
+│  Proxy)  │                 └────────┬───────────┘
+└──────────┘                          │
+                          ┌───────────┼───────────┐
+                          ▼           ▼           ▼
+                    ┌──────────┐  ┌───────┐  ┌─────────────┐
+                    │PostgreSQL│  │ Redis │  │ AWS Personalize
+                    │   :5432  │  │ :6379 │  │  (optional) │
+                    └──────────┘  └───────┘  └─────────────┘
+                          ▲
+                      Data comes from
+                    ┌─────────────┐
+                    │ Master Group │
+                    │  API (OE +  │
+                    │    POS)     │
+                    └─────────────┘
+```
+
+---
+
+## 2. Server / EC2 Setup
+
+### Deployment Targets (Dual-mode)
+
+| Mode | Platform | Script |
+|------|----------|--------|
+| **On-Premise / HP ProLiant** | Ubuntu 22.04 LTS | [scripts/deploy_full_stack.sh](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/scripts/deploy_full_stack.sh) |
+| **Cloud (Heroku)** | Heroku dynos | [Procfile](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/Procfile) |
+| **Container** | Docker | [Dockerfile](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/Dockerfile) |
+| **Lightsail** | AWS Lightsail | [scripts/lightsail-launch-script.sh](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/scripts/lightsail-launch-script.sh) · [LightsailDefaultKey-us-east-1.pem](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/LightsailDefaultKey-us-east-1.pem) |
+
+### On-Premise Full Stack ([deploy_full_stack.sh](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/scripts/deploy_full_stack.sh)) — 21 Steps
+
+```
+Step 0:  Pre-flight checks (root, Ubuntu)
+Step 1:  System update + essential tools (git, curl, htop, tmux…)
+Step 2:  Python 3.11 via deadsnakes PPA
+Step 3:  Node.js 20 LTS + PM2 (for frontend)
+Step 4:  PostgreSQL 14 (performance-tuned: 2GB shared_buffers, 200 connections)
+Step 5:  Redis server (systemd mode)
+Step 6:  Nginx
+Step 7:  App user "mastergroup" + /opt/mastergroup/{backend,frontend,models}
+Step 8:  Database + pg_hba.conf + postgresql.conf tuning
+Step 9:  Clone backend from github.com/dev-hub-stack/recommender-engine (dev branch)
+Step 10: Python venv + pip install -r requirements.txt
+Step 11: Generate .env (DB creds, API tokens, JWT secrets)
+Step 12: Run database migrations (scripts/setup_database.py)
+Step 13: Clone frontend from github.com/dev-hub-stack/recommender-dashboard (main)
+Step 14: npm install + npm run build
+Step 15: systemd service: mastergroup-api.service (uvicorn, 4 workers)
+Step 16: PM2 service for frontend (vite preview, port 3000)
+Step 17: Nginx config (port 80 → /api/* ► :8001, / ► :3000)
+Step 18: Cron jobs (see §5)
+Step 19: Initial historical data sync (4 years, background, ~30-60 min)
+Step 20: Start all services
+Step 21: Management scripts (check_status.sh, restart_services.sh, update_code.sh)
+```
+
+### Docker ([Dockerfile](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/Dockerfile))
+```
+Base: python:3.11-slim
+Deps: libpq-dev, gcc
+Port: 8001 exposed
+CMD:  uvicorn src.main:app --host 0.0.0.0 --port 8001
+Health: curl http://localhost:8001/health (every 30s)
+```
+
+### Process Manager
+- **Backend**: `systemd` → `mastergroup-api.service` runs `uvicorn` with 4 workers
+- **Frontend**: `PM2` → `ecosystem.config.js` runs `vite preview`
+- **On Heroku**: [Procfile](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/Procfile) → `web: uvicorn src.main:app --host 0.0.0.0 --port $PORT`
+
+---
+
+## 3. Application Startup Lifecycle ([src/main.py](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/main.py))
+
+When the FastAPI app starts (via the [lifespan](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/main.py#202-260) context manager):
+
+```
+1. Start Prometheus metrics server (port 9002)
+2. init_redis()    → Redis connection with optional SSL (Heroku KV)
+3. init_postgres() → ThreadedConnectionPool (min=2, max=10)
+4. ml_service.load_trained_models(time_filter='30days')
+   → loads persisted models from PostgreSQL
+5. get_scheduler().start()
+   → APScheduler: daily sync at 2:00 AM
+```
+
+### Key Middleware
+- **CORS**: allows `localhost:5173`, `localhost:3000`, `master-dashboard.netlify.app`, `*.netlify.app`, `*`
+- **Auth**: JWT-based ([src/auth.py](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/auth.py) — bcrypt + python-jose)
+- **Logging**: `structlog` JSON renderer
+
+---
+
+## 4. Database Architecture
+
+### Connection Config ([config/master_group_api.py](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/config/master_group_api.py))
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `PG_HOST` | `localhost` | |
+| `PG_PORT` | `5432` | |
+| `PG_DB` | `mastergroup_recommendations` | |
+| `PG_USER` | [postgres](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/main.py#181-200) | |
+| `PG_SSLMODE` | `prefer` (local) / `require` (Heroku) | Auto-detected |
+
+### Tables (verified in [setup_database.py](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/scripts/setup_database.py))
+
+| Table | Purpose |
+|-------|---------|
+| [orders](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/scripts/local_ml_pipeline.py#235-335) | Raw orders from OE & POS APIs (upserted) |
+| [order_items](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/scripts/setup_database.py#124-157) | Line items per order (product_id, qty, price) |
+| [users](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/main.py#5274-5321) | Admin dashboard users (JWT auth) |
+| `customer_purchases` | Aggregated per-customer purchase stats |
+| [product_pairs](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/main.py#4010-4048) | Co-purchase counts (item-to-item) |
+| `product_statistics` | Per-product aggregate stats |
+| `customer_statistics` | Per-customer aggregate + RFM segment |
+| `recommendation_cache` | Runtime Redis-backed cache records |
+| `sync_metadata` | Sync history / timestamps |
+| `offline_user_recommendations` | Batch ML recs per user (TRUNCATE+INSERT daily) |
+| `offline_similar_items` | Batch ML similar products (TRUNCATE+INSERT daily) |
+| `offline_item_affinity` | Item affinity pairs |
+| `city_province_mapping` | City → Province lookup |
+| [shopify_product_mapping](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/main.py#5925-5992) | OE/POS SKU → Shopify product_id |
+| `shopify_customer_mapping` | Customer phone → Shopify customer_id |
+
+### Migration History (Alembic — 10 versions)
+
+| Migration | What it does |
+|-----------|-------------|
+| Base schema | Core [orders](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/scripts/local_ml_pipeline.py#235-335), [order_items](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/scripts/setup_database.py#124-157), [users](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/main.py#5274-5321) tables |
+| `35576334970d` | Add geographic columns to orders |
+| `9bcb874fb20c` | Add `source_type` column to orders |
+| `7002bae4070f` | Create `city_province_mapping` table |
+| `8f2a1b9c3d4e` | Create offline recommendation tables |
+| `a1c2e3f4g5h6` | Create Shopify mapping tables |
+| `b2d3e4f5g6h7` | Add Shopify image URL column |
+| `c53c94db0229` | Create RFM segmentation function |
+| `d32509426ade` | Populate customer segments |
+| `fcaa65189ae8` | Populate orders geographic data |
+| `fix_rebuild_...` | Patch rebuild_customer_statistics to preserve segments |
+
+### Stored Functions (PostgreSQL)
+- `populate_order_items_from_orders()` — Parses JSON items into [order_items](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/scripts/setup_database.py#124-157)
+- `rebuild_customer_purchases()` — Aggregates purchase history
+- `rebuild_product_pairs()` — Computes co-purchase matrix
+- `rebuild_product_statistics()` — Product-level aggregations
+- `rebuild_customer_statistics()` — Customer-level stats + RFM
+
+---
+
+## 5. Data Pipeline — How It Works
+
+### Overview (6-Step Pipeline)
+
+```
+External API  →  PostgreSQL  →  CSV Export  →  Model Training  →  Batch Recs  →  Serve
+```
+
+### Step 1 — Data Sync from Master Group API
+
+**Trigger:** Cron @ 2:00 AM daily  OR  APScheduler in-process  OR  manual API call
+
+**Source endpoints:**
+- `https://mes.master.com.pk/get_oe_orders` (Online/E-commerce orders)
+- `https://mes.master.com.pk/get_pos_orders` (Point of Sale orders)
+
+**How:**
+```python
+# Fetches in 90-day batches going back N days
+# Auth: Bearer token from MASTER_GROUP_AUTH_TOKEN
+# Inserts via ON CONFLICT (id) DO UPDATE (upsert)
+# Generates unified_customer_id = f"{phone}_{first_name_lower}"
+# Province auto-inferred from city if not provided
+```
+
+**Cron schedule:**
+```cron
+0 2 * * *   daily_sync.sh  → local_ml_pipeline.py --sync-days 2
+0 */4 * * * local_ml_pipeline.py --sync-days 1  (every 4 hours, orders only)
+```
+
+### Step 2 — CSV Export (AWS Personalize format)
+
+Exports 3 CSV files to `data/local_ml/`:
+```
+interactions_latest.csv  → USER_ID, ITEM_ID, TIMESTAMP, EVENT_TYPE, EVENT_VALUE
+items_latest.csv         → ITEM_ID, ITEM_NAME, CATEGORY, PRICE, PURCHASE_COUNT
+users_latest.csv         → USER_ID, CITY, PROVINCE, ORDER_COUNT, TOTAL_SPEND
+```
+> Same schema as AWS Personalize — enables easy switch-over to managed service
+
+### Step 3 — ML Model Training (`scripts/local_ml_pipeline.py`)
+
+**Scheduled:** 2:00 AM daily (APScheduler can do 3:00 AM if enabled)
+
+Three models trained:
+
+| Model | Algorithm | Library |
+|-------|-----------|---------|
+| **Item Similarity** | Cosine similarity on user-item purchase matrix | `scikit-learn` |
+| **Popularity** | Recency-weighted purchase counts (`exp(-days/30)`) | `pandas`/`numpy` |
+| **SVD** | Matrix factorization (30 factors, 10 epochs) | `scikit-surprise` |
+
+**Resource protection:** 2 GB RAM limit via `resource.setrlimit` during SVD training
+
+### Step 4 — Batch Recommendation Generation
+
+For each user (in 5,000-user batches):
+```
+1. SVD predictions for top-100 popular unpurchased items
+2. Item-similarity recs based on up to 5 recent purchases
+3. Popularity fallback if still under limit
+4. Deduplicate + re-rank by score → top 25 per user
+```
+
+For each product:
+```
+Cosine similarity → top 20 similar items
+```
+
+### Step 5 — Cache to PostgreSQL
+
+```sql
+TRUNCATE TABLE offline_user_recommendations;
+INSERT INTO offline_user_recommendations (user_id, recommendations, recipe_name, updated_at)
+-- JSON array of {item_id, score, algorithm, item_name}
+
+TRUNCATE TABLE offline_similar_items;
+INSERT INTO offline_similar_items (product_id, similar_products, recipe_name, updated_at)
+```
+
+### Step 6 — Serving via FastAPI (`src/main.py`)
+
+**Primary algorithms (real-time via SQL):**
+
+| Endpoint | Algorithm |
+|----------|-----------|
+| `GET /api/v1/recommendations/{customer_id}` | Collaborative filtering SQL query |
+| `GET /api/v1/product-pairs/{product_id}` | Co-purchase SQL joinquery |
+| `GET /api/v1/popular` | Weighted purchase counts with time filter |
+| `GET /api/v1/personalize/user/{user_id}` | Reads `offline_user_recommendations` |
+| `GET /api/v1/personalize/similar/{product_id}` | Reads `offline_similar_items` |
+
+**Caching strategy:**
+- Redis `setex` with configurable TTL (default 1h)
+- Cache keys: `popular_products:{limit}:{time_filter}:{category}`
+- Metrics tracked: `cache:hits`, `cache:misses` counters in Redis
+
+**Time filters supported:** `today`, `7days`, `30days`, `mtd`, `90days`, `6months`, `1year`, `2years`, `3years`, `all`, `YYYY-MM-DD:YYYY-MM-DD`
+
+---
+
+## 6. ML Algorithms (`src/algorithms/`)
+
+| File | Algorithm |
+|------|-----------|
+| `collaborative_filtering.py` | User-user & item-item CF |
+| `content_based_filtering.py` | Product feature similarity |
+| `matrix_factorization.py` | SVD matrix factorization |
+| `popularity_based.py` | Trending / most-purchased |
+| `ml_recommendation_service.py` | **Unified service** — trains all 4, saves to PostgreSQL, loads on startup |
+
+---
+
+## 7. Services (`services/`)
+
+| File | Purpose |
+|------|---------|
+| `scheduler.py` | APScheduler — daily 2AM sync, optional 3AM model training |
+| `sync_service.py` | Incremental sync logic from Master Group API |
+
+| File | Purpose (`src/services/`) |
+|------|-----------|
+| `local_recommender.py` | In-process ML serving |
+| `local_model_storage.py` | Save/load models to/from PostgreSQL |
+| `shopify_mapper.py` | Map internal IDs to Shopify IDs |
+| `shopify_service.py` | Shopify API client |
+
+---
+
+## 8. Config Summary
+
+| Config Key | Value |
+|-----------|-------|
+| API Port | **8001** |
+| API Workers | **4** (uvicorn) |
+| DB Pool | min=2, max=10 connections |
+| PG Tuning | 200 max conns, 2GB shared_buffers, 6GB cache |
+| Redis TTL | 3600s (1 hour) default |
+| ML Training | Daily @ 3AM (disabled if using AWS Personalize) |
+| Data Sync | Daily @ 2AM + every 4 hours (orders only) |
+| DB Backup | Daily @ 3AM → gzip dump to `/backup/mastergroup/` |
+| Log Rotation | `/var/log/mastergroup/{api,sync,cache,hourly_sync}.log` |
+
+---
+
+## 9. Frontend (`mastergroup-analytics-dashboard`)
+
+| Aspect | Detail |
+|--------|--------|
+| Framework | React + TypeScript (Vite) |
+| Deployment | Netlify (also PM2 vite preview on-premise) |
+| API base | `VITE_API_BASE_URL=http://localhost:8001/api/v1` (on-premise) |
+| Auth | JWT token stored in frontend, passed as `Authorization: Bearer` |
+| Notable docs | `IMPLEMENTATION_GUIDE_ACTUAL_RECOMMENDATIONS.md`, `COLLABORATIVE_ANALYTICS_IMPLEMENTATION.md` |
+
+---
+
+## 10. Known Quirks / Watch-outs
+
+> [!WARNING]
+> **AWS Personalize is currently DISABLED.** `scheduler.py` line 32: `self.training_enabled = False` — comment says "Using AWS Personalize batch inference instead" but the aws_personalize module is also present. The system currently runs **fully local ML** via `local_ml_pipeline.py`.
+
+> [!NOTE]
+> **Dual deployment modes** — The Procfile (Heroku) and deploy_full_stack.sh (on-premise) are both maintained. The `.env` detection logic auto-sets `PG_SSLMODE=require` for Heroku and `prefer` for local.
+
+> [!IMPORTANT]
+> **unified_customer_id** is synthesized as `{phone}_{first_name_lower}` — not a stable UUID. This can cause issues if customer phone numbers or names change between orders.
+
+> [!CAUTION]
+> **offline_ tables are TRUNCATED daily** — `TRUNCATE TABLE offline_user_recommendations` before every batch insert. If the pipeline fails mid-run, recommendation serving will fall back to real-time SQL queries (which is acceptable but slower).

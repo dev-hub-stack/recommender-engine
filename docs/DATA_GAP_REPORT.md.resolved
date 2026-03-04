@@ -1,0 +1,241 @@
+# MasterGroup Data Gap Report
+## Historical Data vs. Current API Coverage
+
+> **Prepared for:** MasterGroup / MasterVerse Team  
+> **Date:** March 4, 2026  
+> **Prepared by:** Analytics & Recommendation Engine Team  
+> **Version:** 1.0
+
+---
+
+## Executive Summary
+
+The current recommendation engine connects to **two live API sources** (OE and POS). However, the historical customer database provided by the client (`CustomerDataMasterVerse.xlsx`) contains data from **11 distinct sources** — the majority of which are **completely absent from the current API**.
+
+This means **80% of the client's historical customer touchpoints** (Exhibition, JobBox, Changan, CFH, and others) are invisible to the recommendation engine, creating a significant gap in customer profiling, cross-selling capability, and personalization accuracy.
+
+| | Historical Data (Excel) | Current API Data |
+|--|------------------------|-----------------|
+| **Sources** | 11 (Exhibition, JobBox, OE, Changan, CFH, POS, CRM, others) | **2 only** (OE, POS) |
+| **Total Records** | 312,658 customers | 289,919 orders |
+| **Unique Customers** | 312,658 | 225,552 |
+| **Unique Phone Numbers** | ~312,000 | 195,148 |
+| **Data going back to** | Pre-2021 | Aug 2021 |
+
+---
+
+## Section 1 — Historical Data Analysis
+
+### 1.1 Source Breakdown (CustomerDataMasterVerse.xlsx)
+
+The Excel file contains **312,658 customer records** across **7 columns** and **11 data sources**:
+
+| Source | Records | % of Total | Status in API |
+|--------|---------|------------|---------------|
+| **Exhibition** | 109,180 | **35%** | ❌ **Not available** |
+| **JobBox** | 67,986 | **22%** | ❌ **Not available** |
+| **OE** | 47,825 | 15% | ✅ Available |
+| **Changan** | 33,065 | **11%** | ❌ **Not available** |
+| **CFH** | 21,828 | 7% | ❌ **Not available** |
+| **POS** | 15,708 | 5% | ✅ Available |
+| **Others (CRM, Dealer, etc.)** | 17,066 | 5% | ❌ **Not available** |
+| **Total** | **312,658** | **100%** | **80% missing** |
+
+> ⚠️ **Key finding:** The OE + POS sources that the current API provides represent only **20% of the client's total historical customer base**. The remaining **80% — over 250,000 customers — have purchased from or interacted with MasterGroup but are invisible to the recommendation engine.**
+
+### 1.2 Historical Data Fields (Excel)
+
+The Excel provides **7 columns** focused on who the customer is:
+
+| Column | Coverage | Notes |
+|--------|----------|-------|
+| `CustomerName` | 58% (182K) | 130K records missing — mostly Exhibition and POS walk-ins |
+| `DataSourceName` | 100% | Exhibition, JobBox, OE, Changan, CFH, POS, etc. |
+| `CityName` | 100% | Inconsistent casing (LAHORE, lahore, Lahore) |
+| `CompanyName` | 100% | MasterFoam, Changan, Celeste, Dura Foam, etc. |
+| `Mobileno` | 100% | Primary identifier; format inconsistent |
+| `CustomerAddress` | 28% (87K) | 225K missing |
+| `EmailAddress` | 4% (12K) | Very sparse |
+
+**What the historical data tells us:** Who the customer is — name, phone, city, company they bought from, and which channel acquired them.
+
+**What the historical data does NOT tell us:** What they bought, when, how much they spent, which products, order frequency.
+
+### 1.3 Historical Data Issues & Cleaning Rules
+
+> **Phone Number Normalization** — the single most important cleaning action
+
+| Current Format | Example | Count | Rule |
+|----------------|---------|-------|------|
+| 10 digits (no prefix) | `3001234567` | ~311,000 | → `+923001234567` |
+| 11 digits (0-prefix) | `03001234567` | ~1,351 | → `+923001234567` |
+| Valid international | `+923001234567` | Unknown | Keep as-is |
+| **Invalid (<10 digits)** | `123456` | **122** | → Flag as landline/error |
+| Invalid (>15 digits) | Multiple | 15 | → Flag for review |
+
+**Impact:** Normalizing phone numbers enables matching the 312K historical customers against the 195,148 unique phones in the order database — potentially linking Exhibition, JobBox, and Changan customers to their actual purchase history.
+
+| Cleaning Rule | Impact |
+|--------------|--------|
+| Normalize phone to `+92...` | Enables cross-source customer deduplication |
+| Title-case city names | Consistent province inference |
+| Deduplicate by phone across sources | True unique customer count (estimated ~250K actual people) |
+| Infer province from city | Fills ~90% of missing provinces via city-to-province map |
+
+---
+
+## Section 2 — Current API Data Analysis
+
+### 2.1 What the API Provides (OE + POS)
+
+The API delivers **transactional** data — what was bought, when, and for how much. This is the **complement** of what the Excel provides.
+
+| Column | API Coverage | Notes |
+|--------|-------------|-------|
+| `order_id` | 100% | |
+| `order_type` | 100% | OE or POS |
+| `order_date` | 100% | Aug 2021 → Mar 2026 |
+| `customer_phone` | 99.9% | 201 NULL out of 289,919 |
+| `customer_city` | 99.9% | 8 NULL |
+| `customer_name` | 99.7% | 822 NULL |
+| [province](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/main.py#5161-5220) | 98.6% | 4,122 NULL |
+| `brand_name` | 99.9% | 289,749 populated |
+| [order_status](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/main.py#1850-1972) | 99.9% | 289,749 populated |
+| `total_price` | ~100% | Some outliers (1.93B PKR entry — test data) |
+| `items_json` | ~100% | JSONB with product_id, name, qty, price |
+| `customer_email` | **46%** | 133,745 of 289,919 orders have email |
+
+### 2.2 OE vs POS Attribute Differences
+
+| Attribute | OE (Online Express) | POS (Point of Sale) |
+|-----------|--------------------|--------------------|
+| Order volume | 176,305 (61%) | 113,614 (39%) |
+| Avg order value | **PKR 24,592** | **PKR 52,935** |
+| Order status | 15 distinct statuses | **Only "completed"** |
+| Delivery tracking | ✅ (Delivered/Returned/Cancelled) | ❌ Not available |
+| Province field | `customer_state` | From `dealer.province` (nested) |
+| Product SKU in items | ✅ Yes | ⚠️ Unreliable |
+| Product category | ✅ Real categories | ❌ Returns "simple" — unusable |
+| Email address | ✅ More complete | ⚠️ Less complete |
+
+> **Client Misconception to clarify:** POS is **not** a master source that aggregates all historical data. POS represents physical in-store/dealer sales only. It has no connection to historical Exhibition leads, JobBox CRM records, or Changan sales data.
+
+### 2.3 Brand Distribution in API
+
+| Brand | Orders | % |
+|-------|--------|---|
+| Master MoltyFoam | 130,760 | 45% |
+| Affiliate Orders | 60,270 | 21% |
+| _(dash / unknown)_ | 54,797 | 19% |
+| Dura Foam | 26,286 | 9% |
+| BE By MoltyFoam | 6,140 | 2% |
+| MasterFoam | 3,604 | 1% |
+| Celeste Home Fashion | 3,059 | 1% |
+
+> 19% of orders have brand = "-" — untagged orders are a data quality issue that inflates "unknown" brand analytics.
+
+---
+
+## Section 3 — Data Gap Quantification
+
+### 3.1 The Missing 250,000+ Customers
+
+```
+Historical Excel customers:          312,658
+Customers reachable via API today:  ~195,148   (unique phones in OE+POS orders)
+                                     ----------
+GAP — customers with NO order data:  ~117,510+  (from Exhibition, JobBox, Changan, CFH)
+```
+
+> Additionally, **all 109K Exhibition** and **68K JobBox** customers are absent from the API entirely — we have no order history for them regardless of phone matching.
+
+**Recommendation engine impact:**
+
+| Customer Group | Cross-Selling Quality | Root Cause |
+|---------------|----------------------|------------|
+| OE + POS customers (~195K) | ✅ **Full** — product pairs, SVD, collaborative filtering | Full purchase history |
+| Exhibition customers (109K) | ❌ **Generic only** — popularity fallback | No purchase data whatsoever |
+| JobBox customers (68K) | ❌ **Generic only** | No purchase data whatsoever |
+| Changan customers (33K) | ❌ **Generic only** | No purchase data whatsoever |
+| CFH customers (22K) | ❌ **Generic only** | No purchase data whatsoever |
+
+### 3.2 Field-Level Comparison
+
+| Data Dimension | Historical Excel | API (OE+POS) | Gap |
+|----------------|-----------------|--------------|-----|
+| Customer identity (phone) | ✅ 312K | ✅ 195K unique | ~117K historical not in orders |
+| Acquisition channel | ✅ 100% (11 sources) | ❌ Only OE/POS label | **Excel has this; API doesn't** |
+| Purchase history | ❌ None | ✅ 290K orders | **API has this; Excel doesn't** |
+| Product details | ❌ None | ✅ 8,693 unique products | **API has this; Excel doesn't** |
+| Order status/delivery | ❌ None | ✅ OE: 15 statuses | **API has this; Excel doesn't** |
+| Revenue per customer | ❌ None | ✅ total_price per order | **API has this; Excel doesn't** |
+| Email | ⚠️ 4% (12K) | ✅ 46% (134K) | API significantly better |
+| City | ✅ 100% | ✅ 99.9% | Both have it |
+| Province | ❌ Not in Excel | ✅ 98.6% | API has it; Excel doesn't |
+| Brand preference | ✅ CompanyName | ✅ brand_name | Both have it |
+
+---
+
+## Section 4 — Recommendations
+
+### 4.1 Data Requests to Client (Priority Order)
+
+| Priority | Request | Why It Matters |
+|----------|---------|---------------|
+| 🔴 Immediate | **JobBox/CRM API or CSV export** | 68K leads — if they have order history, unlocks personalized recs for 22% of historical base |
+| 🔴 Immediate | **Clarify POS scope** | Client believes POS = master aggregator. It is not. Must correct this misconception formally. |
+| 🔴 Immediate | **Changan order data** | 33K car owners → powerful cross-sell for car accessories, cushions, etc. |
+| 🟠 High | **Exhibition conversion data** | Which of the 109K exhibition leads placed orders? Even a phone list would help us link. |
+| 🟠 High | **CFH (Celeste) sales records** | 22K customers from the home fashion brand — separate POS system likely exists |
+| 🟡 Medium | **Historical order CSV (all sources)** | Even [(phone, product, date, amount)](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/scripts/deploy_full_stack.sh#65-68) per non-API source would dramatically improve recs |
+
+### 4.2 What Ahmad Should Create
+
+**Sample API Attributes CSV** — to show client what OE/POS data contains:
+
+```csv
+order_id, order_type, order_date, customer_phone, customer_name, customer_city, province,
+total_price_pkr, payment_mode, order_status, brand, product_id, product_name, qty, unit_price
+```
+
+This directly illustrates: (a) what fields exist in OE/POS, (b) what is absent (no acquisition source, no CRM data, no Changan/CFH data), enabling a clear side-by-side comparison in the client meeting.
+
+### 4.3 Immediate Technical Action — Phone Matching
+
+With existing data, we can already do this today:
+
+```python
+# Step 1: Normalize all phones in Excel to +92 format
+# Step 2: Normalize all phones in orders DB to +92 format
+# Step 3: JOIN on phone to build enriched customer view
+
+SELECT 
+    cp.phone,
+    cp.name,
+    cp.city,
+    cp.data_source,         -- Exhibition / JobBox / Changan
+    cp.company,             -- Master MoltyFoam / Celeste / Dura Foam
+    COUNT(o.id) as total_orders,
+    SUM(o.total_price) as lifetime_value
+FROM customer_profiles cp
+LEFT JOIN orders o ON cp.phone = o.customer_phone_normalized
+GROUP BY cp.phone, cp.name, cp.city, cp.data_source, cp.company
+```
+
+**Expected outcome:** 30-50K Exhibition/JobBox customers who also placed OE/POS orders will be linked — revealing their purchase behavior for the first time.
+
+---
+
+## Action Items Summary
+
+| Owner | Action | Priority |
+|-------|--------|----------|
+| **Ahmad** | Create OE/POS attribute sample CSV for client | 🔴 Immediate |
+| **Ahmad** | Draft client email requesting JobBox + Changan data | 🔴 Immediate |
+| **Ahmad** | Correct client misconception: POS ≠ master data source | 🔴 Immediate |
+| **Dev Team** | Normalize phones in Excel + orders DB | 🟠 High |
+| **Dev Team** | Phone-match script: Excel ↔ orders DB | 🟠 High |
+| **Dev Team** | Create `customer_profiles` merged table | 🟡 Medium |
+| **Client** | Provide JobBox CRM data export or API access | 🔴 Immediate |
+| **Client** | Confirm: does Changan have separate order records? | 🔴 Immediate |
+| **Client** | Provide Exhibition conversion list (which leads became buyers?) | 🟠 High |

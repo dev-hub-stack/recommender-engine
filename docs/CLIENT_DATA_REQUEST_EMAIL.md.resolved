@@ -1,0 +1,139 @@
+# Client Data Request — Draft Email
+## Subject: Data Access Request to Enhance Recommendation Engine Personalization
+
+---
+
+**To:** MasterGroup Management Team  
+**From:** Analytics & Recommendation Engine Team  
+**Date:** March 4, 2026  
+**Re:** Request for Additional Data Sources to Complete Customer Intelligence
+
+---
+
+Dear Team,
+
+We hope this message finds you well. As part of our ongoing work on the MasterVerse Recommendation Engine, we have completed a thorough analysis of all available data sources. We are writing to share our findings and request access to additional data that is critical for delivering the personalized recommendations and cross-selling capabilities that were outlined in the project scope.
+
+---
+
+## What We Found
+
+We analyzed the customer database you provided (`CustomerDataMasterVerse.xlsx`) and compared it against what we are currently receiving from the live OE and POS APIs.
+
+**The current API only covers ~20% of your total historical customer base.**
+
+| Data Source | Customers | Currently in API? |
+|-------------|-----------|------------------|
+| Exhibition | 109,180 | ❌ No |
+| JobBox / CRM | 67,986 | ❌ No |
+| OE (Online Express) | 47,825 | ✅ Yes |
+| Changan | 33,065 | ❌ No |
+| CFH (Celeste) | 21,828 | ❌ No |
+| POS (Point of Sale) | 15,708 | ✅ Yes |
+| **TOTAL** | **312,658** | **80% missing** |
+
+This means that for **~250,000 customers** — people who attended your exhibitions, interacted with your CRM, or purchased through Changan — the recommendation engine has no data. These customers will receive only generic "popular products" suggestions, as opposed to the personalized cross-sell recommendations the project was designed to deliver.
+
+---
+
+## Clarification on POS Data
+
+We want to address a possible misconception: **POS (Point of Sale) data is not a master aggregator of all sources.** The POS API only provides records of in-store and dealer transactions. It does not include:
+
+- Exhibition lead records
+- JobBox / CRM customer registrations
+- Changan partnership sales
+- CFH / Celeste dealer network records
+
+These exist in separate systems and are not currently flowing into the recommendation engine.
+
+---
+
+## What We Are Requesting
+
+To maximize the value of the recommendation engine and enable true personalization for your full customer base, we need the following:
+
+### Priority 1 — JobBox / CRM Data
+**What we need:** An API endpoint or periodic data export from your JobBox/CRM system containing:
+- Customer phone number
+- Customer name
+- City
+- Date of interaction / lead date
+- Purchase records if available (product name, date, amount)
+
+**Why it matters:** 68,000 customers (22% of your base) are in JobBox but completely invisible to the engine. If these customers made purchases that were tracked in CRM, we can immediately unlock personalized recommendations for them.
+
+**Preferred format:** JSON API endpoint, or CSV export with columns: `phone, name, city, interaction_date, product_purchased, amount`
+
+---
+
+### Priority 2 — Changan Partnership Sales Data
+**What we need:** Order/purchase records from the Changan partnership, specifically:
+- Customer phone number
+- Product(s) purchased
+- Purchase date
+- City
+
+**Why it matters:** 33,000 Changan customers represent a powerful cross-sell opportunity — a car seat owner is an excellent candidate for MoltyFoam car cushions, ergonomic products, and home comfort products. Without their purchase data, this opportunity is completely lost.
+
+**Preferred format:** CSV export or any structured format. Even a flat list of [(phone, product, date)](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/scripts/deploy_full_stack.sh#65-68) is sufficient.
+
+---
+
+### Priority 3 — Exhibition Conversion Data
+**What we need:** Among the 109,180 exhibition leads, which customers actually placed an order afterward?
+
+**Why it matters:** Even if we can't get full purchase histories, knowing *which* exhibition leads converted to customers would allow us to segment and target the remaining 100K leads with appropriate nurture campaigns.
+
+**Preferred format:** List of phone numbers of exhibition leads who later purchased, or a flag in the existing Excel.
+
+---
+
+### Priority 4 — CFH (Celeste Home Fashion) Sales Records
+**What we need:** If Celeste Home Fashion operates on a separate POS or ordering system, access to that system's order data.
+
+**Why it matters:** 22,000 CFH customers are currently invisible. Their purchase history would enable home-décor-specific cross-sell recommendations.
+
+---
+
+## What Providing This Data Will Enable
+
+| Without Additional Data | With Additional Data |
+|------------------------|---------------------|
+| Personalized recs for ~195K customers | Personalized recs for **312K+ customers** |
+| Cross-sell based on OE+POS only | Cross-sell across **all channels** |
+| Generic suggestions for Exhibition leads | Targeted nurture campaigns by source |
+| No Changan cross-sell | Changan owner → MoltyFoam cushion cross-sell |
+| 46% email coverage | Improved email coverage for campaigns |
+
+---
+
+## For Reference — What the Current API Sample Looks Like
+
+We have prepared a sample CSV file (`OE_POS_API_Sample_Data.csv`) showing the exact attributes we receive from the current OE and POS APIs. Please note the last column **"acquisition_source_channel"** is intentionally blank — this field does not exist in the current API, meaning we cannot tell *how* a customer originally came to MasterGroup.
+
+This sample is attached for your reference to make the comparison concrete.
+
+---
+
+## Next Steps
+
+We kindly request a meeting or written response on the following:
+
+1. **Can JobBox/CRM data be exported or accessed via API?** If yes, in what format and how frequently?
+2. **Is there a separate system for Changan purchases?** Who is the point of contact?
+3. **Are there plans to integrate Exhibition leads into the main CRM?**
+
+We are happy to adapt to any existing data format — even a simple spreadsheet export on a monthly basis would significantly improve recommendation quality.
+
+Thank you for your time and cooperation. We look forward to your response.
+
+Best regards,  
+**Analytics & Recommendation Engine Team**  
+MasterVerse Project
+
+---
+
+*Attachments:*  
+- `OE_POS_API_Sample_Data.csv` — Sample of current API data attributes (50 rows, OE + POS)  
+- [DATA_GAP_REPORT.md](file:///Users/clustox_1/.gemini/antigravity/brain/a70c00b9-26c7-4b98-b556-1f8015c743ee/DATA_GAP_REPORT.md) — Full technical data gap analysis

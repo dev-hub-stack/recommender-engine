@@ -134,7 +134,7 @@
 {%- if settings.breadcrumb_pg -%}{%- include 'breadcrumb' -%}{%- else -%}<div class="topSpace"></div>{%- endif -%}
 <div class="page-width" data-section-id="{{ section.id }}" data-section-type="cart-template">    
   {% if cart.item_count > 0 %}	
-  {% render 'recommendations' %}
+
   <h1 class="page-title">{{ 'cart.general.title' | t }}</h1>
   <form action="{{ routes.cart_url }}" method="post" novalidate class="cart{% if section.settings.layout == "style2" %} grid style2{% else %} style1{% endif %}">
     {% if section.settings.layout == "style1" %}
@@ -189,7 +189,7 @@
 
 <!-- MasterGroup AI Cart Recommendations - START -->
 <div class="mg-recommendations-wrapper" style="margin: 40px auto; padding: 30px; background: linear-gradient(135deg, #fff8f0 0%, #ffe9c0 100%); border-radius: 12px; max-width: 1200px;">
-  <h3 style="margin-bottom: 20px; font-size: 1.4rem; font-weight: bold; color: #ed1c24; text-align: center;">Complete Your Order</h3>
+  <h3 style="margin-bottom: 20px; font-size: 1.4rem; font-weight: bold; color: #ed1c24; text-align: center;">You May Also Like</h3>
   <div id="mg-cart-recs" style="display: flex; gap: 20px; flex-wrap: wrap; justify-content: center;"></div>
 </div>
 

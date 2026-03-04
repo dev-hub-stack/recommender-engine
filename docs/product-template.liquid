@@ -784,10 +784,11 @@
   container.innerHTML = '<p style="color: #666; text-align: center;">Finding similar products...</p>';
   
   // MasterGroup Recommendation API - Production Server
-  var API_BASE = 'http://3.209.80.206:8001/api/v1/shopify';
+  var API_BASE = 'https://master-analyticsdashboard.netlify.app/api/v1/shopify';
   
-  // Get current product Shopify ID
+  // Get current product Shopify ID and Handle
   var productId = '{{ product.id }}';
+  var currentHandle = '{{ product.handle }}';
   
   // Customer data for personalized recommendations
   var customerData = {
@@ -802,7 +803,20 @@
       container.parentElement.style.display = 'none';
       return;
     }
-    container.innerHTML = products.slice(0, 4).map(function(item) {
+    
+    // Filter out current product and limit to 4
+    var filtered = products.filter(function(p) {
+      return p.shopify_handle !== currentHandle && 
+             p.item_id !== productId &&
+             p.item_name !== '{{ product.title | replace: "'", "\'" }}'; // Basic name check
+    }).slice(0, 4);
+    
+    if (filtered.length === 0) {
+      container.parentElement.style.display = 'none';
+      return;
+    }
+
+    container.innerHTML = filtered.map(function(item) {
       var name = item.item_name || item.product_name || 'Product';
       var imageUrl = item.image_url || '';
       var handle = item.shopify_handle || '';
@@ -821,7 +835,7 @@
   }
   
   // First try similar products for this Shopify product ID
-  fetch(API_BASE + '/similar/' + productId + '?limit=4')
+  fetch(API_BASE + '/similar/' + productId + '?limit=6')
     .then(function(res) { return res.json(); })
     .then(function(data) {
       if (data.success && data.similar_products && data.similar_products.length > 0) {
@@ -839,12 +853,12 @@
               current_product: productId,
               city: customerData.city,
               province: customerData.province,
-              limit: 4
+              limit: 6
             })
           }).then(function(res) { return res.json(); });
         } else {
           // Anonymous user - get popular products
-          return fetch(API_BASE + '/popular?limit=4').then(function(res) { return res.json(); });
+          return fetch(API_BASE + '/popular?limit=6').then(function(res) { return res.json(); });
         }
       }
     })

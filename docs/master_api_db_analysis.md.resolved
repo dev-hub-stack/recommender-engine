@@ -1,0 +1,261 @@
+# Master Group APIs → PostgreSQL: Complete Data Flow Analysis
+> **Live EC2 Server:** `ubuntu@3.209.80.206` · `/opt/mastergroup-ml`  
+> **Database:** `mastergroup_recommendations` (PostgreSQL 14, localhost)  
+> **Queried:** 2026-03-04
+
+---
+
+## 1. The Two APIs
+
+| API | Endpoint | Timeout | Purpose |
+|-----|----------|---------|---------|
+| **OE** (Online/E-Commerce) | `https://mes.master.com.pk/get_oe_orders` | 600s (10 min) | Shopify/web orders |
+| **POS** (Point of Sale) | `https://mes.master.com.pk/get_pos_orders` | 120s | In-store/dealer orders |
+
+**Auth:** `Authorization: H2rcLQPfzYoV55k9ZyT5aWkyyMKEyxHhX1r3ntrkrvrGeVL4dOsGv3EcQMY2`  
+**Request params:** `start_date=YYYY-MM-DD&end_date=YYYY-MM-DD` (optional `limit`)  
+**Response:** JSON array or `{"data": [...]}` wrapper
+
+---
+
+## 2. Raw API Response → What Fields Come In
+
+### OE API Fields (Online Orders)
+| API field | Meaning |
+|-----------|---------|
+| [id](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/data_loader.py#492-511) | Order ID |
+| `order_date` / `created_at` | When order was placed |
+| [order_status](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/main.py#1850-1972) | `Delivered Orders`, `Cancelled Orders`, `Returned Orders`, `Pending Orders`, `Courier In-Process`, `Dealer Orders`, `Awaiting Approval`, `LHR/KHI Warehouse Orders`, `Dispatched Orders`, `Refund Orders` |
+| `customer_name` | Full name |
+| `customer_phone` | Phone string |
+| `customer_city` | City text |
+| `customer_state` | Province (OE uses `customer_state`) |
+| `customer_address` | Full address |
+| `customer_email` | Email |
+| `total_price` | Order total |
+| `payment_mode` | `Cash`, `Bank Transfer`, etc. |
+| `brand_name` | Brand |
+| `order_name` | Human-readable name |
+| `has_items[]` | Array of line items (OE uses `has_items`) |
+| **Item fields:** [id](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/data_loader.py#492-511) (product_id), `title` (name), `sku`, `product_type`, `quantity`, `price`, `base_price` |
+
+### POS API Fields (In-Store/Dealer)
+| API field | Meaning |
+|-----------|---------|
+| [id](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/data_loader.py#492-511) | Order ID |
+| `customer_phone` / `phone` | Customer phone |
+| `customer_name` / `name` | Name |
+| `customer_city` / [city](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/main.py#2095-2191) | City (or from `dealer.city` if blank) |
+| `order_date` / [date](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/data_loader.py#492-511) | Date |
+| `total` / `total_price` | Total |
+| `payment_mode` | Payment method |
+| [order_status](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/main.py#1850-1972) / [status](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/services/scheduler.py#207-218) | Always `completed` for POS |
+| `dealer.province` | Province (POS uses nested dealer object) |
+| `items[]` / `order_items[]` | Line items |
+| **Item fields:** [product_id](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/main.py#5994-6044), `name`, `sku`, `quantity`, `price`, `unit_price` |
+
+> ⚠️ **Key difference:** OE items use `has_items` + `title`, POS uses [items](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/scripts/setup_database.py#124-157) + `name`. Both are handled by the [transform_order_data()](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/services/sync_service.py#169-235) function.
+
+---
+
+## 3. Transformation Logic (`services/sync_service.py → transform_order_data()`)
+
+```
+Raw API order
+    │
+    ▼
+1. unified_customer_id = f"{customer_phone}_{customer_name}".strip('_')
+2. province:
+     OE → order.customer_state
+     POS → order.dealer.province  (falls back if customer field empty)
+3. customer_city:
+     OE → order.customer_city
+     POS → order.customer_city OR order.dealer.city
+4. items loop → build items_json array:
+     product_id = item.id OR item.product_id OR item.sku
+     product_name = item.title OR item.product_name OR item.name
+     sku = item.sku (only reliable in OE)
+     category = item.product_type  (only real in OE; POS sends "simple" → cleared)
+     quantity = item.quantity
+     price = item.price
+     unit_price = item.base_price OR item.unit_price OR item.price
+5. order_type = "OE" or "POS"
+6. items_json stored as JSONB in orders table
+   items list used to insert into order_items table
+```
+
+**Province fallback chain** (in [local_ml_pipeline.py](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/scripts/local_ml_pipeline.py)):  
+`order.customer_province` → `order.province` → [get_province_from_city(city)](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/scripts/local_ml_pipeline.py#226-233) → city-to-province mapping table
+
+---
+
+## 4. PostgreSQL Storage: Full Schema
+
+### [orders](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/services/sync_service.py#236-317) table (289,919 rows · 272 MB)
+
+| Column | Type | Notes |
+|--------|------|-------|
+| [id](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/data_loader.py#492-511) | varchar PK | OE: numeric string, POS: varies |
+| `order_type` | varchar NOT NULL | `OE` or `POS` |
+| `source_type` | varchar | Same as order_type (added later) |
+| `order_date` | timestamp | Parsed from API |
+| `order_name` | varchar | Human-readable order name |
+| [order_status](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/main.py#1850-1972) | varchar | See status breakdown below |
+| `customer_name` | varchar | Raw name |
+| `customer_email` | varchar | |
+| `customer_phone` | varchar | |
+| `customer_city` | varchar | Raw city string |
+| `customer_address` | text | |
+| `unified_customer_id` | varchar | `phone_firstname` synthetic key |
+| `total_price` | numeric | Order total in PKR |
+| `payment_mode` | varchar | Cash, Bank Transfer... |
+| `brand_name` | varchar | |
+| `items_json` | **jsonb** | Full line-items array stored as JSON |
+| [province](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/main.py#5161-5220) | varchar | Normalized province |
+| [region](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/main.py#450-466) | varchar | Central/South/North/West |
+| `created_at`, `updated_at`, `synced_at` | timestamp | Audit timestamps |
+
+### [order_items](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/scripts/setup_database.py#124-157) table (230,717 rows · 471 MB)
+
+| Column | Type | Notes |
+|--------|------|-------|
+| [id](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/data_loader.py#492-511) | integer PK | Auto-increment |
+| `order_id` | varchar FK → orders.id | |
+| [product_id](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/main.py#5994-6044) | varchar | SKU preferred, else API id |
+| `product_name` | varchar | Product name + SKU appended |
+| `quantity` | integer | |
+| `unit_price` | numeric | Per-unit price PKR |
+| `total_price` | numeric | qty × unit_price |
+| `created_at` | timestamp | |
+
+### `customer_statistics` table (357,668 rows · 58 MB)
+
+| Column | Type |
+|--------|------|
+| `customer_id` | varchar PK |
+| `customer_name` | varchar |
+| `customer_city` | varchar |
+| `total_orders` | integer |
+| `total_products` | integer |
+| `unique_products` | integer |
+| `total_spent` | numeric |
+| `avg_order_value` | numeric |
+| `first_order_date` | timestamp |
+| `last_order_date` | timestamp |
+| `customer_segment` | varchar (RFM segment) |
+| `updated_at` | timestamp |
+
+---
+
+## 5. Live Database Numbers (EC2, queried 2026-03-04)
+
+### Table Sizes
+| Table | Rows | Size |
+|-------|------|------|
+| [order_items](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/scripts/setup_database.py#124-157) | 230,717 | **471 MB** |
+| [orders](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/services/sync_service.py#236-317) | 289,919 | **272 MB** |
+| `offline_user_recommendations` | 119,871 | 165 MB |
+| `customer_statistics` | 357,668 | 58 MB |
+| `customer_purchases` | — | 27 MB |
+| `offline_similar_items` | 8,693 | 5.9 MB |
+| [product_pairs](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/main.py#4010-4048) | 19,457 | 2.9 MB |
+| [ml_models](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/main.py#3537-3578) | — | 2.9 MB |
+| [sync_metadata](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/services/sync_service.py#69-88) | 55 | 96 KB |
+
+### OE vs POS Orders
+| Source | Count | Avg Order Value | Date Range |
+|--------|-------|----------------|------------|
+| **OE** | 176,305 | PKR 24,592 | Aug 2021 → Mar 2026 |
+| **POS** | 113,614 | PKR 52,935 | Mar 2022 → Feb 2026 |
+
+> POS orders are ~2.15× higher value than OE — dealers buy in bulk
+
+### Order Status Breakdown
+| Status | Source | Count |
+|--------|--------|-------|
+| Delivered Orders | OE | 121,956 |
+| completed | POS | 113,528 |
+| Cancelled Orders | OE | 38,164 |
+| Returned Orders | OE | 8,200 |
+| Awaiting Assigning | OE | 2,563 |
+| Pending Orders | OE | 1,859 |
+| Courier In-Process | OE | 1,470 |
+| Others | OE | ~2k |
+
+### Top 10 Products
+| Product | Orders | Qty Sold | Avg Price |
+|---------|--------|----------|-----------|
+| MOLTY FOAM 78-72-6 | 8,011 | 9,780 | PKR 37,995 |
+| MOLTY FOAM 78-72-8 | 5,017 | 6,367 | PKR 52,524 |
+| MOLTY FOAM 22-22-4 | 3,551 | **32,258** | PKR 1,411 |
+| GOLD PILLOW | 3,224 | 9,244 | PKR 1,703 |
+| Coccyx Cushion | 3,148 | 3,259 | PKR 4,703 |
+| MoltyOrtho Back Care Cushion | 2,800 | 3,012 | PKR 4,433 |
+| MASTER CREST 78-72 | 2,744 | 3,698 | PKR 24,920 |
+| MOLTY COCCYX CUSHION | 2,676 | 3,072 | PKR 4,539 |
+| JET FOAM 78-72-6 | 2,494 | 3,336 | PKR 18,454 |
+| MOLTY FOAM 78-72-5 | 2,383 | 2,569 | PKR 31,793 |
+
+### Geographic Distribution (Province)
+| Province | Orders |
+|----------|--------|
+| Punjab | 201,471 (69%) |
+| Sindh | 53,784 (19%) |
+| Islamabad | 18,491 (6%) |
+| Khyber Pakhtunkhwa | 8,639 (3%) |
+| NULL (unknown) | 4,122 |
+| Balochistan | 1,980 |
+| Islamabad Capital Territory | 673 (duplicate — needs cleaning) |
+| Azad Kashmir | 498 |
+| Gilgit-Baltistan | 255 |
+
+> ⚠️ `Islamabad` and `Islamabad Capital Territory` are the same province — data quality issue in province normalization.
+
+### Sync History (Last 5 Runs)
+| Timestamp | Orders Synced | Status |
+|-----------|--------------|--------|
+| 2025-12-16 02:00:13 | 716 | success |
+| 2025-12-16 02:00:11 | 716 | success |
+| 2025-12-16 02:00:10 | 716 | success |
+| 2025-12-16 02:00:08 | 716 | success |
+| 2025-12-14 02:00:16 | 1,068 | success |
+
+> ⚠️ **Last sync: 2025-12-16** — over 2.5 months ago! The cron jobs may not be running. DB has orders up to Mar 2026 (OE) and Feb 2026 (POS), meaning data was either loaded via [local_ml_pipeline.py](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/scripts/local_ml_pipeline.py) directly or sync ran but didn't update sync_metadata.
+
+---
+
+## 6. Insert Strategy (Upsert)
+
+```sql
+-- Orders: upsert on conflict
+INSERT INTO orders (id, order_type, ..., items_json)
+VALUES (%s, ...)
+ON CONFLICT (id) DO UPDATE SET
+    updated_at = CURRENT_TIMESTAMP,
+    synced_at = CURRENT_TIMESTAMP,
+    province = COALESCE(EXCLUDED.province, orders.province),
+    source_type = COALESCE(EXCLUDED.source_type, orders.source_type)
+
+-- Order items: insert, skip if exists
+INSERT INTO order_items (order_id, product_id, product_name, quantity, unit_price, total_price)
+VALUES (...)
+ON CONFLICT DO NOTHING
+```
+
+Uses **SAVEPOINT** per order — if one order fails, the transaction continues (no full rollback).
+
+---
+
+## 7. Data Issues Found
+
+> [!CAUTION]
+> **`customer_phone` is NULL in sampled orders.** The `unified_customer_id` is built from `phone_name`, but if phone is empty, IDs become `_name_only` — breaking customer identity linking.
+
+> [!WARNING]
+> **Duplicate province names:** `Islamabad` ≠ `Islamabad Capital Territory` — 673 orders have the longer variant. The [normalize_province()](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/main.py#426-448) function handles this in SQL queries but NOT during insert.
+
+> [!WARNING]
+> **order_items rows (230K) < orders rows (289K):** Many orders have no items in [order_items](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/scripts/setup_database.py#124-157) table — their products are stored only in `items_json` JSONB column. The `populate_order_items_from_orders()` stored function should be run to normalize these.
+
+> [!NOTE]
+> **Dual product_id strategy:** OE uses numeric Shopify product IDs (e.g., `1297`), POS uses SKU strings. This means the same physical product can have two different [product_id](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/main.py#5994-6044) values depending on the source — important for recommendation deduplication.

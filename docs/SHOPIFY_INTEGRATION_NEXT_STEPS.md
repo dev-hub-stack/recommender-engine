@@ -17,41 +17,41 @@
   - Cards are clickable links to product pages.
   - Removed "AI Match %" (internal metric) for cleaner UI.
 - **Cart Template (`cart-template.liquid`)**:
-  - Remved static "Recommendations" section.
+  - Removed static "Recommendations" section.
   - Added "Complete Your Order" section at the bottom.
   - Uses cart items for context-aware recommendations.
   - Displays images and links correctly.
 
 ---
 
-## 🚀 Immediate Next Steps (Action Required)
+## 🚀 Immediate Next Steps
 
-### 1. Setup Order Webhook in Shopify Admin (CRITICAL)
-The order webhook is required to capture new sales data for real-time model retraining and customer personalization.
+### 1. Verify Data Sync (Existing Pipeline)
+You indicated that an existing ML pipeline (`local_ml_pipeline.py`) already syncs order data daily from MasterGroup APIs.
+- **Action**: Ensure this pipeline is running correctly so that new Shopify orders (which flow into your ERP) are ingested into the recommendation database.
+- **Verification**: Check logs at `/tmp/ml_pipeline.log` on the EC2 instance to confirm daily successful runs.
 
-1.  **Login to Shopify Admin** -> **Settings** -> **Notifications** -> **Webhooks**.
-2.  Click **Create webhook**.
-3.  **Configure**:
-    *   **Event**: `Order creation`
-    *   **Format**: `JSON`
-    *   **URL**: `http://3.209.80.206:8001/api/v1/shopify/webhook/order-created`
-    *   **API version**: `2024-01` (or latest)
-4.  **Save** and click "Send test notification".
-
-### 2. Verify on Storefront
+### 2. Verify Storefront Integration
 Since GitHub Actions automatically deploys the code, verify the changes on your live store:
 1.  **Go to a Product Page**: Check if "You May Also Like" appears at the bottom with images.
 2.  **Go to Cart Page**: Check if the old "Recommendations" section is gone from the top, and "Complete Your Order" appears at the bottom.
 3.  **Click a Recommendation**: Ensure it takes you to the correct product page.
 
+### 3. Maintain Product Mappings
+As you add new products to Shopify, you need to update the mappings so the recommendation engine knows about them.
+- **Action**: Run the mapping script periodically.
+  ```bash
+  ssh ubuntu@3.209.80.206 "cd /opt/mastergroup-ml && source venv/bin/activate && python scripts/populate_shopify_mapping.py --refresh"
+  ```
+- **Suggestion**: Add this to your daily cron job if you add products frequently.
+
 ---
 
-## 📋 Future / Backlog Items
+## 📋 Future / Low Priority
 
-### 1. SSL/HTTPS Implementation (Recommended for Production)
+### 1. SSL/HTTPS Implementation
 *   **Goal**: Secure the API with HTTPS.
 *   **Action**: Use Let's Encrypt / Certbot on the EC2 instance and update Nginx config.
-*   **Impact**: Required for some browsers/security policies, though currently working on HTTP.
 
 ### 2. Address "Unknown" Provinces
 *   **Goal**: Clean up the remaining 737 unknown province entries in the database.

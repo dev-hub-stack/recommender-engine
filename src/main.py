@@ -381,10 +381,10 @@ def get_time_filter_clause(time_filter: str, table_alias: str = "o") -> tuple:
 
 def get_order_source_filter(order_source: str, table_alias: str = "o", include_delivered_only: bool = False, has_where_clause: bool = True) -> tuple:
     """
-    Get SQL filter conditions for order source (OE/POS).
+    Get SQL filter conditions for order source (OE/POS/HISTORICAL).
     
     Args:
-        order_source: Filter by order source - 'all', 'oe', 'pos'
+        order_source: Filter by order source - 'all', 'oe', 'pos', 'historical'
         table_alias: Table alias to use (default 'o' for orders table)
         include_delivered_only: If True, only include delivered/completed orders
                                OE: order_status = 'Delivered Orders'
@@ -399,9 +399,16 @@ def get_order_source_filter(order_source: str, table_alias: str = "o", include_d
     params = []
     
     # Filter by order source type
-    if order_source and order_source.lower() in ['oe', 'pos']:
+    if order_source and order_source.lower() == 'historical':
+        # Historical records are tagged by source_type, not order_type
+        # (order_type='OE' was required to satisfy the DB CHECK constraint during ingestion)
+        conditions.append(f"{table_alias}.source_type = %s")
+        params.append('HISTORICAL')
+    elif order_source and order_source.lower() in ['oe', 'pos']:
+        # For OE/POS live orders, exclude historical records
         conditions.append(f"UPPER({table_alias}.order_type) = %s")
         params.append(order_source.upper())
+        conditions.append(f"COALESCE({table_alias}.source_type, '') != 'HISTORICAL'")
     
     # Filter by delivered/fulfilled status
     if include_delivered_only:
@@ -421,6 +428,7 @@ def get_order_source_filter(order_source: str, table_alias: str = "o", include_d
         prefix = " AND " if has_where_clause else " WHERE "
         return prefix + " AND ".join(conditions), tuple(params)
     return "", ()
+
 
 
 def normalize_province(province: str) -> str:
@@ -3266,6 +3274,82 @@ async def get_pos_vs_oe_revenue(
         }
     except Exception as e:
         logger.error(f"POS vs OE revenue error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            conn.close()
+
+
+# ─── Historical Store / Channel Breakdown ────────────────────────────────────
+
+@app.get("/api/v1/analytics/historical/store-channels")
+async def get_historical_store_channels():
+    """
+    Returns per-channel breakdown of historical customers.
+    Channels are encoded in order_name as 'Historical import - {channel}'.
+    """
+    conn = None
+    try:
+        conn = psycopg2.connect(**get_pg_connection_params())
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        # Total historical count for share calculation
+        cur.execute("""
+            SELECT COUNT(*) AS total FROM orders WHERE source_type = 'HISTORICAL'
+        """)
+        total_row = cur.fetchone()
+        total_historical = int(total_row['total']) if total_row else 0
+
+        # Per-channel + province breakdown
+        cur.execute("""
+            SELECT
+                REPLACE(order_name, 'Historical import - ', '') AS channel,
+                province,
+                COUNT(*) AS province_count
+            FROM orders
+            WHERE source_type = 'HISTORICAL' AND order_name IS NOT NULL
+            GROUP BY order_name, province
+            ORDER BY channel, province_count DESC
+        """)
+        rows = cur.fetchall()
+
+        # Channel totals
+        cur.execute("""
+            SELECT
+                REPLACE(order_name, 'Historical import - ', '') AS channel,
+                COUNT(*) AS customers
+            FROM orders
+            WHERE source_type = 'HISTORICAL' AND order_name IS NOT NULL
+            GROUP BY order_name
+            ORDER BY customers DESC
+        """)
+        totals = {r['channel']: int(r['customers']) for r in cur.fetchall()}
+
+        # Build structured response
+        channel_map: dict = {}
+        for r in rows:
+            ch = r['channel']
+            if ch not in channel_map:
+                channel_map[ch] = {
+                    'channel': ch,
+                    'customers': totals.get(ch, 0),
+                    'share_pct': round(totals.get(ch, 0) / total_historical * 100, 1) if total_historical else 0,
+                    'provinces': []
+                }
+            if r['province']:
+                channel_map[ch]['provinces'].append({
+                    'province': r['province'],
+                    'count': int(r['province_count'])
+                })
+
+        channels = sorted(channel_map.values(), key=lambda x: x['customers'], reverse=True)
+        for ch in channels:
+            ch['provinces'] = sorted(ch['provinces'], key=lambda x: x['count'], reverse=True)[:5]
+
+        return {'success': True, 'total_historical': total_historical, 'channels': channels}
+
+    except Exception as e:
+        logger.error(f"Historical store channel error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if conn:

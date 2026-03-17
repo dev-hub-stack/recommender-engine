@@ -6134,7 +6134,8 @@ async def export_dashboard_csv(
     sections: str = Query("all", description="Sections to export: all, metrics, products, orders, dashboard, customer_profiling, collaborative_filtering, cross_selling, geographic_intelligence, rfm_segmentation, ml_recommendations, historical_channels"),
     categories: str = Query(None, description="Comma-separated list of categories"),
     order_source: str = Query("all", description="Order source filter: all, oe, pos"),
-    delivered_only: bool = Query(False, description="Filter to only delivered/completed orders")
+    delivered_only: bool = Query(False, description="Filter to only delivered/completed orders"),
+    historical_channel: str = Query(None, description="Detailed export for a specific historical channel")
 ):
     """
     Export dashboard data as CSV with time and category filters
@@ -6497,11 +6498,14 @@ async def export_dashboard_csv(
                 writer.writerow(["Generated:", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
                 
             writer.writerow([])
-            writer.writerow(["HISTORICAL STORE / CHANNEL DISTRIBUTION"])
+            if historical_channel:
+                writer.writerow([f"HISTORICAL STORE DISTRIBUTION: {historical_channel.upper()}"])
+            else:
+                writer.writerow(["HISTORICAL STORE / CHANNEL DISTRIBUTION"])
             writer.writerow(["=" * 50])
             writer.writerow(["Channel", "Province", "Customers"])
 
-            query = """
+            base_query = """
                 SELECT
                     REPLACE(order_name, 'Historical import - ', '') AS channel,
                     province,
@@ -6509,10 +6513,19 @@ async def export_dashboard_csv(
                 FROM orders
                 WHERE source_type = 'HISTORICAL'
                   AND order_name IS NOT NULL
+            """
+            
+            query_params = []
+            if historical_channel:
+                base_query += " AND REPLACE(order_name, 'Historical import - ', '') = %s"
+                query_params.append(historical_channel)
+                
+            base_query += """
                 GROUP BY order_name, province
                 ORDER BY customers DESC
             """
-            cursor.execute(query)
+            
+            cursor.execute(base_query, tuple(query_params))
             for row in cursor.fetchall():
                 writer.writerow([
                     row['channel'] or 'Unknown',

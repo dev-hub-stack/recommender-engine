@@ -1,0 +1,93 @@
+# Data Gap Report — Structured Per-Source Response
+> Responding to Ammar Sohail's requirements doc  
+> Numbers computed live from `CustomerDataMasterVerse.xlsx` (312,658 rows)
+
+---
+
+## 1. Data Completeness Summary — Per Source
+
+| Source | Records | Unique Phones | % Name | % City | % Email | % Address |
+|--------|--------:|-------------:|-------:|-------:|--------:|----------:|
+| **Exhibition** | 109,180 | 109,162 | 31% | 100% | 0% | 0% |
+| **JobBox** | 67,986 | 67,986 | 97% | 100% | 0% | 0% |
+| **OE** | 47,825 | 47,825 | 26% | 100% | 25% | 100% |
+| **Changan** | 33,065 | 33,065 | 100% | 100% | 0% | 0% |
+| **CFH** | 21,828 | 21,828 | 100% | 100% | 2% | 100% |
+| **POS** | 15,708 | 15,708 | 0% | 100% | 0% | 99% |
+| **Others** | 17,066 | ~17,000 | ~varies | 100% | ~0% | ~varies |
+
+**"Others" breakdown:** DuraFoam (5,106) · MasterOffisysView (4,516) · Dealers (4,072) · DDS (3,335) · MoltyHome (37)
+
+> **What this tells us about identity strength:**
+> - **JobBox / Changan / CFH** — strong identity data (name + phone always captured), but **zero email** → can be reached by phone only
+> - **Exhibition** — 69% missing name → mostly anonymous footfall; phone is the only identifier
+> - **POS** — 0% name in Excel (names are stored in the live POS API, not the Excel snapshot)
+> - **OE** — weakest name capture (26%) but has **25% email**, the only channel with meaningful email coverage
+
+---
+
+## 2. What Each Historical Source Represents
+
+| Source | What This Source Likely Represents |
+|--------|-----------------------------------|
+| **Exhibition** | Footfall / leads captured at MasterGroup trade shows and exhibitions. Customers who visited a stall, expressed interest, or gave their phone for a follow-up. **No purchase record implied** — these are leads, not confirmed buyers. |
+| **JobBox** | CRM / lead management system records. Customers who interacted with a sales agent, placed an inquiry, or were registered in the CRM pipeline. May or may not have converted to a sale. |
+| **OE** | Online Express — Shopify-based e-commerce orders placed on the MasterGroup website. Each row = a confirmed online purchase. Has the richest data (address, partial email, order items). |
+| **Changan** | Partnership sales via the MasterGroup × Changan automotive partnership. Customers who bought a Changan vehicle and were offered MasterGroup products (e.g., car cushions, seat accessories). Each row = a Changan-channel customer interaction. |
+| **CFH** | Celeste Home Fashion — home décor / bedding brand under MasterGroup. Customers who purchased from CFH retail, likely through a separate POS or dealer system. Each row = a CFH transaction or registered customer. |
+| **POS** | Point of Sale — in-store and dealer transactions recorded at MasterGroup retail counters. Walk-in customers; names not captured in this Excel snapshot (captured separately in the live POS system). |
+| **Others** | Internal system snapshots: `DuraFoam` (Dura Foam brand contacts), `MasterOffisysView` (internal ERP/office system view), `Dealers` (registered dealer accounts), `DDS` (dealer distribution system), `MoltyHome` (MoltyHome brand contacts). Mostly B2B / channel partner records. |
+
+---
+
+## 3. Data Quality Issues — Per Source
+
+| Source | Key Data Issues (Historical Excel) | Key Data Issues (API / Live System) |
+|--------|------------------------------------|--------------------------------------|
+| **Exhibition** | **69% missing names** — walk-in footfall only gives phone. No address. No email. Phone format inconsistent (10-digit without `+92` prefix). | N/A — not in API |
+| **JobBox** | Very good identity data (97% name, 100% phone). **Zero email** — CRM didn't capture email. Phone normalization needed (`3xxxxxxxxx` → `+923xxxxxxxxx`). | N/A — not in API |
+| **OE** | **74% missing names** in Excel snapshot (online orders often use first name only or alias). 75% missing email in Excel. However the live OE API fills these gaps significantly. | Phone format inconsistency (11-digit `03x` vs 10-digit `3x`). Province blank for smaller cities. Duplicate province names (`Islamabad` vs `Islamabad Capital Territory`). |
+| **Changan** | **100% name and phone** — clean partnership data. Zero email, zero address. Only 33K records but high completeness. | N/A — not in API. No order/product data available. |
+| **CFH** | **100% name and phone**, 2% email only. 100% address — physical address captured. No product/purchase data in Excel. | N/A — not in API (separate Celeste POS system likely exists) |
+| **POS** | **0% name in Excel** — names exist in live POS system but were not included in this Excel export. 99% address coverage is misleading — it's dealer address, not customer address. | `brand_name` always `"-"` (19% of all DB orders). Product IDs inconsistent: some numeric (`77263`), some slugs (`Molty-Spring-78-66`). Dummy phone `03000000000` used for anonymous walk-ins. `order_status` always `"completed"` — no cancellations or returns tracked. |
+| **Others** | Mixed quality. `Dealers` records are B2B (company name, no individual). `MoltyHome` has only 37 records. `DDS` likely reseller channel. | N/A — not in API |
+
+---
+
+## 4. Source-Level Relevance for Recommendations
+
+| Source | Current Use for Recommendations | Missing Data to Improve |
+|--------|--------------------------------|------------------------|
+| **OE** | ✅ **Full personalization** — collaborative filtering, SVD, product pairs, content-based similarity. Full purchase history available (176K orders). | Acquisition channel attribution (how customer found us). 75% email gap limits email-based campaigns. |
+| **POS** | ✅ **Full personalization** — 113K orders used for all ML algorithms. Higher avg order value (PKR 52K vs OE PKR 24K). | Product categories not captured (`product_type = "simple"` — unusable). Brand always blank. Returns/cancellations not tracked. |
+| **Exhibition** | ❌ **Generic only** — 109K customers receive only popularity-based fallback suggestions. No purchase data exists. | Need: which exhibition leads converted to buyers (phone match). If conversion data provided, we can link ~30-50K leads to real purchase history. |
+| **JobBox** | ❌ **Generic only** — 68K CRM leads receive only popularity fallback. No purchase data. | Need: CRM purchase records or order history per phone. Even `(phone, product, date, amount)` would unlock personalization for this segment. |
+| **Changan** | ❌ **Generic only** — 33K Changan customers have no MasterGroup purchase data. Massive missed cross-sell opportunity (car owner → car cushions, ergonomic products). | Need: Changan order records. Known product affinity: car accessories → MoltyFoam / ergonomic crossover. |
+| **CFH** | ❌ **Generic only** — 22K CFH customers invisible to engine. Home décor purchase signals could enable home-comfort cross-sell. | Need: CFH sales records. CFH → Celeste home bedding → MoltyFoam sleep products is a natural cross-sell path. |
+
+---
+
+## 5. Data Requests Mapped to Each Source
+
+| Source | Data Needed | Reason | Preferred Format |
+|--------|------------|--------|-----------------|
+| **JobBox** | Purchase/order history per CRM customer | 68K leads (22% of base) have zero purchase data. Even partial history unlocks personalized recs. | CSV: `phone, product_name, purchase_date, amount` or JSON API |
+| **Changan** | Customer purchase records from the Changan partnership | 33K car owners are prime cross-sell targets (car accessories → MoltyFoam products). Currently zero data. | CSV: `phone, product, date, city` minimum |
+| **Exhibition** | Conversion list: which exhibition leads placed orders after the event | 109K leads. Even a binary "converted / didn't convert" flag or list of phones that bought enables segmentation. | Excel / CSV: `phone, converted (Y/N)` or just list of phones that converted |
+| **CFH** | Sales records from Celeste Home Fashion's POS or ordering system | 22K CFH customers are on a different system. Their home décor purchases would feed cross-sell recommendations (CFH → MoltyFoam bedding). | CSV or API access to CFH's order system |
+| **POS** | Product category tagging for POS items | POS items return `product_type = "simple"` — categories are completely absent, breaking category-level analytics and filtering. | Either a product master list (`product_id → category`) or API fix |
+| **OE** | No additional data needed | OE is the most complete source. Already feeding full recommendations. | — |
+
+---
+
+## Summary: Data Quality Normalization Rules — Source-Wise
+
+| Source | Priority Cleaning Action | Impact |
+|--------|-------------------------|--------|
+| All sources | Normalize phone: `3xxxxxxxxx` or `03xxxxxxxxx` → `+923xxxxxxxxx` | Enables cross-source customer deduplication |
+| All sources | Deduplicate customers by normalized phone across sources | Reduces 312K records to estimated ~250K actual unique people |
+| Exhibition | Flag records with `Mobileno` length < 10 as invalid (122 records) | Removes unresolvable identity records |
+| All cities | Title-case city names (`LAHORE` → `Lahore`) | Consistent province inference |
+| OE (DB) | Fix `Islamabad Capital Territory` → `Islamabad` at insert time | Fixes 673 orders mis-aggregated in geographic analytics |
+| POS (DB) | Map numeric product IDs to canonical SKU slugs via product master | Fixes cross-source product recommendation deduplication |
+| POS (DB) | Populate `brand_name` for 54,797 `-` orders from product master | Fixes 19% of orders invisible in brand analytics |

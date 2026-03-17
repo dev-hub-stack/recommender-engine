@@ -1,0 +1,136 @@
+# Historical Data Ingestion — Completion Report
+**Date:** 2026-03-17 | **Executed on:** EC2 (`ubuntu@3.209.80.206`) → RDS (`mastergroup_recommendations`)
+
+---
+
+## 1. Ingestion Summary
+
+| Metric | Count |
+|--------|-------|
+| Total CSV rows processed | 310,857 |
+| **New historical records inserted** | **237,597** ✅ |
+| New `customer_statistics` rows seeded | **237,597** ✅ |
+| Overlap customers enriched (name/city) | 15,094 |
+| Overlap customers skipped (already richer in DB) | 58,166 |
+| Skipped (no valid phone) | 0 |
+| Duration | ~13 minutes (63 batches of 5,000) |
+| Errors | **0** |
+
+### DB Counts After Ingestion
+
+| source_type | Orders |
+|------------|--------|
+| `HISTORICAL` | 237,597 |
+| `OE` | 176,748 |
+| `POS` | 116,882 |
+| **Grand Total** | **531,227** |
+
+> Historical records are tagged: `source_type='HISTORICAL'`, `order_status='IMPORTED'`, `order_type='OE'`, `order_date='1900-01-01'`
+
+---
+
+## 2. Can We Filter by Store Type?
+
+**Yes — and it is already possible right now.**
+
+The `DataSourceName` from the CSV (the original store/channel identifier) was preserved in the `order_name` column as `"Historical import - {DataSourceName}"`.
+
+### Current Store Types in Historical Data
+
+| Store / Channel | DB `order_name` | Records Inserted |
+|----------------|----------------|-----------------|
+| **Exhibition** | `Historical import - Exhibition` | 106,134 |
+| **JobBox** | `Historical import - JobBox` | 65,605 |
+| **Changan** (cars) | `Historical import - Changan` | 31,853 |
+| **CFH** (Celeste Home Fashion) | `Historical import - CFH` | 18,688 |
+| **DuraFoam** | `Historical import - DuraFoam` | 4,625 |
+| **MasterOffisysView** | `Historical import - MasterOffisysView` | 3,986 |
+| **Dealers** | `Historical import - Dealers` | 3,647 |
+| **DDS** | `Historical import - DDS` | 2,958 |
+| OE overlap (already in live) | `Historical import - OE` | 94 |
+| POS overlap (already in live) | `Historical import - POS` | 6 |
+| MoltyHome | `Historical import - MoltyHome` | 1 |
+| **Total** | | **237,597** |
+
+> [!NOTE]
+> The 11 channels map to **2 parent companies** in the CSV `CompanyName`:
+> - `Master MoltyFoam` → Exhibition, JobBox, CFH, DuraFoam, Dealers, DDS, MoltyHome
+> - `Master Changan (PVT) Ltd.` → Changan
+> - `Celeste Home Fashion` → CFH
+> - `Master Offisys (PVT) Ltd.` → MasterOffisysView
+
+---
+
+## 3. How to Filter by Store Type
+
+### Option A — Filter in SQL directly (works today)
+
+```sql
+-- All Exhibition customers
+SELECT * FROM orders 
+WHERE source_type = 'HISTORICAL' 
+  AND order_name = 'Historical import - Exhibition';
+
+-- JobBox + Changan combined
+SELECT * FROM orders
+WHERE source_type = 'HISTORICAL'
+  AND order_name IN ('Historical import - JobBox', 'Historical import - Changan');
+
+-- All historical sources as a summary
+SELECT 
+  REPLACE(order_name, 'Historical import - ', '') AS store_type,
+  COUNT(*) AS customers,
+  province
+FROM orders
+WHERE source_type = 'HISTORICAL'
+GROUP BY store_type, province
+ORDER BY customers DESC;
+```
+
+### Option B — Add a `store_type` column (recommended for dashboard)
+
+> [!IMPORTANT]
+> For cleaner dashboard filtering, we should run a one-time migration to add a `store_type` column to [orders](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/data_loader.py#383-432) and populate it from `order_name`.
+
+```sql
+-- Migration (run once)
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS store_type VARCHAR(100);
+
+UPDATE orders
+SET store_type = REPLACE(order_name, 'Historical import - ', '')
+WHERE source_type = 'HISTORICAL';
+
+-- For live OE/POS orders
+UPDATE orders
+SET store_type = source_type   -- 'OE' or 'POS'
+WHERE source_type != 'HISTORICAL';
+```
+
+Once this column exists, the dashboard can filter on `store_type` natively.
+
+---
+
+## 4. Province Distribution of Historical Customers
+
+| Province | Customers |
+|----------|-----------|
+| Punjab | 133,166 (56%) |
+| Sindh | 55,569 (23%) |
+| Islamabad | 19,159 (8%) |
+| Unspecified | 17,344 (7%) |
+| Khyber Pakhtunkhwa | 8,240 (3.5%) |
+| Azad Kashmir | 3,280 (1.4%) |
+| Balochistan | 833 (0.4%) |
+| Gilgit-Baltistan | 6 |
+
+---
+
+## 5. Recommendation Engine Impact
+
+| Segment | Before Ingestion | After Ingestion |
+|---------|-----------------|-----------------|
+| Total customers available | ~200,504 | **438,101** (+118%) |
+| Historical-only customers | 0 | 237,597 |
+| `customer_statistics` segments | OE/POS-based | +`Historical` segment |
+
+The 237,597 new historical customer profiles are **immediately available** to the recommendation engine via the existing `load_all_orders()` query — no code changes required.

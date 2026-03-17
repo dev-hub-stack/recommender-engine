@@ -1,0 +1,130 @@
+# MasterGroup Recommendation System – Data & Coverage Report
+**Generated:** 2026-03-17 | **Environment:** Production RDS (`mastergroup_recommendations`)
+
+---
+
+## 1. Live API Database (Post-Cleaning)
+
+### 1.1 Orders – Source-wise Counts
+
+| Source | Total Orders | Unique Customers |
+|--------|-------------|-----------------|
+| **OE** (Online Engine) | 176,748 | 116,692 |
+| **POS** (Point of Sale) | 116,882 | 84,741 |
+| **Total** | **293,630** | **200,504** |
+
+> `customer_statistics` table tracks **348,436** unique customers (includes merged historical-segment stats).
+
+---
+
+### 1.2 Data Quality – Phone Coverage
+
+| Metric | Count | % |
+|--------|-------|---|
+| Total orders | 293,630 | 100% |
+| Phone normalised to `+92…` | 290,121 | **98.8%** ✅ |
+| Phone missing / invalid | 201 | 0.07% |
+
+---
+
+### 1.3 Data Quality – Email Coverage
+
+| Metric | Count | % |
+|--------|-------|---|
+| Orders with email address | 133,745 | **45.6%** |
+| Orders without email | 159,885 | 54.4% |
+
+> Email is only captured for OE (online) transactions; POS walk-in customers typically do not provide email.
+
+---
+
+### 1.4 Top Cities by Source
+
+**OE (Online Engine)**
+
+| City | Orders |
+|------|--------|
+| Lahore | 45,927 |
+| Karachi | 43,943 |
+| Islamabad | 18,290 |
+| Rawalpindi | 10,245 |
+| Faisalabad | 5,254 |
+
+**POS (Point of Sale)**
+
+| City | Orders |
+|------|--------|
+| Lahore | 74,115 |
+| Sialkot | 5,996 |
+| Rawalpindi | 4,913 |
+| Okara | 4,161 |
+| Wah Cantonment | 3,939 |
+
+---
+
+### 1.5 Customer Statistics Summary
+
+| Metric | Value |
+|--------|-------|
+| Unique customers tracked | 348,436 |
+| Avg orders per customer | 1.3 |
+| Avg lifetime spend per customer | PKR 725,344 |
+
+---
+
+## 2. Historical Excel Dataset (Post-Cleaning)
+
+**File:** `CustomerDataMasterVerse_Cleaned.csv`
+
+| Metric | Count |
+|--------|-------|
+| Total records | 310,857 |
+| Phone normalised to `+92…` | 310,857 (100%) ✅ |
+| Records with email | 12,634 (4.1%) |
+| Records with city | 310,856 (100%) |
+
+### Top Cities in Historical Data
+
+| City | Records |
+|------|---------|
+| Lahore | 83,182 |
+| Karachi | 58,691 |
+| Islamabad | 21,583 |
+| Faisalabad | 20,859 |
+| Gujranwala | 17,152 |
+| Multan | 13,357 |
+| Hyderabad | 11,104 |
+| Sheikhupura | 8,199 |
+| Rawalpindi | 7,201 |
+| Peshawar | 6,237 |
+
+---
+
+## 3. Historical vs. Live DB – Phone Overlap Analysis
+
+> [!IMPORTANT]
+> This is the **core data gap** identified in previous analysis.
+
+| Metric | Count | % of Historical |
+|--------|-------|----------------|
+| Unique phones in historical CSV | 310,857 | — |
+| Unique phones in live DB | 193,779 | — |
+| **Phones in BOTH** | **73,260** | **23.6%** ✅ |
+| Only in historical Excel (not in DB) | **237,597** | **76.4%** ⚠️ |
+| Only in live DB (not in Excel) | 120,519 | — |
+
+> [!WARNING]
+> **76.4% of historical customers (237,597 people) have never placed an order via the OE or POS APIs.** These customers exist only in the Excel dataset and cannot receive personalised recommendations until their data is ingested into the live DB (Deliverable 4).
+
+---
+
+## 4. Summary
+
+| Dataset | Records | Phone Coverage | Email Coverage |
+|---------|---------|---------------|---------------|
+| Live DB (OE + POS) | 293,630 orders | 98.8% normalised | 45.6% |
+| Historical Excel | 310,857 records | 100% normalised | 4.1% |
+
+**Key Actions Outstanding:**
+- **Deliverable 4:** Import the 237,597 exclusive historical records into the DB to close the 76.4% data gap.
+- Enrich historical records with product/purchase history data from client (JobBox, Exhibition, Changan sources) to enable full personalisation.

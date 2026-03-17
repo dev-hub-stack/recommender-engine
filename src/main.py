@@ -6131,7 +6131,7 @@ async def translate_shopify_product_id(
 async def export_dashboard_csv(
     time_filter: str = Query("30days", description="Time period filter"),
     category: str = Query(None, description="Product category filter (e.g., Mattresses, Pillows)"),
-    sections: str = Query("all", description="Sections to export: all, metrics, products, orders, dashboard, customer_profiling, collaborative_filtering, cross_selling, geographic_intelligence, rfm_segmentation, ml_recommendations"),
+    sections: str = Query("all", description="Sections to export: all, metrics, products, orders, dashboard, customer_profiling, collaborative_filtering, cross_selling, geographic_intelligence, rfm_segmentation, ml_recommendations, historical_channels"),
     categories: str = Query(None, description="Comma-separated list of categories"),
     order_source: str = Query("all", description="Order source filter: all, oe, pos"),
     delivered_only: bool = Query(False, description="Filter to only delivered/completed orders")
@@ -6483,6 +6483,43 @@ async def export_dashboard_csv(
                     int(cust['days_since']) if cust['days_since'] else 'N/A'
                 ])
         
+        # =========================================
+        # SECTION 5: Customer Profiling
+        # =========================================
+        # (This remains unchanged but provides the target insertion point for the new section)
+        
+        # =========================================
+        # SECTION 5B: Historical Store Channels
+        # =========================================
+        if "historical_channels" in section_list or "all" in section_list:
+            if "historical_channels" in section_list and "all" not in section_list:
+                writer.writerow([])
+                writer.writerow(["Generated:", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+                
+            writer.writerow([])
+            writer.writerow(["HISTORICAL STORE / CHANNEL DISTRIBUTION"])
+            writer.writerow(["=" * 50])
+            writer.writerow(["Channel", "Province", "Customers"])
+
+            query = """
+                SELECT
+                    REPLACE(order_name, 'Historical import - ', '') AS channel,
+                    province,
+                    COUNT(*) AS customers
+                FROM orders
+                WHERE source_type = 'HISTORICAL'
+                  AND order_name IS NOT NULL
+                GROUP BY order_name, province
+                ORDER BY customers DESC
+            """
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                writer.writerow([
+                    row['channel'] or 'Unknown',
+                    row['province'] or 'Unknown',
+                    row['customers']
+                ])
+                
         # =========================================
         # SECTION 6: Geographic Intelligence
         # =========================================

@@ -1,0 +1,225 @@
+# Deliverable 4: Historical Data Ingestion — Deep Analysis & Plan
+
+**Goal:** Import the 237,597 exclusive historical customers from `CustomerDataMasterVerse_Cleaned.csv` into the live `mastergroup_recommendations` PostgreSQL database so the recommendation engine can serve them.
+
+---
+
+## 1. Source vs. Target Column Mapping
+
+### CSV Columns → [orders](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/data_loader.py#383-432) Table
+
+| CSV Column | orders Column | Transformation |
+|------------|--------------|----------------|
+| `Mobileno` | `customer_phone` | Already `+923XXXXXXXXX` from Deliverable 1 |
+| `CustomerName` | `customer_name` | Use as-is |
+| `EmailAddress` | `customer_email` | Already lowercased from Deliverable 1 |
+| `CityName` | `customer_city` | Already Title-cased from Deliverable 1 |
+| `CustomerAddress` | `customer_address` | Use as-is |
+| `DataSourceName` | — *(see note)* | Used to set `source_type` label |
+| `CompanyName` | — *(no orders column)* | **Not imported** (no mapping exists) |
+| *(derived)* | `source_type` | Hardcode `'HISTORICAL'` |
+| *(derived)* | `unified_customer_id` | Synthesize from phone + first name |
+| *(derived)* | [province](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/province_utils.py#139-166) | Infer via `province_utils.infer_province_from_city()` |
+| *(derived)* | `region` | Set to `NULL` (not derivable from CSV) |
+| *(derived)* | `order_type` | Set to `'HISTORICAL'` |
+| *(derived)* | `order_status` | Set to `'IMPORTED'` |
+| *(derived)* | `order_date` | Set to `NULL` (no purchase date in CSV) |
+| *(derived)* | `total_price` | Set to `NULL` or `0` |
+| *(derived)* | `items_json` | Set to `NULL` (no product data) |
+| *(derived)* | [id](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/scripts/clean_live_db.py#64-72) | Generate UUID or sequential ID with `HISTORICAL_` prefix |
+
+> [!NOTE]
+> `DataSourceName` values (CFH, OE, etc.) will be stored as a note in `order_name` (e.g. `"Historical import - CFH"`) since `source_type` is used for filtering and must be `'HISTORICAL'` for all these records.
+
+---
+
+## 2. Key Logic: unified_customer_id Synthesis
+
+The system synthesises `unified_customer_id` as: `{phone}_{first_name_alphanum_lowercase}`
+
+**Examples from live data:**
+- `+923008483379` + `"Muhammad Asim"` → `+923008483379_muhammad`
+- `+923008483379` + `NULL name` → `+923008483379`
+
+**Implementation** — reuse the exact same [make_uid()](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/scripts/clean_live_db.py#64-72) function from [clean_live_db.py](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/scripts/clean_live_db.py).
+
+---
+
+## 3. Edge Cases Analysis
+
+### 3.1 Phone Already in Live DB (23.6% Overlap = 73,260 records)
+
+These customers already have OE/POS orders in the DB. 
+
+**Strategy: SKIP ingestion / partial merge.**
+
+- Do NOT insert a new [orders](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/data_loader.py#383-432) row (would create a fake order).
+- DO check if their `customer_statistics` entry exists and update `customer_name`, `customer_email`, `customer_city`, `customer_address` if the live record is less complete (e.g. NULL name or email).
+- Enrich-only approach: no duplicate row, just data enrichment.
+
+### 3.2 Phone NOT in Live DB (76.4% = 237,597 records) — Main Import
+
+These customers have zero OE/POS history. We need to:
+1. Insert one [orders](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/data_loader.py#383-432) row per customer (as a "profile/seed" row, not a real order).
+2. Insert one `customer_statistics` row with `total_orders=0`, `total_spent=0`.
+
+### 3.3 Duplicate Phones Within the CSV Itself
+
+The CSV has already been deduplicated by phone in Deliverable 1 (124 duplicates dropped). But we should still guard with a `ON CONFLICT DO NOTHING` or pre-dedup in Python.
+
+### 3.4 NULL Phone
+
+Deliverable 1 already filtered out rows with invalid phones (1,677 dropped). The cleaned CSV should have no NULLs.  
+**Guard:** Skip any row where `Mobileno` is NaN/blank anyway.
+
+### 3.5 NULL Name
+
+Some rows have no `CustomerName`. 
+- `unified_customer_id` → use phone alone: `+923XXXXXXXXX`.
+- `customer_name` → store as `NULL` in DB.
+- `customer_statistics.customer_name` → store as `NULL`.
+
+### 3.6 NULL City
+
+Deliverable 1 confirmed 310,856 of 310,857 CSV rows have a city (1 missing). 
+- If city is NULL → `province = 'Unspecified'`, `customer_city = NULL`.
+
+### 3.7 NULL Email
+
+96% of CSV rows have no email. Insert as `NULL` in `customer_email`.
+
+### 3.8 City Not in CITY_TO_PROVINCE Map
+
+Many small towns may not be in `province_utils.CITY_TO_PROVINCE`.
+- **Fallback:** `province = 'Unspecified'` (consistent with existing live data handling).
+
+### 3.9 unified_customer_id Collision WITH Live DB
+
+If two different people (one in CSV, one in DB) somehow share the same synthesised UID (phone + first name), the `orders.id` would conflict — but since [id](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/scripts/clean_live_db.py#64-72) is our PK and we generate it with a prefix, this is not a problem. However, `customer_statistics.customer_id` PK can conflict.
+
+**Strategy:** If a `customer_statistics` row with the same `customer_id` already exists (it will for the overlap 73K), merge/enrich rather than insert.
+
+### 3.10 Batch Commit & Rollback
+
+This inserts ~237K rows. Use batches of 5000 with `conn.commit()` per batch. If a batch fails, `conn.rollback()` only that batch — earlier batches are already committed and safe.
+
+### 3.11 Re-Entrant / Idempotent Runs
+
+If the script is run twice, it should be safe:
+- Use `ON CONFLICT (customer_phone) DO NOTHING` or a pre-flight check to skip already-imported phones.
+- Track state with a `source_type = 'HISTORICAL'` filter: skip phones already present in [orders](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/data_loader.py#383-432) with `source_type = 'HISTORICAL'`.
+
+### 3.12 customer_statistics primary key for historical records
+
+`customer_statistics.customer_id` is the PK. For historical-only customers, we'll set it to their `unified_customer_id`. For overlap customers (already have a stat row), we'll UPDATE the existing row to enrich name/email/city rather than insert.
+
+---
+
+## 4. `customer_statistics` Seeding for New Historical Customers
+
+For customers imported from history only (no OE/POS orders):
+
+```sql
+INSERT INTO customer_statistics (
+  customer_id, customer_name, customer_city,
+  total_orders, total_products, unique_products,
+  total_spent, avg_order_value,
+  first_order_date, last_order_date, customer_segment, updated_at
+) VALUES (
+  %s, %s, %s,
+  0, 0, 0,
+  0, 0,
+  NULL, NULL, 'Historical', NOW()
+)
+ON CONFLICT (customer_id) DO UPDATE SET
+  customer_name = COALESCE(EXCLUDED.customer_name, customer_statistics.customer_name),
+  customer_city = COALESCE(EXCLUDED.customer_city, customer_statistics.customer_city),
+  updated_at = NOW()
+```
+
+---
+
+## 5. Orders Row Insert for Historical Customers
+
+Since the historical CSV has **no purchase history**, inserting a row into [orders](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/data_loader.py#383-432) is technically seeding a "profile" record. The fields we cannot fill are:
+- `order_date` → `NULL`
+- `total_price` → `0`
+- `items_json` → `NULL`
+- `order_name`, `order_status` → `'HISTORICAL_PROFILE'`
+- `payment_mode`, `brand_name` → `NULL`
+
+> [!IMPORTANT]
+> **Alternative approach (safer):** Do NOT insert into [orders](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/data_loader.py#383-432) at all. Instead, create a separate `historical_customers` table that mirrors what the recommendation engine needs. The [data_loader.py](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/data_loader.py) (and its `load_all_orders`) would need a small update to JOIN this table. This avoids polluting the [orders](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/data_loader.py#383-432) table with fake rows.
+
+**Recommended approach:** Use the [orders](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/data_loader.py#383-432) table with `source_type='HISTORICAL'` and `order_date=NULL`, so the existing [data_loader.py](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/data_loader.py) picks them up naturally with zero code changes to the ML pipeline. The 6-month lookback in [load_training_data()](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/data_loader.py#65-130) uses `order_date`, so `NULL` dates will be included (NULL is not filtered by a date range). This is correct behavior we want.
+
+---
+
+## 6. File to Create
+
+**`scripts/ingest_historical_data.py`**
+
+Phases:
+1. Connect to RDS using `PROD_PG_*` env vars.
+2. Pre-load all existing phones from [orders](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/data_loader.py#383-432) into a Python `set` (one query).
+3. Pre-load all existing `customer_statistics` IDs into a Python `set` (one query).
+4. Read [docs/CustomerDataMasterVerse_Cleaned.csv](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/docs/CustomerDataMasterVerse_Cleaned.csv) in chunks of 5000.
+5. For each chunk:
+   - **Overlap (phone in DB):** Skip [orders](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/data_loader.py#383-432) insert. Enrich `customer_statistics` with available non-NULL fields.
+   - **New (phone NOT in DB):** Build [orders](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/data_loader.py#383-432) row + `customer_statistics` row. Use `execute_batch` for bulk insert.
+6. Commit every batch. Log progress.
+7. Final verification query.
+
+---
+
+## 7. DB Changes Required
+
+| Change | Details |
+|--------|---------|
+| **No schema changes needed** | [orders](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/data_loader.py#383-432) and `customer_statistics` already have all required columns. |
+| `source_type='HISTORICAL'` | New enum value. Current values are `OE` and `POS`. No constraint enforced, so this works. |
+| `customer_segment='Historical'` | New segment value in `customer_statistics`. No constraint. Works as-is. |
+
+> [!NOTE]
+> No migration file (`alembic`) is needed. The schema is flexible enough.
+
+---
+
+## 8. Verification Plan
+
+After ingestion:
+
+```sql
+-- Count historical customers inserted
+SELECT COUNT(*) FROM orders WHERE source_type = 'HISTORICAL';
+
+-- Confirm no overlap contamination
+SELECT COUNT(*) FROM orders o1 
+JOIN orders o2 ON o1.customer_phone = o2.customer_phone 
+WHERE o1.source_type = 'HISTORICAL' AND o2.source_type != 'HISTORICAL';
+
+-- Check customer_statistics seeded
+SELECT COUNT(*) FROM customer_statistics WHERE customer_segment = 'Historical';
+
+-- Province coverage
+SELECT province, COUNT(*) FROM orders 
+WHERE source_type = 'HISTORICAL' 
+GROUP BY province ORDER BY COUNT(*) DESC;
+```
+
+Expected results:
+- ~237,597 rows in [orders](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/data_loader.py#383-432) with `source_type='HISTORICAL'`
+- ~237,597 rows in `customer_statistics` with `customer_segment='Historical'`
+- 0 rows in the overlap contamination check
+
+---
+
+## 9. Risk Summary
+
+| Risk | Likelihood | Mitigation |
+|------|-----------|-----------|
+| Duplicate inserts on re-run | Medium | Pre-load phone set + `ON CONFLICT DO NOTHING` |
+| `customer_statistics` PK collision | Low | Pre-load stat set + `DO UPDATE SET` enrichment |
+| NULL order_date breaks ML training | Low | [data_loader.py](file:///Users/clustox_1/Documents/MasterGroup-RecommendationSystem/recommendation-engine-service/src/data_loader.py) uses date for filtering only; NULL rows are included naturally |
+| Province unmapped cities | Medium | Fallback to `'Unspecified'` matches existing live data behavior |
+| CSV rows with garbage phones | Very Low | Deliverable 1 already filtered these |

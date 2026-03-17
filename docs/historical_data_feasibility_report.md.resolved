@@ -1,0 +1,62 @@
+# Feasibility Report: Historical Data Extraction Requirements
+
+This report evaluates the 5 requirements outlined for the historical dataset (`CustomerDataMasterVerse.xlsx`) against the physical reality of the data contained within that file. 
+
+The historical dataset contains 312,658 records across exactly 7 columns: `CustomerName`, `DataSourceName`, `CityName`, `CompanyName`, `Mobileno`, `CustomerAddress`, `EmailAddress`.
+
+---
+
+## 1. Data Cleaning
+**Feasibility: ✅ Fully Possible**
+
+* **Requirement:** Standardize phone numbers, emails, and city names across all datasets. Remove duplicates and ensure consistent formatting so records can be compared across sources.
+* **Rationale:** The dataset contains the raw text fields for names, cities, emails, and phone numbers. We can apply standard text normalization rules (e.g., stripping non-numeric characters from phones and prepending `+92`, lowercasing emails, title-casing cities) and easily run script-based deduplications.
+
+---
+
+## 2. Historical Dataset Mapping
+**Feasibility: ⚠️ Partially Possible**
+
+* **Requirement:** Identify the start and end date for each historical source, specifically Changan and CHF, and prepare a dataset summary showing coverage period and record counts.
+* **What CAN be done:** We can produce exact record counts for all sources, including Changan (33,065) and CFH (21,828).
+* **What CANNOT be done:** We **cannot** identify start and end dates or coverage periods.
+* **Rationale:** The Excel file contains zero date or timestamp columns. We have no way of knowing when any of these 312,658 interactions occurred.
+
+---
+
+## 3. Historical Data Ingestion
+**Feasibility: ⚠️ Partially Possible**
+
+* **Requirement:** Import all historical datasets into the working environment... Allowing the user to filter based on sources and product categories from the historical dataset as well.
+* **What CAN be done:** We can import the dataset into the database and build a UI/API filter for `DataSourceName` (Changan, CHF, DuraFoam, MasterOffisysView, Dealers, DDS, MoltyHome, etc.).
+* **What CANNOT be done:** We **cannot** allow the user to filter historical data by product categories.
+* **Rationale:** There is no product or purchase data included in the historical Excel file. The closest metric is `CompanyName` (e.g., "Celeste Home Fashion"), but this is a brand, not a product category. We do not know what any of these customers bought or interacted with.
+
+---
+
+## 4. API Coverage Validation
+**Feasibility: ⚠️ Partially Possible**
+
+* **Requirement:** Compare historical sources against OE API and POS API data to determine whether records from DuraFoam, MasterOffisysView, Dealers, DDS, and MoltyHome exist in the API datasets and calculate coverage counts over time (month-over-month) and Y-o-Y.
+* **What CAN be done:** We can cross-reference the normalized phone numbers from those 5 specific "Other" sources against the 289,000 live API orders to see if those customers also exist in the API dataset. 
+* **What CANNOT be done:** We **cannot** calculate historical coverage counts over time (month-over-month or Y-o-Y) for the *historical sources themselves*.
+* **Rationale:** We can only plot trends over time based on the *API order dates* (e.g., "How many orders did DDS customers place via the API in March 2025?"). Because the historical data lacks dates, we cannot plot when they were acquired in their original source systems.
+
+---
+
+## 5. Data Coverage Trend Analysis
+**Feasibility: ⚠️ Partially Possible**
+
+* **Requirement:** Analyze and produce a table or visual showing coverage of name, email, and phone number across historical datasets vs OE API vs POS API, highlighting whether email capture increases in API data over time...
+* **What CAN be done:** 
+  1. We can produce the coverage table for name/email/phone across all sources (already completed in the previous analysis).
+  2. We can track email capture increases over time (MoM/YoY) for the **OE and POS APIs**.
+* **What CANNOT be done:** We **cannot** track email capture over time for the historical datasets.
+* **Rationale:** Tracking trends requires a time dimension. We have order dates for OE and POS API data, but we lack any dates for the historical Excel data.
+
+---
+
+## Summary of Missing Client Data
+To fulfill these requirements exactly as requested, the client must provide a new export of the historical data that includes two critical missing columns:
+1. **Interaction/Acquisition Date** (to enable MoM/YoY trend analysis and coverage periods).
+2. **Product Categories / Purchased Items** (to enable product filtering and recommendation relevance).

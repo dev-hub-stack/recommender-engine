@@ -134,6 +134,7 @@ def process_customers_in_batches(cursor, batch_size: int = BATCH_SIZE_CUSTOMERS)
                 SELECT 
                     o.unified_customer_id,
                     MAX(o.customer_name) as customer_name,
+                    MAX(o.customer_phone) as customer_phone,
                     MAX(o.customer_city) as city,
                     MAX(o.province) as province,
                     EXTRACT(days FROM NOW() - MAX(o.order_date)) as recency_days,
@@ -148,6 +149,7 @@ def process_customers_in_batches(cursor, batch_size: int = BATCH_SIZE_CUSTOMERS)
             SELECT 
                 unified_customer_id,
                 customer_name,
+                customer_phone,
                 city,
                 province,
                 recency_days,
@@ -443,6 +445,7 @@ def main():
             customer_data = {
                 "customer_id": customer['unified_customer_id'],
                 "customer_name": customer['customer_name'],
+                "customer_phone": customer['customer_phone'] or '',
                 "customer_city": customer['city'],
                 "segment": segment,
                 "total_orders": frequency,

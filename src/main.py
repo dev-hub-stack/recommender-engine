@@ -2300,6 +2300,7 @@ async def get_segment_details(
                 SELECT 
                     o.unified_customer_id,
                     MAX(o.customer_name) as customer_name,
+                    MAX(o.customer_phone) as customer_phone,
                     MAX(o.customer_city) as city,
                     EXTRACT(days FROM NOW() - MAX(o.order_date)) as recency_days,
                     COUNT(DISTINCT o.id) as frequency,
@@ -2313,6 +2314,7 @@ async def get_segment_details(
             SELECT 
                 unified_customer_id as customer_id,
                 customer_name,
+                customer_phone,
                 city,
                 recency_days,
                 frequency as total_orders,
@@ -2337,6 +2339,7 @@ async def get_segment_details(
         return [{
             "customer_id": r['customer_id'],
             "customer_name": r['customer_name'] or 'Unknown',
+            "customer_phone": r['customer_phone'] or '',
             "customer_city": r['city'] or 'Unknown',
             "segment": segment_name,
             "total_orders": r['total_orders'],

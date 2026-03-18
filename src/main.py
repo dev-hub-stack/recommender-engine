@@ -2357,6 +2357,223 @@ async def get_segment_details(
             conn.close()
 
 
+# =====================================================================
+# CUSTOM RFM THRESHOLD ENDPOINTS
+# =====================================================================
+
+@app.get("/api/v1/analytics/customers/rfm-custom")
+async def get_custom_rfm_segments(
+    # Champion thresholds
+    champion_r: int = Query(30, description="Max recency days to qualify as Champion"),
+    champion_f: int = Query(5, description="Min frequency (orders) to qualify as Champion"),
+    champion_m: int = Query(50000, description="Min monetary (PKR) to qualify as Champion"),
+    # Loyal thresholds
+    loyal_r: int = Query(60, description="Max recency days for Loyal"),
+    loyal_f: int = Query(3, description="Min frequency for Loyal"),
+    loyal_m: int = Query(20000, description="Min monetary for Loyal"),
+    # At-Risk thresholds
+    at_risk_r_min: int = Query(90, description="Min recency days to be At Risk"),
+    at_risk_r_max: int = Query(180, description="Max recency days to be At Risk"),
+    at_risk_f: int = Query(2, description="Min frequency to be At Risk"),
+    # Hibernating/Lost
+    hibernating_r: int = Query(180, description="Min recency to be Hibernating"),
+    lost_r: int = Query(365, description="Min recency to be Lost"),
+    # Filters
+    order_source: str = Query("all", description="Filter: all, oe, pos, historical"),
+):
+    """
+    Compute RFM segment counts using fully customisable thresholds.
+    Returns per-segment customer count so the UI can show a live preview.
+    """
+    conn = None
+    try:
+        conn = psycopg2.connect(**get_pg_connection_params())
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+        source_clause, source_params = get_order_source_filter(
+            order_source, table_alias="o", has_where_clause=False
+        )
+        where = f"WHERE 1=1 {source_clause.replace('WHERE ', ' AND ')}" if source_clause else "WHERE 1=1"
+
+        cursor.execute(f"""
+            WITH customer_rfm AS (
+                SELECT
+                    o.unified_customer_id,
+                    EXTRACT(days FROM NOW() - MAX(o.order_date))::int AS recency_days,
+                    COUNT(DISTINCT o.id)                              AS frequency,
+                    SUM(o.total_price)                                AS monetary
+                FROM orders o
+                {where}
+                GROUP BY o.unified_customer_id
+            )
+            SELECT
+                SUM(CASE WHEN recency_days <= %s AND frequency >= %s AND monetary >= %s THEN 1 ELSE 0 END) AS champions,
+                SUM(CASE WHEN NOT (recency_days <= %s AND frequency >= %s AND monetary >= %s)
+                         AND recency_days <= %s AND frequency >= %s AND monetary >= %s THEN 1 ELSE 0 END) AS loyal,
+                SUM(CASE WHEN recency_days = 1 AND recency_days <= 30 THEN 1 ELSE 0 END)  AS new_customers,
+                SUM(CASE WHEN recency_days > %s AND recency_days <= %s AND frequency >= %s THEN 1 ELSE 0 END) AS at_risk,
+                SUM(CASE WHEN recency_days > %s AND recency_days <= %s THEN 1 ELSE 0 END)  AS hibernating,
+                SUM(CASE WHEN recency_days > %s THEN 1 ELSE 0 END)                         AS lost,
+                COUNT(*)                                                                    AS total
+            FROM customer_rfm
+        """, source_params + (
+            champion_r, champion_f, champion_m,    # champions
+            champion_r, champion_f, champion_m,    # loyal NOT champions
+            loyal_r, loyal_f, loyal_m,             # loyal
+            at_risk_r_min, at_risk_r_max, at_risk_f,  # at_risk
+            hibernating_r, lost_r,                 # hibernating
+            lost_r,                                # lost
+        ))
+
+        row = cursor.fetchone()
+        total = row['total'] or 1
+
+        def pct(n): return round((n or 0) / total * 100, 1)
+
+        segments = [
+            {"segment_name": "Champions",    "customer_count": row['champions'],    "percentage": pct(row['champions'])},
+            {"segment_name": "Loyal",        "customer_count": row['loyal'],        "percentage": pct(row['loyal'])},
+            {"segment_name": "New Customers","customer_count": row['new_customers'],"percentage": pct(row['new_customers'])},
+            {"segment_name": "At Risk",      "customer_count": row['at_risk'],      "percentage": pct(row['at_risk'])},
+            {"segment_name": "Hibernating",  "customer_count": row['hibernating'],  "percentage": pct(row['hibernating'])},
+            {"segment_name": "Lost",         "customer_count": row['lost'],         "percentage": pct(row['lost'])},
+        ]
+        return {
+            "segments": segments,
+            "total_customers": total,
+            "order_source": order_source,
+            "thresholds": {
+                "champion": {"recency_max": champion_r, "frequency_min": champion_f, "monetary_min": champion_m},
+                "loyal": {"recency_max": loyal_r, "frequency_min": loyal_f, "monetary_min": loyal_m},
+                "at_risk": {"recency_min": at_risk_r_min, "recency_max": at_risk_r_max, "frequency_min": at_risk_f},
+                "hibernating_recency_min": hibernating_r,
+                "lost_recency_min": lost_r,
+            }
+        }
+    except Exception as e:
+        logger.error(f"Custom RFM error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            conn.close()
+
+
+@app.get("/api/v1/export/rfm-campaign-csv")
+async def export_rfm_campaign_csv(
+    segment: str = Query(..., description="Segment to export: Champions, Loyal, New Customers, At Risk, Hibernating, Lost"),
+    # Champion thresholds
+    champion_r: int = Query(30), champion_f: int = Query(5), champion_m: int = Query(50000),
+    # Loyal thresholds
+    loyal_r: int = Query(60), loyal_f: int = Query(3), loyal_m: int = Query(20000),
+    # At-Risk thresholds
+    at_risk_r_min: int = Query(90), at_risk_r_max: int = Query(180), at_risk_f: int = Query(2),
+    # Hibernating/Lost thresholds
+    hibernating_r: int = Query(180), lost_r: int = Query(365),
+    # Filters
+    order_source: str = Query("all"),
+):
+    """
+    Export a campaign-ready CSV for one RFM segment.
+    Includes: Name, Email, Phone, City, Total Orders, Total Spent (PKR), Last Purchase Date, Days Since Purchase.
+    """
+    # Map segment names to SQL WHERE criteria (applied on top of the CTE)
+    segment_sql_map = {
+        "champions":    f"recency_days <= {champion_r} AND frequency >= {champion_f} AND monetary >= {champion_m}",
+        "loyal":        f"NOT (recency_days <= {champion_r} AND frequency >= {champion_f} AND monetary >= {champion_m}) AND recency_days <= {loyal_r} AND frequency >= {loyal_f} AND monetary >= {loyal_m}",
+        "new customers":f"frequency = 1 AND recency_days <= 30",
+        "at risk":      f"recency_days > {at_risk_r_min} AND recency_days <= {at_risk_r_max} AND frequency >= {at_risk_f}",
+        "hibernating":  f"recency_days > {hibernating_r} AND recency_days <= {lost_r}",
+        "lost":         f"recency_days > {lost_r}",
+    }
+
+    seg_key = segment.lower().strip()
+    if seg_key not in segment_sql_map:
+        raise HTTPException(status_code=400, detail=f"Unknown segment '{segment}'. Valid: {list(segment_sql_map.keys())}")
+
+    seg_criteria = segment_sql_map[seg_key]
+
+    conn = None
+    try:
+        conn = psycopg2.connect(**get_pg_connection_params())
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+        source_clause, source_params = get_order_source_filter(
+            order_source, table_alias="o", has_where_clause=False
+        )
+        where = f"WHERE 1=1 {source_clause.replace('WHERE ', ' AND ')}" if source_clause else "WHERE 1=1"
+
+        cursor.execute(f"""
+            WITH customer_rfm AS (
+                SELECT
+                    o.unified_customer_id,
+                    MAX(o.customer_name)  AS customer_name,
+                    MAX(o.customer_email) AS customer_email,
+                    MAX(o.customer_phone) AS customer_phone,
+                    MAX(o.customer_city)  AS customer_city,
+                    MAX(o.province)       AS province,
+                    EXTRACT(days FROM NOW() - MAX(o.order_date))::int AS recency_days,
+                    COUNT(DISTINCT o.id)                              AS frequency,
+                    SUM(o.total_price)                                AS monetary,
+                    MAX(o.order_date)                                 AS last_order_date
+                FROM orders o
+                {where}
+                GROUP BY o.unified_customer_id
+            )
+            SELECT
+                customer_name, customer_email, customer_phone,
+                customer_city, province,
+                frequency AS total_orders,
+                monetary  AS total_spent,
+                last_order_date,
+                recency_days
+            FROM customer_rfm
+            WHERE {seg_criteria}
+            ORDER BY monetary DESC
+        """, source_params)
+
+        rows = cursor.fetchall()
+
+        # Stream CSV response
+        output = io.StringIO()
+        writer = csv.writer(output)
+
+        # Header
+        writer.writerow([
+            "Customer Name", "Email", "Phone", "City", "Province",
+            "Total Orders", "Total Spent (PKR)", "Last Purchase Date", "Days Since Purchase",
+        ])
+
+        for r in rows:
+            writer.writerow([
+                r['customer_name'] or 'Unknown',
+                r['customer_email'] or '',
+                r['customer_phone'] or '',
+                r['customer_city'] or '',
+                r['province'] or '',
+                r['total_orders'],
+                f"{float(r['total_spent'] or 0):,.0f}",
+                r['last_order_date'].strftime('%Y-%m-%d') if r['last_order_date'] else '',
+                r['recency_days'] or '',
+            ])
+
+        output.seek(0)
+        filename = f"rfm_campaign_{seg_key.replace(' ', '_')}_{order_source}_{datetime.now().strftime('%Y%m%d')}.csv"
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"RFM campaign export error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            conn.close()
+
+
+
 @app.get("/api/v1/analytics/customers/at-risk")
 async def get_at_risk_customers(
     time_filter: str = Query("30days"),

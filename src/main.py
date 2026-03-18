@@ -2398,6 +2398,47 @@ async def get_custom_rfm_segments(
         )
         where = f"WHERE 1=1 {source_clause.replace('WHERE ', ' AND ')}" if source_clause else "WHERE 1=1"
 
+        if order_source.lower() == 'historical':
+            sql_select = """
+                SUM(CASE WHEN frequency >= %s AND monetary >= %s THEN 1 ELSE 0 END) AS champions,
+                SUM(CASE WHEN NOT (frequency >= %s AND monetary >= %s)
+                         AND frequency >= %s AND monetary >= %s THEN 1 ELSE 0 END) AS loyal,
+                0 AS new_customers,
+                SUM(CASE WHEN NOT (frequency >= %s AND monetary >= %s)
+                         AND NOT (frequency >= %s AND monetary >= %s)
+                         AND frequency >= %s THEN 1 ELSE 0 END) AS at_risk,
+                0 AS hibernating,
+                SUM(CASE WHEN NOT (frequency >= %s AND monetary >= %s)
+                         AND NOT (frequency >= %s AND monetary >= %s)
+                         AND NOT (frequency >= %s) THEN 1 ELSE 0 END) AS lost,
+                COUNT(*) AS total
+            """
+            sql_params = source_params + (
+                champion_f, champion_m,
+                champion_f, champion_m, loyal_f, loyal_m,
+                champion_f, champion_m, loyal_f, loyal_m, at_risk_f,
+                champion_f, champion_m, loyal_f, loyal_m, at_risk_f
+            )
+        else:
+            sql_select = """
+                SUM(CASE WHEN recency_days <= %s AND frequency >= %s AND monetary >= %s THEN 1 ELSE 0 END) AS champions,
+                SUM(CASE WHEN NOT (recency_days <= %s AND frequency >= %s AND monetary >= %s)
+                         AND recency_days <= %s AND frequency >= %s AND monetary >= %s THEN 1 ELSE 0 END) AS loyal,
+                SUM(CASE WHEN recency_days = 1 AND recency_days <= 30 THEN 1 ELSE 0 END)  AS new_customers,
+                SUM(CASE WHEN recency_days > %s AND recency_days <= %s AND frequency >= %s THEN 1 ELSE 0 END) AS at_risk,
+                SUM(CASE WHEN recency_days > %s AND recency_days <= %s THEN 1 ELSE 0 END)  AS hibernating,
+                SUM(CASE WHEN recency_days > %s THEN 1 ELSE 0 END)                         AS lost,
+                COUNT(*)                                                                    AS total
+            """
+            sql_params = source_params + (
+                champion_r, champion_f, champion_m,    # champions
+                champion_r, champion_f, champion_m,    # loyal NOT champions
+                loyal_r, loyal_f, loyal_m,             # loyal
+                at_risk_r_min, at_risk_r_max, at_risk_f,  # at_risk
+                hibernating_r, lost_r,                 # hibernating
+                lost_r,                                # lost
+            )
+
         cursor.execute(f"""
             WITH customer_rfm AS (
                 SELECT
@@ -2409,24 +2450,9 @@ async def get_custom_rfm_segments(
                 {where}
                 GROUP BY o.unified_customer_id
             )
-            SELECT
-                SUM(CASE WHEN recency_days <= %s AND frequency >= %s AND monetary >= %s THEN 1 ELSE 0 END) AS champions,
-                SUM(CASE WHEN NOT (recency_days <= %s AND frequency >= %s AND monetary >= %s)
-                         AND recency_days <= %s AND frequency >= %s AND monetary >= %s THEN 1 ELSE 0 END) AS loyal,
-                SUM(CASE WHEN recency_days = 1 AND recency_days <= 30 THEN 1 ELSE 0 END)  AS new_customers,
-                SUM(CASE WHEN recency_days > %s AND recency_days <= %s AND frequency >= %s THEN 1 ELSE 0 END) AS at_risk,
-                SUM(CASE WHEN recency_days > %s AND recency_days <= %s THEN 1 ELSE 0 END)  AS hibernating,
-                SUM(CASE WHEN recency_days > %s THEN 1 ELSE 0 END)                         AS lost,
-                COUNT(*)                                                                    AS total
+            SELECT {sql_select}
             FROM customer_rfm
-        """, source_params + (
-            champion_r, champion_f, champion_m,    # champions
-            champion_r, champion_f, champion_m,    # loyal NOT champions
-            loyal_r, loyal_f, loyal_m,             # loyal
-            at_risk_r_min, at_risk_r_max, at_risk_f,  # at_risk
-            hibernating_r, lost_r,                 # hibernating
-            lost_r,                                # lost
-        ))
+        """, sql_params)
 
         row = cursor.fetchone()
         total = row['total'] or 1
@@ -2480,14 +2506,24 @@ async def export_rfm_campaign_csv(
     Includes: Name, Email, Phone, City, Total Orders, Total Spent (PKR), Last Purchase Date, Days Since Purchase.
     """
     # Map segment names to SQL WHERE criteria (applied on top of the CTE)
-    segment_sql_map = {
-        "champions":    f"recency_days <= {champion_r} AND frequency >= {champion_f} AND monetary >= {champion_m}",
-        "loyal":        f"NOT (recency_days <= {champion_r} AND frequency >= {champion_f} AND monetary >= {champion_m}) AND recency_days <= {loyal_r} AND frequency >= {loyal_f} AND monetary >= {loyal_m}",
-        "new customers":f"frequency = 1 AND recency_days <= 30",
-        "at risk":      f"recency_days > {at_risk_r_min} AND recency_days <= {at_risk_r_max} AND frequency >= {at_risk_f}",
-        "hibernating":  f"recency_days > {hibernating_r} AND recency_days <= {lost_r}",
-        "lost":         f"recency_days > {lost_r}",
-    }
+    if order_source.lower() == 'historical':
+        segment_sql_map = {
+            "champions":    f"frequency >= {champion_f} AND monetary >= {champion_m}",
+            "loyal":        f"NOT (frequency >= {champion_f} AND monetary >= {champion_m}) AND frequency >= {loyal_f} AND monetary >= {loyal_m}",
+            "new customers":f"1=0", # No 'New' for historical, they go to Lost
+            "at risk":      f"NOT (frequency >= {champion_f} AND monetary >= {champion_m}) AND NOT (frequency >= {loyal_f} AND monetary >= {loyal_m}) AND frequency >= {at_risk_f}",
+            "hibernating":  f"1=0", # No 'Hibernating' for historical
+            "lost":         f"NOT (frequency >= {champion_f} AND monetary >= {champion_m}) AND NOT (frequency >= {loyal_f} AND monetary >= {loyal_m}) AND NOT (frequency >= {at_risk_f})",
+        }
+    else:
+        segment_sql_map = {
+            "champions":    f"recency_days <= {champion_r} AND frequency >= {champion_f} AND monetary >= {champion_m}",
+            "loyal":        f"NOT (recency_days <= {champion_r} AND frequency >= {champion_f} AND monetary >= {champion_m}) AND recency_days <= {loyal_r} AND frequency >= {loyal_f} AND monetary >= {loyal_m}",
+            "new customers":f"frequency = 1 AND recency_days <= 30",
+            "at risk":      f"recency_days > {at_risk_r_min} AND recency_days <= {at_risk_r_max} AND frequency >= {at_risk_f}",
+            "hibernating":  f"recency_days > {hibernating_r} AND recency_days <= {lost_r}",
+            "lost":         f"recency_days > {lost_r}",
+        }
 
     seg_key = segment.lower().strip()
     if seg_key not in segment_sql_map:

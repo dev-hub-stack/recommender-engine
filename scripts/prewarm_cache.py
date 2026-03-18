@@ -137,6 +137,7 @@ def process_customers_in_batches(cursor, batch_size: int = BATCH_SIZE_CUSTOMERS)
                     MAX(o.customer_phone) as customer_phone,
                     MAX(o.customer_city) as city,
                     MAX(o.province) as province,
+                    MAX(UPPER(o.order_type)) as order_type,
                     EXTRACT(days FROM NOW() - MAX(o.order_date)) as recency_days,
                     COUNT(DISTINCT o.id) as frequency,
                     SUM(o.total_price) as monetary,
@@ -157,10 +158,14 @@ def process_customers_in_batches(cursor, batch_size: int = BATCH_SIZE_CUSTOMERS)
                 monetary,
                 last_order_date,
                 CASE 
+                    WHEN order_type = 'HISTORICAL' AND frequency >= 5 AND monetary >= 50000 THEN 'Champions'
+                    WHEN order_type = 'HISTORICAL' AND frequency >= 3 AND monetary >= 20000 THEN 'Loyal'
+                    WHEN order_type = 'HISTORICAL' AND frequency >= 2 THEN 'At Risk'
+                    WHEN order_type = 'HISTORICAL' AND frequency = 1 THEN 'Lost'
                     WHEN recency_days <= 30 AND frequency >= 5 AND monetary >= 50000 THEN 'Champions'
                     WHEN recency_days <= 60 AND frequency >= 3 AND monetary >= 20000 THEN 'Loyal'
                     WHEN recency_days <= 90 AND frequency >= 2 THEN 'Potential'
-                    WHEN frequency = 1 AND recency_days <= 30 THEN 'New'
+                    WHEN frequency = 1 AND recency_days <= 30 THEN 'New Customers'
                     WHEN recency_days > 90 AND recency_days <= 180 AND frequency >= 2 THEN 'At Risk'
                     WHEN recency_days > 180 AND recency_days <= 365 THEN 'Hibernating'
                     WHEN recency_days > 365 THEN 'Lost'

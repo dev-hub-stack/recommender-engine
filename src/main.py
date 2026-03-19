@@ -2488,13 +2488,16 @@ async def get_custom_rfm_segments(
 
 
 def normalize_export_phone(phone: str) -> str:
-    """Format phone numbers for CSV output to ensure +92 prefix"""
+    """Format phone numbers for CSV output to ensure +92 prefix and prevent Excel scientific notation"""
     if not phone or phone == 'N/A': return 'N/A'
     p = str(phone).strip()
-    if p.startswith('0'): return '+92' + p[1:]
-    if p.startswith('3'): return '+92' + p
-    if p.startswith('92'): return '+' + p
-    return p
+    if p.startswith('0'): p = '+92' + p[1:]
+    elif p.startswith('3'): p = '+92' + p
+    elif p.startswith('92'): p = '+' + p
+    elif not p.startswith('+'): p = '+' + p
+    
+    # Wrap in Excel formula syntax to force text formatting (prevents scientific notation like 9.23E+11)
+    return f'="{p}"'
 
 @app.get("/api/v1/export/rfm-campaign-csv")
 async def export_rfm_campaign_csv(
@@ -2602,7 +2605,7 @@ async def export_rfm_campaign_csv(
                 r['customer_address'] or '',
                 r['total_orders'],
                 f"{float(r['total_spent'] or 0):,.0f}",
-                r['last_order_date'].strftime('%Y-%m-%d') if r['last_order_date'] else '',
+                r['last_order_date'].strftime('%Y-%m-%d') if r['last_order_date'] and r['last_order_date'].year > 1900 else '',
                 r['recency_days'] if r['recency_days'] is not None else '',
             ])
 
@@ -6672,7 +6675,7 @@ async def export_dashboard_csv(
                     for order in orders:
                         row = [
                             order['id'],
-                            order['order_date'].strftime('%Y-%m-%d %H:%M') if order['order_date'] else 'N/A',
+                            order['order_date'].strftime('%Y-%m-%d %H:%M') if order['order_date'] and order['order_date'].year > 1900 else 'N/A',
                             order['unified_customer_id'] or 'N/A',
                             order.get('customer_name', 'N/A') or 'N/A',
                             order.get('customer_email', 'N/A') or 'N/A',
@@ -6741,8 +6744,8 @@ async def export_dashboard_csv(
                             cust['unique_products'] or 0,
                             f"{float(cust['total_spent'] or 0):,.2f}",
                             f"{float(cust['avg_order_value'] or 0):,.2f}",
-                            cust['first_order_date'].strftime('%Y-%m-%d') if cust['first_order_date'] else 'N/A',
-                            cust['last_order_date'].strftime('%Y-%m-%d') if cust['last_order_date'] else 'N/A'
+                            cust['first_order_date'].strftime('%Y-%m-%d') if cust['first_order_date'] and cust['first_order_date'].year > 1900 else 'N/A',
+                            cust['last_order_date'].strftime('%Y-%m-%d') if cust['last_order_date'] and cust['last_order_date'].year > 1900 else 'N/A'
                         ])
                     yield get_chunk()
             
@@ -6823,7 +6826,7 @@ async def export_dashboard_csv(
                             cust['customer_segment'] or 'N/A',
                             cust['total_orders'] or 0,
                             f"{float(cust['total_spent'] or 0):,.2f}",
-                            cust['last_order_date'].strftime('%Y-%m-%d') if cust['last_order_date'] else 'N/A',
+                            cust['last_order_date'].strftime('%Y-%m-%d') if cust['last_order_date'] and cust['last_order_date'].year > 1900 else 'N/A',
                             int(cust['days_since']) if cust['days_since'] else 'N/A'
                         ])
                     yield get_chunk()
@@ -6921,7 +6924,7 @@ async def export_dashboard_csv(
                                 cust['customer_name'] or 'Unknown',
                                 cust['customer_email'] or 'N/A',
                                 normalize_export_phone(cust['customer_phone']),
-                                cust['order_date'].strftime('%Y-%m-%d') if cust['order_date'] else 'N/A',
+                                cust['order_date'].strftime('%Y-%m-%d') if cust['order_date'] and cust['order_date'].year > 1900 else 'N/A',
                                 f"{float(cust['total_price'] or 0):,.2f}",
                                 cust['payment_mode'] or 'N/A',
                                 cust['customer_city'] or 'N/A',

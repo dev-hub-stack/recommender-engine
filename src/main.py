@@ -4444,18 +4444,18 @@ async def get_ml_rfm_segments(
     Returns cached results in <50ms instead of slow database queries
     """
     try:
-        cache_key = f"ml:rfm_segments:{time_filter}"
+        cache_key = f"ml:rfm_segments:{time_filter}:{data_source}"
         
         # Try Redis cache first (FAST PATH)
         try:
             cached = redis_client.get(cache_key)
             if cached:
-                logger.info("✅ Cache HIT - RFM segments", time_filter=time_filter)
+                logger.info("✅ Cache HIT - RFM segments", time_filter=time_filter, data_source=data_source)
                 return json.loads(cached)
         except Exception as e:
             logger.warning(f"Redis cache failed: {e}")
         
-        logger.info("🔄 Cache MISS - computing RFM segments", time_filter=time_filter)
+        logger.info("🔄 Cache MISS - computing RFM segments", time_filter=time_filter, data_source=data_source)
         
         # FAST QUERY: Use existing RFM analytics endpoint
         conn = psycopg2.connect(**get_pg_connection_params())
@@ -4467,9 +4467,19 @@ async def get_ml_rfm_segments(
         
         where_clause = ""
         source_filter = ""
-        if days:
-            where_clause = f"WHERE o.order_date >= NOW() - INTERVAL '{days} days'"
         
+        # If looking ONLY at historical, disable time filter because their dates are 1900-01-01
+        if data_source == 'historical':
+            days = None
+            
+        if days:
+            if data_source == 'all':
+                # If 'all' sources, apply date filter to OE/POS but always include historical
+                where_clause = f"WHERE (o.order_date >= NOW() - INTERVAL '{days} days' OR o.source_type = 'HISTORICAL')"
+            elif data_source == 'api':
+                where_clause = f"WHERE o.order_date >= NOW() - INTERVAL '{days} days'"
+            # If data_source is historical, days is None, so this block is skipped
+
         # Data source filter
         if data_source == 'historical':
             source_filter = "AND o.source_type = 'HISTORICAL'"

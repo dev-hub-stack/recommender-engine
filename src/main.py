@@ -4434,7 +4434,8 @@ async def get_ml_customer_similarity(
 
 @app.get("/api/v1/ml/rfm-segments")
 async def get_ml_rfm_segments(
-    time_filter: str = Query("all", description="Time filter")
+    time_filter: str = Query("all", description="Time filter"),
+    data_source: str = Query("all", description="Data source filter: all, historical, api")
 ):
     """
     ⚡ FAST ML RFM Segmentation - Uses Redis Cache + Pre-computed Results
@@ -4465,8 +4466,22 @@ async def get_ml_rfm_segments(
         days = time_ranges.get(time_filter, 365)  # Default to 1 year
         
         where_clause = ""
+        source_filter = ""
         if days:
             where_clause = f"WHERE o.order_date >= NOW() - INTERVAL '{days} days'"
+        
+        # Data source filter
+        if data_source == 'historical':
+            source_filter = "AND o.source_type = 'HISTORICAL'"
+        elif data_source == 'api':
+            source_filter = "AND (o.source_type IS NULL OR o.source_type != 'HISTORICAL')"
+        
+        # Merge into where_clause
+        if source_filter:
+            if where_clause:
+                where_clause = where_clause + " " + source_filter
+            else:
+                where_clause = "WHERE " + source_filter.lstrip("AND ").strip()
         
         # Use the same query structure as the existing SQL endpoint for consistency
         cursor.execute(f"""

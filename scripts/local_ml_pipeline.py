@@ -54,6 +54,8 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+from src.services.order_id_utils import build_canonical_order_id, extract_source_order_id, normalize_live_source
+
 # Directories
 DATA_DIR = project_root / 'data' / 'local_ml'
 MODELS_DIR = project_root / 'models'
@@ -236,12 +238,21 @@ def insert_orders_to_db(orders: List[Dict], source: str):
     """Insert orders into PostgreSQL (upsert)"""
     conn = get_db_connection()
     cursor = conn.cursor()
+    normalized_source = normalize_live_source(source)
+    cursor.execute("""
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_name = 'orders' AND column_name = 'source_order_id'
+        )
+    """)
+    supports_source_order_id = cursor.fetchone()[0]
     
     inserted_count = 0
     for order in orders:
         try:
             # Extract order data - handle both OE and POS API formats
-            order_id = order.get('order_id') or order.get('id') or order.get('order_name')
+            raw_order_id = order.get('order_id') or order.get('id') or order.get('order_name')
             customer_id = order.get('customer_id') or order.get('customer_phone') or order.get('phone')
             customer_name = order.get('customer_name') or order.get('name', '')
             customer_city = order.get('customer_city') or order.get('city', '')
@@ -252,13 +263,16 @@ def insert_orders_to_db(orders: List[Dict], source: str):
             order_status = order.get('order_status', '')
             brand_name = order.get('brand_name', '')
             payment_mode = order.get('payment_mode', '')
+            source_order_id = extract_source_order_id(raw_order_id)
+            canonical_order_id = build_canonical_order_id(normalized_source, source_order_id)
+            db_order_id = canonical_order_id if supports_source_order_id else source_order_id
             
             # Convert total to float if string
             if isinstance(total, str):
                 total = float(total.replace(',', '')) if total else 0
             
             # Skip if missing required fields
-            if not order_id or not customer_id:
+            if not source_order_id or not customer_id:
                 logger.debug(f"Skipping order - missing order_id or customer_id: {order.get('id')}")
                 continue
             
@@ -267,25 +281,65 @@ def insert_orders_to_db(orders: List[Dict], source: str):
             unified_id = f"{customer_id}_{first_name}"
             
             # Upsert order with all fields
-            cursor.execute("""
-                INSERT INTO orders (id, unified_customer_id, customer_name, customer_phone, customer_city, province,
-                                   order_date, total_price, order_status, brand_name, payment_mode, order_type, source_type)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (id) DO UPDATE SET
-                    unified_customer_id = EXCLUDED.unified_customer_id,
-                    customer_name = EXCLUDED.customer_name,
-                    customer_phone = EXCLUDED.customer_phone,
-                    customer_city = EXCLUDED.customer_city,
-                    province = EXCLUDED.province,
-                    total_price = EXCLUDED.total_price,
-                    order_status = EXCLUDED.order_status,
-                    brand_name = EXCLUDED.brand_name,
-                    payment_mode = EXCLUDED.payment_mode,
-                    order_type = EXCLUDED.order_type,
-                    source_type = EXCLUDED.source_type,
-                    updated_at = NOW()
-            """, (str(order_id), unified_id, customer_name, customer_phone, customer_city, customer_province,
-                  order_date, total, order_status, brand_name, payment_mode, source, source))
+            if supports_source_order_id:
+                cursor.execute("""
+                    INSERT INTO orders (
+                        id, source_order_id, unified_customer_id, customer_name, customer_phone,
+                        customer_city, province, order_date, total_price, order_status,
+                        brand_name, payment_mode, order_type, source_type, synced_at
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, NOW()
+                    )
+                    ON CONFLICT (id) DO UPDATE SET
+                        source_order_id = COALESCE(EXCLUDED.source_order_id, orders.source_order_id),
+                        unified_customer_id = EXCLUDED.unified_customer_id,
+                        customer_name = EXCLUDED.customer_name,
+                        customer_phone = EXCLUDED.customer_phone,
+                        customer_city = EXCLUDED.customer_city,
+                        province = EXCLUDED.province,
+                        order_date = COALESCE(EXCLUDED.order_date, orders.order_date),
+                        total_price = EXCLUDED.total_price,
+                        order_status = EXCLUDED.order_status,
+                        brand_name = EXCLUDED.brand_name,
+                        payment_mode = EXCLUDED.payment_mode,
+                        order_type = EXCLUDED.order_type,
+                        source_type = EXCLUDED.source_type,
+                        synced_at = NOW(),
+                        updated_at = NOW()
+                """, (
+                      canonical_order_id, source_order_id, unified_id, customer_name, customer_phone,
+                      customer_city, customer_province, order_date, total, order_status,
+                      brand_name, payment_mode, normalized_source, normalized_source))
+            else:
+                cursor.execute("""
+                    INSERT INTO orders (
+                        id, unified_customer_id, customer_name, customer_phone, customer_city, province,
+                        order_date, total_price, order_status, brand_name, payment_mode, order_type,
+                        source_type, synced_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                    ON CONFLICT (id) DO UPDATE SET
+                        unified_customer_id = EXCLUDED.unified_customer_id,
+                        customer_name = EXCLUDED.customer_name,
+                        customer_phone = EXCLUDED.customer_phone,
+                        customer_city = EXCLUDED.customer_city,
+                        province = EXCLUDED.province,
+                        order_date = COALESCE(EXCLUDED.order_date, orders.order_date),
+                        total_price = EXCLUDED.total_price,
+                        order_status = EXCLUDED.order_status,
+                        brand_name = EXCLUDED.brand_name,
+                        payment_mode = EXCLUDED.payment_mode,
+                        order_type = EXCLUDED.order_type,
+                        source_type = EXCLUDED.source_type,
+                        synced_at = NOW(),
+                        updated_at = NOW()
+                """, (
+                      db_order_id, unified_id, customer_name, customer_phone,
+                      customer_city, customer_province, order_date, total, order_status,
+                      brand_name, payment_mode, normalized_source, normalized_source))
             
             inserted_count += 1
             
@@ -322,7 +376,7 @@ def insert_orders_to_db(orders: List[Dict], source: str):
                             quantity = EXCLUDED.quantity,
                             unit_price = EXCLUDED.unit_price,
                             total_price = EXCLUDED.total_price
-                    """, (str(order_id), str(product_id), product_name, quantity, price, price * quantity))
+                    """, (db_order_id, str(product_id), product_name, quantity, price, price * quantity))
                     
         except Exception as e:
             logger.warning(f"Order insert error for {order.get('id')}: {e}")

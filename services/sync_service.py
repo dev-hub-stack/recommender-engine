@@ -19,6 +19,7 @@ from config.master_group_api import (
     MASTER_GROUP_CONFIG, SYNC_CONFIG, PG_CONFIG,
     get_api_url, get_auth_headers
 )
+from src.services.order_id_utils import build_canonical_order_id, extract_source_order_id, normalize_live_source
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -89,7 +90,7 @@ class SyncService:
     def fetch_pos_orders(self, start_date: str, end_date: str, limit: Optional[int] = None) -> List[Dict]:
         """Fetch POS orders from Master Group API"""
         try:
-            url = get_api_url('pos_orders')
+            url = get_api_url('pos')
             headers = get_auth_headers()
             params = {
                 'start_date': start_date,
@@ -123,7 +124,7 @@ class SyncService:
     def fetch_oe_orders(self, days: int = 1, limit: Optional[int] = None, start_date: str = None, end_date: str = None) -> List[Dict]:
         """Fetch OE orders from Master Group API"""
         try:
-            url = get_api_url('oe_orders')
+            url = get_api_url('oe')
             headers = get_auth_headers()
             
             # Use explicit dates if provided, otherwise calculate from days
@@ -169,10 +170,13 @@ class SyncService:
     def transform_order_data(self, order: Dict, source: str) -> Dict:
         """Transform API order data to database format"""
         try:
+            normalized_source = normalize_live_source(source)
             # Extract customer ID (phone + name combination)
             customer_phone = order.get('customer_phone', order.get('phone', ''))
             customer_name = order.get('customer_name', order.get('name', ''))
             unified_customer_id = f"{customer_phone}_{customer_name}".strip('_')
+            source_order_id = extract_source_order_id(order.get('id', order.get('order_id', '')))
+            canonical_order_id = build_canonical_order_id(normalized_source, source_order_id)
             
             # Extract province - OE uses customer_state, POS uses dealer.province
             province = order.get('customer_state', '')
@@ -210,10 +214,12 @@ class SyncService:
                 customer_city = dealer.get('city', '')
             
             return {
-                'id': str(order.get('id', order.get('order_id', ''))),
-                'order_type': source,
-                'source_type': source,  # Add source_type for filtering
-                'order_date': order.get('order_date', order.get('created_at', datetime.now())),
+                'id': source_order_id or str(order.get('id', order.get('order_id', ''))),
+                'canonical_id': canonical_order_id or source_order_id or str(order.get('id', order.get('order_id', ''))),
+                'source_order_id': source_order_id,
+                'order_type': normalized_source,
+                'source_type': normalized_source,  # Add source_type for filtering
+                'order_date': order.get('order_date') or order.get('date') or order.get('created_at') or datetime.now(),
                 'unified_customer_id': unified_customer_id,
                 'customer_name': customer_name,
                 'customer_phone': customer_phone,
@@ -241,36 +247,76 @@ class SyncService:
         try:
             self.connect_db()
             cursor = self.pg_conn.cursor()
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_name = 'orders' AND column_name = 'source_order_id'
+                )
+            """)
+            supports_source_order_id = cursor.fetchone()[0]
             
             for order in orders:
                 try:
                     # Use SAVEPOINT to handle individual order errors without aborting entire transaction
                     cursor.execute("SAVEPOINT order_insert")
+                    db_order_id = order.get('canonical_id') if supports_source_order_id else order['id']
                     
                     # Insert order with province and source_type
-                    cursor.execute("""
-                        INSERT INTO orders (
-                            id, order_type, source_type, order_date, unified_customer_id,
-                            customer_name, customer_phone, customer_city, province, customer_address,
-                            customer_email, total_price, payment_mode, brand_name,
-                            order_status, order_name, items_json
-                        ) VALUES (
-                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb
-                        )
-                        ON CONFLICT (id) DO UPDATE SET
-                            updated_at = CURRENT_TIMESTAMP,
-                            synced_at = CURRENT_TIMESTAMP,
-                            province = COALESCE(EXCLUDED.province, orders.province),
-                            source_type = COALESCE(EXCLUDED.source_type, orders.source_type)
-                    """, (
-                        order['id'], order['order_type'], order.get('source_type', order['order_type']),
-                        order['order_date'], order['unified_customer_id'], order['customer_name'],
-                        order['customer_phone'], order['customer_city'], order.get('province', ''),
-                        order['customer_address'], order['customer_email'],
-                        order['total_price'], order['payment_mode'],
-                        order['brand_name'], order['order_status'],
-                        order['order_name'], order['items_json']
-                    ))
+                    if supports_source_order_id:
+                        cursor.execute("""
+                            INSERT INTO orders (
+                                id, source_order_id, order_type, source_type, order_date, unified_customer_id,
+                                customer_name, customer_phone, customer_city, province, customer_address,
+                                customer_email, total_price, payment_mode, brand_name,
+                                order_status, order_name, items_json, synced_at
+                            ) VALUES (
+                                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, CURRENT_TIMESTAMP
+                            )
+                            ON CONFLICT (id) DO UPDATE SET
+                                source_order_id = COALESCE(EXCLUDED.source_order_id, orders.source_order_id),
+                                updated_at = CURRENT_TIMESTAMP,
+                                synced_at = CURRENT_TIMESTAMP,
+                                order_date = COALESCE(EXCLUDED.order_date, orders.order_date),
+                                province = COALESCE(EXCLUDED.province, orders.province),
+                                source_type = COALESCE(EXCLUDED.source_type, orders.source_type),
+                                order_type = EXCLUDED.order_type
+                        """, (
+                            db_order_id, order.get('source_order_id'),
+                            order['order_type'], order.get('source_type', order['order_type']),
+                            order['order_date'], order['unified_customer_id'], order['customer_name'],
+                            order['customer_phone'], order['customer_city'], order.get('province', ''),
+                            order['customer_address'], order['customer_email'],
+                            order['total_price'], order['payment_mode'],
+                            order['brand_name'], order['order_status'],
+                            order['order_name'], order['items_json']
+                        ))
+                    else:
+                        cursor.execute("""
+                            INSERT INTO orders (
+                                id, order_type, source_type, order_date, unified_customer_id,
+                                customer_name, customer_phone, customer_city, province, customer_address,
+                                customer_email, total_price, payment_mode, brand_name,
+                                order_status, order_name, items_json, synced_at
+                            ) VALUES (
+                                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, CURRENT_TIMESTAMP
+                            )
+                            ON CONFLICT (id) DO UPDATE SET
+                                updated_at = CURRENT_TIMESTAMP,
+                                synced_at = CURRENT_TIMESTAMP,
+                                order_date = COALESCE(EXCLUDED.order_date, orders.order_date),
+                                province = COALESCE(EXCLUDED.province, orders.province),
+                                source_type = COALESCE(EXCLUDED.source_type, orders.source_type),
+                                order_type = EXCLUDED.order_type
+                        """, (
+                            db_order_id, order['order_type'], order.get('source_type', order['order_type']),
+                            order['order_date'], order['unified_customer_id'], order['customer_name'],
+                            order['customer_phone'], order['customer_city'], order.get('province', ''),
+                            order['customer_address'], order['customer_email'],
+                            order['total_price'], order['payment_mode'],
+                            order['brand_name'], order['order_status'],
+                            order['order_name'], order['items_json']
+                        ))
                     
                     if cursor.rowcount > 0:
                         orders_inserted += 1
@@ -284,7 +330,7 @@ class SyncService:
                             ) VALUES (%s, %s, %s, %s, %s, %s)
                             ON CONFLICT DO NOTHING
                         """, (
-                            order['id'],
+                            db_order_id,
                             item['product_id'],
                             item['product_name'],
                             item['quantity'],

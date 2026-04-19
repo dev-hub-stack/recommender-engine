@@ -14,7 +14,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import start_http_server
 import structlog
 from typing import List, Dict, Optional
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
+from decimal import Decimal
 from pydantic import BaseModel
 import redis
 import json
@@ -308,9 +309,19 @@ def set_to_cache(key: str, data: dict, ttl: int = CACHE_TTL):
     if not redis_client:
         return
     try:
-        redis_client.setex(key, ttl, json.dumps(data))
+        redis_client.setex(key, ttl, json.dumps(data, default=_cache_json_default))
     except Exception as e:
         logger.error("Cache set error", error=str(e))
+
+
+def _cache_json_default(value):
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, set):
+        return list(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 def calculate_date_range(time_filter: str) -> datetime:
     """
@@ -899,7 +910,7 @@ async def login(login_data: LoginRequest):
     
     Default credentials:
     - Email: admin@mastergroup.com
-    - Password: admin123
+    - Password: MG@2024#Secure!Pass
     """
     user = authenticate_user(login_data.email, login_data.password)
     if not user:
@@ -2192,6 +2203,99 @@ async def get_city_performance(
         } for r in results]
     except Exception as e:
         logger.error(f"City performance error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            conn.close()
+
+
+@app.get("/api/v1/analytics/geographic/city-performance/{city}")
+async def get_city_detailed_performance(
+    city: str = Path(..., description="City name"),
+    time_filter: str = Query("30days"),
+    order_source: str = Query("all", description="Filter by order source: all, oe, pos"),
+    category: Optional[str] = Query(None, description="Filter by product category")
+):
+    """Get detailed performance for a single city."""
+    conn = None
+    try:
+        conn = psycopg2.connect(**get_pg_connection_params())
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+        where_clause, params = get_time_filter_clause(time_filter)
+        order_source_clause, order_source_params = get_order_source_filter(order_source, "o")
+        params = list(params) + list(order_source_params)
+
+        needs_items_join = bool(category and category.strip())
+        category_filter = get_category_filter_sql(category) if needs_items_join else ""
+
+        province_case = """
+            CASE
+                WHEN UPPER(o.province) IN ('ISLAMABAD', 'ISLAMABAD CAPITAL TERRITORY', 'ISLAMABAD CAPITAL', 'ICT') THEN 'Islamabad'
+                WHEN UPPER(REPLACE(o.province, '.', '')) IN ('KPK', 'NWFP', 'KHYBER PAKHTUNKHWA') THEN 'Khyber Pakhtunkhwa'
+                WHEN UPPER(o.province) = 'PUNJAB' THEN 'Punjab'
+                WHEN UPPER(o.province) = 'SINDH' THEN 'Sindh'
+                WHEN UPPER(o.province) IN ('BALOCHISTAN', 'BALUCHISTAN') THEN 'Balochistan'
+                WHEN UPPER(o.province) IN ('GILGIT-BALTISTAN', 'GB') THEN 'Gilgit-Baltistan'
+                WHEN UPPER(o.province) IN ('AZAD KASHMIR', 'AJK', 'AZAD JAMMU AND KASHMIR') THEN 'Azad Kashmir'
+                ELSE o.province
+            END
+        """
+
+        if needs_items_join:
+            query = f"""
+                SELECT
+                    o.customer_city AS city,
+                    {province_case} AS province,
+                    COUNT(DISTINCT o.id) AS total_orders,
+                    COUNT(DISTINCT o.unified_customer_id) AS total_customers,
+                    SUM(oi.total_price) AS total_revenue
+                FROM orders o
+                JOIN order_items oi ON o.id = oi.order_id
+                {where_clause}
+                    {order_source_clause}
+                    AND LOWER(o.customer_city) = LOWER(%s)
+                    {category_filter}
+                GROUP BY o.customer_city, province
+                ORDER BY total_revenue DESC
+                LIMIT 1
+            """
+        else:
+            query = f"""
+                SELECT
+                    o.customer_city AS city,
+                    {province_case} AS province,
+                    COUNT(DISTINCT o.id) AS total_orders,
+                    COUNT(DISTINCT o.unified_customer_id) AS total_customers,
+                    SUM(o.total_price) AS total_revenue
+                FROM orders o
+                {where_clause}
+                    {order_source_clause}
+                    AND LOWER(o.customer_city) = LOWER(%s)
+                GROUP BY o.customer_city, province
+                ORDER BY total_revenue DESC
+                LIMIT 1
+            """
+
+        cursor.execute(query, tuple(params) + (city,))
+        result = cursor.fetchone()
+
+        if not result:
+            raise HTTPException(status_code=404, detail=f"City not found: {city}")
+
+        return {
+            "city": result["city"],
+            "province": result["province"],
+            "region": get_region_for_province(result["province"]),
+            "total_orders": result["total_orders"],
+            "unique_customers": result["total_customers"],
+            "total_revenue": float(result["total_revenue"] or 0),
+            "avg_order_value": float(result["total_revenue"] or 0) / max(result["total_orders"], 1),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"City detailed performance error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if conn:
@@ -3850,7 +3954,7 @@ async def get_matrix_factorization_recommendations(
     
     # Generate recommendations
     try:
-        from algorithms.matrix_factorization import MatrixFactorizationSVD
+        from src.algorithms.matrix_factorization import MatrixFactorizationSVD
         
         mf = MatrixFactorizationSVD(pg_conn, n_factors=30)
         recommendations = mf.get_recommendations(customer_id, limit=limit)

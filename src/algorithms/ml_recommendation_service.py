@@ -974,29 +974,52 @@ class MLRecommendationService:
         """Compute customer similarity segments"""
         try:
             conn = self.get_db_connection()
-            cursor = conn.cursor()
-            
-            cursor.execute("""
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+            time_ranges = {
+                '7days': 7,
+                '30days': 30,
+                '90days': 90,
+                '6months': 180,
+                '1year': 365,
+                'all': None,
+            }
+            days = time_ranges.get(time_filter, 30)
+
+            where_clauses = [
+                "unified_customer_id IS NOT NULL",
+                "BTRIM(unified_customer_id) <> ''",
+            ]
+            params: List[object] = []
+
+            if days is not None:
+                where_clauses.append("order_date >= %s")
+                params.append(datetime.now() - timedelta(days=days))
+
+            cursor.execute(
+                f"""
                 SELECT 
-                    customer_id,
-                    customer_name,
-                    COUNT(DISTINCT order_id) as order_count,
-                    SUM(total_amount) as total_spent
+                    unified_customer_id AS customer_id,
+                    MAX(customer_name) AS customer_name,
+                    COUNT(DISTINCT id) AS order_count,
+                    COALESCE(SUM(total_price), 0) AS total_spent
                 FROM orders
-                WHERE order_date >= NOW() - INTERVAL '90 days'
-                GROUP BY customer_id, customer_name
-                HAVING COUNT(DISTINCT order_id) >= 2
+                WHERE {' AND '.join(where_clauses)}
+                GROUP BY unified_customer_id
+                HAVING COUNT(DISTINCT id) >= 2
                 ORDER BY total_spent DESC
                 LIMIT 100
-            """)
+                """,
+                params,
+            )
             
             segments = []
             for row in cursor.fetchall():
                 segments.append({
-                    'customer_id': row[0],
-                    'customer_name': row[1],
-                    'order_count': row[2],
-                    'total_spent': float(row[3]) if row[3] else 0,
+                    'customer_id': row['customer_id'],
+                    'customer_name': row['customer_name'],
+                    'order_count': row['order_count'],
+                    'total_spent': float(row['total_spent']) if row['total_spent'] else 0,
                     'similar_customers_count': 5,  # Placeholder
                     'actual_recommendations': 10  # Placeholder
                 })
@@ -1140,4 +1163,3 @@ def get_ml_service() -> MLRecommendationService:
     if _ml_service is None:
         _ml_service = MLRecommendationService()
     return _ml_service
-

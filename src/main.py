@@ -4535,7 +4535,37 @@ async def get_ml_customer_similarity(
             "category": category,
             "total_count": len(customers)
         }
-        
+    except HTTPException as e:
+        fallback = ml_service.get_precomputed("customer_segments")
+        error_detail = str(getattr(e, "detail", "") or "")
+        can_use_fallback = (
+            fallback
+            and fallback.get("data")
+            and (
+                e.status_code >= 500
+                or "statement timeout" in error_detail.lower()
+            )
+        )
+        if can_use_fallback:
+            customers = fallback.get("data", [])[:limit]
+            logger.warning(
+                "Falling back to precomputed customer segments",
+                requested_time_filter=time_filter,
+                fallback_time_filter=fallback.get("time_filter"),
+                category=category,
+                count=len(customers),
+            )
+            return {
+                "success": True,
+                "customers": customers,
+                "algorithm": "precomputed_customer_segments",
+                "time_filter": time_filter,
+                "category": category,
+                "total_count": len(customers),
+                "fallback_applied": True,
+                "fallback_time_filter": fallback.get("time_filter"),
+            }
+        raise
     except Exception as e:
         logger.error("Failed to get customer similarity", error=str(e), exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))

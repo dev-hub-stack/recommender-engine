@@ -110,6 +110,8 @@ class MLRecommendationService:
             '90days': 90,
             '6months': 180,
             '1year': 365,
+            '2years': 730,
+            '3years': 1095,
             'all': None
         }
         
@@ -982,6 +984,8 @@ class MLRecommendationService:
                 '90days': 90,
                 '6months': 180,
                 '1year': 365,
+                '2years': 730,
+                '3years': 1095,
                 'all': None,
             }
             days = time_ranges.get(time_filter, 30)

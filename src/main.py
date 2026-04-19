@@ -2369,7 +2369,10 @@ async def get_segment_details(
             cached_data = redis_client.get(cache_key)
             if cached_data:
                 data = json.loads(cached_data)
-                customers = data.get("customers", [])[:limit]
+                customers = [
+                    customer for customer in data.get("customers", [])
+                    if customer.get("customer_id") and str(customer.get("customer_id")).strip()
+                ][:limit]
                 logger.info(f"Segment details from cache: {segment_name}", count=len(customers))
                 return customers
         except Exception as e:
@@ -2382,6 +2385,7 @@ async def get_segment_details(
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
         where_clause, params = get_time_filter_clause(time_filter)
+        identity_filter = "AND o.unified_customer_id IS NOT NULL AND BTRIM(o.unified_customer_id) <> ''" if where_clause else "WHERE o.unified_customer_id IS NOT NULL AND BTRIM(o.unified_customer_id) <> ''"
         
         # Define mutually exclusive segment criteria
         segment_criteria = {
@@ -2413,6 +2417,7 @@ async def get_segment_details(
                     AVG(o.total_price) as avg_order_value
                 FROM orders o
                 {where_clause}
+                {identity_filter}
                 GROUP BY o.unified_customer_id
             )
             SELECT 

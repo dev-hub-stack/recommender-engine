@@ -37,6 +37,11 @@ from config.master_group_api import PG_CONFIG, REDIS_CONFIG, MASTER_GROUP_CONFIG
 
 # Import ML recommendation service
 from src.algorithms.ml_recommendation_service import get_ml_service
+from src.services.shopify_storefront import (
+    build_shopify_mapping_indexes,
+    prepare_shopify_storefront_items,
+    resolve_shopify_mapping,
+)
 
 # Initialize global ML service
 ml_service = get_ml_service()
@@ -288,6 +293,18 @@ app.add_middleware(
 def get_cache_key(prefix: str, *args) -> str:
     """Generate cache key"""
     return f"{prefix}:{'_'.join(str(arg) for arg in args)}"
+
+
+def fetch_active_shopify_mappings(cursor) -> List[Dict]:
+    """Load active Shopify mappings once per request for storefront-safe enrichment."""
+    cursor.execute("""
+        SELECT shopify_product_id, shopify_title, shopify_sku, shopify_handle,
+               shopify_image_url, mastergroup_product_id, mastergroup_product_name,
+               match_confidence
+        FROM shopify_product_mapping
+        WHERE is_active = TRUE
+    """)
+    return cursor.fetchall()
 
 def get_from_cache(key: str):
     """Get data from Redis cache"""
@@ -5879,6 +5896,7 @@ async def get_shopify_recommendations(
         province = body.get("province")
         rfm_segment = body.get("rfm_segment")
         limit = body.get("limit", 10)
+        storefront_target = min(max(limit, 1), 12)
         
         recommendations = []
         recommendation_type = "popular"  # Default fallback
@@ -5889,10 +5907,69 @@ async def get_shopify_recommendations(
         conn = pg_pool.getconn()
         try:
             cursor = conn.cursor(cursor_factory=RealDictCursor)
+            active_mappings = fetch_active_shopify_mappings(cursor)
+            mapping_indexes = build_shopify_mapping_indexes(active_mappings)
+
+            current_internal_product_id = None
+            current_product_handle = None
+            current_product_title = None
+            if current_product:
+                current_mapping = resolve_shopify_mapping({"item_id": current_product}, mapping_indexes)
+                if current_mapping:
+                    current_internal_product_id = current_mapping.get("mastergroup_product_id")
+                    current_product_handle = current_mapping.get("shopify_handle")
+                    current_product_title = current_mapping.get("shopify_title")
+                else:
+                    current_internal_product_id = current_product
+
+            minimum_storefront_results = min(3, storefront_target)
+
+            def prepare_storefront(raw_items, *, require_handle: bool = True):
+                return prepare_shopify_storefront_items(
+                    raw_items,
+                    active_mappings,
+                    current_product_id=current_product,
+                    current_internal_product_id=current_internal_product_id,
+                    current_handle=current_product_handle,
+                    current_title=current_product_title,
+                    limit=storefront_target,
+                    require_handle=require_handle,
+                    mapping_indexes=mapping_indexes,
+                )
             
-            # 1. Try personalized recommendations (if customer identified)
+            # 1. Prefer context-aware similar items for storefront widget requests
+            if cart_items or current_product:
+                contextual_product_id = current_product or (cart_items[0] if cart_items else None)
+                contextual_internal_id = current_internal_product_id
+
+                if contextual_product_id:
+                    if contextual_internal_id is None:
+                        contextual_mapping = resolve_shopify_mapping({"item_id": contextual_product_id}, mapping_indexes)
+                        if contextual_mapping:
+                            contextual_internal_id = contextual_mapping.get("mastergroup_product_id")
+                        else:
+                            contextual_internal_id = contextual_product_id
+
+                    cursor.execute("""
+                        SELECT similar_products
+                        FROM offline_similar_items
+                        WHERE product_id = %s
+                    """, (str(contextual_internal_id),))
+                    sim_result = cursor.fetchone()
+
+                    if sim_result and sim_result['similar_products']:
+                        sims = sim_result['similar_products']
+                        if isinstance(sims, str):
+                            import json
+                            sims = json.loads(sims)
+
+                        recommendations = prepare_storefront(sims, require_handle=True)
+                        if recommendations:
+                            recommendation_type = "similar_items"
+
+            # 2. Try personalized recommendations (if customer identified)
             user_id = None
-            if customer_phone or customer_email:
+            if not recommendations and (customer_phone or customer_email):
                 # Find user by phone or email
                 identifier = customer_phone or customer_email
                 cursor.execute("""
@@ -5907,55 +5984,57 @@ async def get_shopify_recommendations(
                 
                 if result:
                     user_id = result['unified_customer_id']
-                    
-                    # Get personalized recommendations from cache
-                    cursor.execute("""
-                        SELECT recommendations 
-                        FROM offline_user_recommendations 
-                        WHERE user_id = %s
-                    """, (user_id,))
-                    rec_result = cursor.fetchone()
-                    
-                    if rec_result and rec_result['recommendations']:
-                        recs = rec_result['recommendations']
-                        if isinstance(recs, str):
-                            import json
-                            recs = json.loads(recs)
-                        recommendations = recs[:limit]
-                        recommendation_type = "personalized"
-            
-            # 2. Try similar items (if cart or current product provided)
-            if not recommendations and (cart_items or current_product):
-                product_id = current_product or (cart_items[0] if cart_items else None)
-                
-                if product_id:
-                    # Translate Shopify ID to MasterGroup ID if needed
-                    internal_product_id = product_id
-                    if str(product_id).isdigit() and len(str(product_id)) > 10:
+
+                    # First try the newer hybrid model if pre-trained models are available.
+                    hybrid_recs = []
+                    try:
+                        if not ml_service.is_trained:
+                            try:
+                                ml_service.load_trained_models(time_filter='30days')
+                            except Exception:
+                                ml_service.load_trained_models(time_filter='all')
+                        if ml_service.is_trained:
+                            hybrid_recs = ml_service.get_hybrid_recommendations(
+                                user_id,
+                                n_recommendations=max(storefront_target * 3, storefront_target),
+                            )
+                    except Exception as e:
+                        logger.warning(f"Shopify hybrid recommendations unavailable: {e}")
+
+                    if hybrid_recs:
+                        hybrid_items = [
+                            {
+                                "item_id": rec.get("product_id"),
+                                "item_name": rec.get("product_name"),
+                                "score": rec.get("score"),
+                                "algorithm": rec.get("algorithm"),
+                            }
+                            for rec in hybrid_recs
+                        ]
+                        recommendations = prepare_storefront(hybrid_items, require_handle=True)
+                        if len(recommendations) >= minimum_storefront_results:
+                            recommendation_type = "personalized_hybrid"
+
+                    if not recommendations:
                         cursor.execute("""
-                            SELECT mastergroup_product_id 
-                            FROM shopify_product_mapping 
-                            WHERE shopify_product_id = %s AND is_active = TRUE
-                        """, (int(product_id),))
-                        mapping = cursor.fetchone()
-                        if mapping and mapping['mastergroup_product_id']:
-                            internal_product_id = mapping['mastergroup_product_id']
-                    
-                    cursor.execute("""
-                        SELECT similar_products 
-                        FROM offline_similar_items 
-                        WHERE product_id = %s
-                    """, (str(internal_product_id),))
-                    sim_result = cursor.fetchone()
-                    
-                    if sim_result and sim_result['similar_products']:
-                        sims = sim_result['similar_products']
-                        if isinstance(sims, str):
-                            import json
-                            sims = json.loads(sims)
-                        recommendations = sims[:limit]
-                        recommendation_type = "similar_items"
-            
+                            SELECT recommendations
+                            FROM offline_user_recommendations
+                            WHERE user_id = %s
+                            ORDER BY updated_at DESC
+                            LIMIT 1
+                        """, (user_id,))
+                        rec_result = cursor.fetchone()
+
+                        if rec_result and rec_result['recommendations']:
+                            recs = rec_result['recommendations']
+                            if isinstance(recs, str):
+                                import json
+                                recs = json.loads(recs)
+
+                            recommendations = prepare_storefront(recs, require_handle=True)
+                            if recommendations:
+                                recommendation_type = "personalized"
+
             # 3. Try location-based recommendations
             if not recommendations and (city or province):
                 cursor.execute("""
@@ -5971,11 +6050,12 @@ async def get_shopify_recommendations(
                 
                 loc_results = cursor.fetchall()
                 if loc_results:
-                    recommendations = [
+                    recommendations = prepare_storefront([
                         {"item_id": r['product_id'], "item_name": r['product_name'], "score": r['purchase_count']}
                         for r in loc_results
-                    ]
-                    recommendation_type = "location_based"
+                    ], require_handle=True)
+                    if recommendations:
+                        recommendation_type = "location_based"
             
             # 4. Try segment-based recommendations
             if not recommendations and rfm_segment:
@@ -5995,11 +6075,12 @@ async def get_shopify_recommendations(
                 
                 seg_results = cursor.fetchall()
                 if seg_results:
-                    recommendations = [
+                    recommendations = prepare_storefront([
                         {"item_id": r['product_id'], "item_name": r['product_name'], "score": r['purchase_count']}
                         for r in seg_results
-                    ]
-                    recommendation_type = "segment_based"
+                    ], require_handle=True)
+                    if recommendations:
+                        recommendation_type = "segment_based"
             
             # 5. Fallback to popular items
             if not recommendations:
@@ -6015,10 +6096,10 @@ async def get_shopify_recommendations(
                 """, (limit,))
                 
                 pop_results = cursor.fetchall()
-                recommendations = [
+                recommendations = prepare_storefront([
                     {"item_id": r['product_id'], "item_name": r['product_name'], "score": r['purchase_count']}
                     for r in pop_results
-                ]
+                ], require_handle=True)
                 recommendation_type = "popular"
             
             cursor.close()
@@ -6069,21 +6150,21 @@ async def get_shopify_similar_products(
         conn = pg_pool.getconn()
         try:
             cursor = conn.cursor(cursor_factory=RealDictCursor)
+            active_mappings = fetch_active_shopify_mappings(cursor)
+            mapping_indexes = build_shopify_mapping_indexes(active_mappings)
             
             # Translate Shopify ID to MasterGroup ID if needed
             original_product_id = product_id
             internal_product_id = product_id
+            current_product_handle = None
+            current_product_title = None
             
-            # Check if it's a Shopify ID (long numeric string > 10 digits)
-            if product_id.isdigit() and len(product_id) > 10:
-                cursor.execute("""
-                    SELECT mastergroup_product_id, shopify_title 
-                    FROM shopify_product_mapping 
-                    WHERE shopify_product_id = %s AND is_active = TRUE
-                """, (int(product_id),))
-                mapping = cursor.fetchone()
-                if mapping and mapping['mastergroup_product_id']:
-                    internal_product_id = mapping['mastergroup_product_id']
+            current_mapping = resolve_shopify_mapping({"item_id": product_id}, mapping_indexes)
+            if current_mapping:
+                internal_product_id = current_mapping.get('mastergroup_product_id') or product_id
+                current_product_handle = current_mapping.get('shopify_handle')
+                current_product_title = current_mapping.get('shopify_title')
+                if internal_product_id != product_id:
                     logger.info(f"Translated Shopify ID {product_id} -> MasterGroup ID {internal_product_id}")
             
             # Get similar products from cache using internal ID
@@ -6099,102 +6180,93 @@ async def get_shopify_similar_products(
                 if isinstance(sims, str):
                     import json
                     sims = json.loads(sims)
-                
-                # Enrich with Shopify images - match by product name
-                product_names = [s.get('item_name', s.get('product_name', '')) for s in sims[:limit]]
-                product_names_clean = [name.split(' (')[0].lower().strip() for name in product_names if name]
-                
-                if product_names_clean:
-                    # Build query to match names
-                    name_conditions = ' OR '.join([
-                        f"LOWER(mastergroup_product_name) = %s OR LOWER(shopify_title) LIKE %s"
-                        for _ in product_names_clean
-                    ])
-                    query_params = []
-                    for name in product_names_clean:
-                        query_params.append(name)
-                        query_params.append(f'%{name}%')
-                    
-                    cursor.execute(f"""
-                        SELECT mastergroup_product_name, shopify_image_url, shopify_title, shopify_handle
-                        FROM shopify_product_mapping 
-                        WHERE ({name_conditions}) AND is_active = TRUE
-                    """, query_params)
-                    
-                    # Build map by normalized name
-                    image_map = {}
-                    for r in cursor.fetchall():
-                        key = (r['mastergroup_product_name'] or '').lower().strip()
-                        image_map[key] = r
-                        # Also add by shopify_title for matching
-                        title_key = (r['shopify_title'] or '').lower().strip()
-                        if title_key:
-                            image_map[title_key] = r
-                    
-                    for sim in sims[:limit]:
-                        name = sim.get('item_name', sim.get('product_name', ''))
-                        name_clean = name.split(' (')[0].lower().strip() if name else ''
-                        
-                        # Try exact match first, then partial
-                        matching_entry = None
-                        if name_clean in image_map:
-                            matching_entry = image_map[name_clean]
-                        else:
-                            # Try to find partial match
-                            for key, val in image_map.items():
-                                if name_clean in key or key in name_clean:
-                                    matching_entry = val
-                                    break
-                        
-                        if matching_entry:
-                            sim['image_url'] = matching_entry.get('shopify_image_url')
-                            sim['shopify_handle'] = matching_entry.get('shopify_handle')
+
+                prepared = prepare_shopify_storefront_items(
+                    sims,
+                    active_mappings,
+                    current_product_id=product_id,
+                    current_internal_product_id=internal_product_id,
+                    current_handle=current_product_handle,
+                    current_title=current_product_title,
+                    limit=limit,
+                    require_handle=True,
+                    mapping_indexes=mapping_indexes,
+                )
+
+                if len(prepared) < limit:
+                    cursor.execute("""
+                        SELECT oi.product_id, oi.product_name, COUNT(*) as score
+                        FROM order_items oi
+                        JOIN orders o ON o.id::text = oi.order_id
+                        WHERE o.order_date >= NOW() - INTERVAL '90 days'
+                        AND oi.product_id != %s
+                        AND oi.product_id IS NOT NULL
+                        GROUP BY oi.product_id, oi.product_name
+                        ORDER BY score DESC
+                        LIMIT %s
+                    """, (str(internal_product_id), max(limit * 3, limit)))
+
+                    fallback_rows = cursor.fetchall()
+                    prepared = prepare_shopify_storefront_items(
+                        prepared + [
+                            {"item_id": r['product_id'], "item_name": r['product_name'], "score": r['score']}
+                            for r in fallback_rows
+                        ],
+                        active_mappings,
+                        current_product_id=product_id,
+                        current_internal_product_id=internal_product_id,
+                        current_handle=current_product_handle,
+                        current_title=current_product_title,
+                        limit=limit,
+                        require_handle=True,
+                        mapping_indexes=mapping_indexes,
+                    )
                 
                 cursor.close()
                 return {
                     "success": True,
                     "product_id": product_id,
                     "internal_product_id": internal_product_id if internal_product_id != product_id else None,
-                    "similar_products": sims[:limit],
-                    "count": len(sims[:limit])
+                    "similar_products": prepared,
+                    "count": len(prepared)
                 }
             
-            # Fallback: get popular products with images
+            # Fallback: get popular products and resolve storefront metadata in Python.
             cursor.execute("""
-                SELECT oi.product_id, oi.product_name, COUNT(*) as score,
-                       spm.shopify_image_url, spm.shopify_handle
+                SELECT oi.product_id, oi.product_name, COUNT(*) as score
                 FROM order_items oi
                 JOIN orders o ON o.id::text = oi.order_id
-                LEFT JOIN shopify_product_mapping spm ON (
-                    LOWER(spm.mastergroup_product_name) = LOWER(SPLIT_PART(oi.product_name, ' (', 1))
-                    OR LOWER(spm.shopify_title) LIKE '%%' || LOWER(SPLIT_PART(oi.product_name, ' (', 1)) || '%%'
-                )
                 WHERE o.order_date >= NOW() - INTERVAL '90 days'
                 AND oi.product_id != %s
                 AND oi.product_id IS NOT NULL
-                GROUP BY oi.product_id, oi.product_name, spm.shopify_image_url, spm.shopify_handle
+                GROUP BY oi.product_id, oi.product_name
                 ORDER BY score DESC
                 LIMIT %s
-            """, (str(internal_product_id), limit))
+            """, (str(internal_product_id), max(limit * 3, limit)))
             
             results = cursor.fetchall()
+            prepared = prepare_shopify_storefront_items(
+                [
+                    {"item_id": r['product_id'], "item_name": r['product_name'], "score": r['score']}
+                    for r in results
+                ],
+                active_mappings,
+                current_product_id=product_id,
+                current_internal_product_id=internal_product_id,
+                current_handle=current_product_handle,
+                current_title=current_product_title,
+                limit=limit,
+                require_handle=True,
+                mapping_indexes=mapping_indexes,
+            )
             cursor.close()
             
             return {
                 "success": True,
                 "product_id": product_id,
                 "internal_product_id": internal_product_id if internal_product_id != product_id else None,
-                "similar_products": [
-                    {
-                        "item_id": r['product_id'], 
-                        "item_name": r['product_name'], 
-                        "score": r['score'],
-                        "image_url": r.get('shopify_image_url'),
-                        "shopify_handle": r.get('shopify_handle')
-                    }
-                    for r in results
-                ],
-                "count": len(results),
+                "similar_products": prepared,
+                "count": len(prepared),
                 "fallback": True
             }
             
@@ -6382,16 +6454,13 @@ async def get_shopify_popular_products(
         conn = pg_pool.getconn()
         try:
             cursor = conn.cursor(cursor_factory=RealDictCursor)
+            active_mappings = fetch_active_shopify_mappings(cursor)
+            mapping_indexes = build_shopify_mapping_indexes(active_mappings)
             
             query = """
-                SELECT oi.product_id, oi.product_name, COUNT(*) as purchase_count,
-                       spm.shopify_image_url, spm.shopify_handle
+                SELECT oi.product_id, oi.product_name, COUNT(*) as purchase_count
                 FROM order_items oi
                 JOIN orders o ON o.id::text = oi.order_id
-                LEFT JOIN shopify_product_mapping spm ON (
-                    LOWER(spm.mastergroup_product_name) = LOWER(SPLIT_PART(oi.product_name, ' (', 1))
-                    OR LOWER(spm.shopify_title) LIKE '%%' || LOWER(SPLIT_PART(oi.product_name, ' (', 1)) || '%%'
-                )
                 WHERE o.order_date >= NOW() - (INTERVAL '1 day' * %s)
                 AND oi.product_id IS NOT NULL
             """
@@ -6406,29 +6475,30 @@ async def get_shopify_popular_products(
                 params.append(province)
             
             query += """
-                GROUP BY oi.product_id, oi.product_name, spm.shopify_image_url, spm.shopify_handle
+                GROUP BY oi.product_id, oi.product_name
                 ORDER BY purchase_count DESC
                 LIMIT %s
             """
-            params.append(limit)
+            params.append(max(limit * 3, limit))
             
             cursor.execute(query, params)
             results = cursor.fetchall()
+            prepared = prepare_shopify_storefront_items(
+                [
+                    {"item_id": r['product_id'], "item_name": r['product_name'], "score": r['purchase_count']}
+                    for r in results
+                ],
+                active_mappings,
+                limit=limit,
+                require_handle=True,
+                mapping_indexes=mapping_indexes,
+            )
             cursor.close()
             
             return {
                 "success": True,
-                "popular_products": [
-                    {
-                        "item_id": r['product_id'], 
-                        "item_name": r['product_name'], 
-                        "score": r['purchase_count'],
-                        "image_url": r.get('shopify_image_url'),
-                        "shopify_handle": r.get('shopify_handle')
-                    }
-                    for r in results
-                ],
-                "count": len(results),
+                "popular_products": prepared,
+                "count": len(prepared),
                 "filters": {"city": city, "province": province, "days": days}
             }
             

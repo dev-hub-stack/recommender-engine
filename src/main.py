@@ -13,7 +13,7 @@ from src.auth import (
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import start_http_server
 import structlog
-from typing import List, Dict, Optional
+from typing import Any, List, Dict, Optional
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pydantic import BaseModel
@@ -25,6 +25,7 @@ from psycopg2 import pool
 import requests
 import os
 from collections import defaultdict
+import hashlib
 import re
 import sys
 import io
@@ -42,6 +43,11 @@ from src.services.shopify_storefront import (
     prepare_shopify_storefront_items,
     resolve_shopify_mapping,
 )
+from src.services.recommendation_events import (
+    attribute_shopify_purchase,
+    record_recommendation_events,
+)
+from src.services.recommendation_reporting import build_recommendation_reporting_summary
 
 # Initialize global ML service
 ml_service = get_ml_service()
@@ -1058,6 +1064,42 @@ async def get_popular_products_endpoint(
     set_to_cache(cache_key, result, ttl=ttl)
     
     return result
+
+
+@app.get("/api/v1/recommendations/reporting")
+async def get_recommendation_reporting(
+    days: int = Query(30, ge=1, le=365, description="Lookback window in days"),
+    source_widget: Optional[str] = Query(None, description="Widget source filter"),
+    page_type: Optional[str] = Query(None, description="Page type filter"),
+    variant: Optional[str] = Query(None, description="A/B variant filter"),
+    algorithm: Optional[str] = Query(None, description="Algorithm filter"),
+    province: Optional[str] = Query(None, description="Province filter"),
+    city: Optional[str] = Query(None, description="City filter"),
+    storefront: Optional[str] = Query(None, description="Storefront/store filter"),
+):
+    """Summarize recommendation telemetry for CTR, add-to-cart, purchases, and revenue."""
+    if not pg_pool:
+        raise HTTPException(status_code=500, detail="Database not connected")
+
+    conn = pg_pool.getconn()
+    try:
+        summary = build_recommendation_reporting_summary(
+            conn,
+            days=days,
+            source_widget=source_widget,
+            page_type=page_type,
+            variant=variant,
+            algorithm=algorithm,
+            province=province,
+            city=city,
+            storefront=storefront,
+        )
+        return {"success": True, **summary}
+    except Exception as e:
+        logger.error("Failed to build recommendation reporting summary", error=str(e), exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        pg_pool.putconn(conn)
 
 @app.get("/api/v1/customers/{customer_id}/history")
 async def get_customer_history(customer_id: str):
@@ -4011,7 +4053,13 @@ import random
 # A/B Testing configuration
 AB_TEST_CONFIG = {
     'ml_recommendation_rollout': 50,  # % of traffic that gets ML recommendations
-    'enabled_dashboards': ['analytics', 'customer_detail', 'product_recommendations']
+    'enabled_dashboards': [
+        'analytics',
+        'customer_detail',
+        'product_recommendations',
+        'shopify_product_widget',
+        'shopify_cart_widget',
+    ]
 }
 
 @app.post("/api/v1/ml/train")
@@ -4273,7 +4321,8 @@ async def get_ml_collaborative_products(
 @app.get("/api/v1/ab-test/variant")
 async def get_ab_test_variant(
     dashboard: str = Query(..., description="Dashboard name"),
-    user_id: Optional[str] = Query(None, description="User ID for consistent assignment")
+    user_id: Optional[str] = Query(None, description="User ID for consistent assignment"),
+    session_id: Optional[str] = Query(None, description="Anonymous storefront session ID"),
 ):
     """
     Get A/B test variant for a dashboard
@@ -4291,10 +4340,12 @@ async def get_ab_test_variant(
                 "reason": "Dashboard not enabled for ML testing"
             }
         
-        # Consistent assignment based on user_id hash
-        if user_id:
-            # Use hash for consistent assignment
-            hash_value = hash(user_id) % 100
+        assignment_key = user_id or session_id
+
+        # Consistent assignment based on user identity or storefront session.
+        if assignment_key:
+            hash_source = f"{dashboard}:{assignment_key}".encode("utf-8")
+            hash_value = int(hashlib.sha256(hash_source).hexdigest()[:8], 16) % 100
             use_ml = hash_value < AB_TEST_CONFIG['ml_recommendation_rollout']
         else:
             # Random assignment for anonymous users
@@ -4311,6 +4362,7 @@ async def get_ab_test_variant(
         return {
             "dashboard": dashboard,
             "user_id": user_id,
+            "session_id": session_id,
             "variant": variant,
             "algorithm": algorithm,
             "rollout_percentage": AB_TEST_CONFIG['ml_recommendation_rollout']
@@ -5859,6 +5911,66 @@ async def get_users_by_location(
 # SHOPIFY INTEGRATION ENDPOINTS
 # ============================================================================
 
+@app.post("/api/v1/shopify/events")
+async def track_shopify_recommendation_events(request: Request):
+    """
+    Capture storefront recommendation telemetry for impressions, clicks,
+    add-to-cart, and purchase attribution support.
+    """
+    try:
+        body = await request.json()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON payload: {e}")
+
+    if isinstance(body, dict) and isinstance(body.get("events"), list):
+        payloads = body["events"]
+    elif isinstance(body, list):
+        payloads = body
+    elif isinstance(body, dict):
+        payloads = [body]
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Payload must be an object, an array, or an object containing an 'events' list",
+        )
+
+    if not payloads:
+        raise HTTPException(status_code=400, detail="No events provided")
+    if not pg_pool:
+        raise HTTPException(status_code=500, detail="Database not connected")
+
+    conn = pg_pool.getconn()
+    try:
+        enriched_payloads = []
+        for payload in payloads:
+            if not isinstance(payload, dict):
+                raise HTTPException(status_code=400, detail="Each event payload must be an object")
+            event_payload = dict(payload)
+            if not event_payload.get("storefront"):
+                event_payload["storefront"] = event_payload.get("store_domain") or request.headers.get("host")
+            enriched_payloads.append(event_payload)
+
+        inserted = record_recommendation_events(conn, enriched_payloads)
+        conn.commit()
+
+        return {
+            "success": True,
+            "count": len(inserted),
+            "events": inserted,
+        }
+    except ValueError as e:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error("Failed to record Shopify recommendation events", error=str(e), exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        pg_pool.putconn(conn)
+
 @app.post("/api/v1/shopify/recommendations")
 async def get_shopify_recommendations(
     request: Request
@@ -6389,15 +6501,29 @@ async def shopify_order_webhook(request: Request):
             
             # Insert order
             cursor.execute("""
-                INSERT INTO orders (id, unified_customer_id, customer_name, customer_email, 
+                INSERT INTO orders (id, order_type, unified_customer_id, customer_name, customer_email, 
                                    customer_phone, customer_city, province, order_date, 
-                                   total_price, source_type)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                   total_price, source_type, order_name, order_status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (id) DO UPDATE SET
                     unified_customer_id = EXCLUDED.unified_customer_id,
-                    total_price = EXCLUDED.total_price
-            """, (order_id, unified_id, customer_name, customer_email, 
-                  customer_phone, city, province, order_date, total, 'SHOPIFY'))
+                    total_price = EXCLUDED.total_price,
+                    order_status = EXCLUDED.order_status
+            """, (
+                order_id,
+                'OE',
+                unified_id,
+                customer_name,
+                customer_email,
+                customer_phone,
+                city,
+                province,
+                order_date,
+                total,
+                'SHOPIFY',
+                body.get("name"),
+                body.get("financial_status") or body.get("fulfillment_status") or "created",
+            ))
             
             items_inserted = 0
             for item in body.get("line_items", []):
@@ -6415,17 +6541,38 @@ async def shopify_order_webhook(request: Request):
                             quantity = EXCLUDED.quantity
                     """, (order_id, product_id, product_name, quantity, price))
                     items_inserted += 1
+
+            attributed_events = []
+            try:
+                attributed_events = attribute_shopify_purchase(
+                    conn,
+                    body,
+                    order_id=order_id,
+                    user_id=unified_id,
+                    customer_email=customer_email,
+                    customer_phone=customer_phone,
+                )
+            except Exception as attribution_error:
+                logger.warning(
+                    "Shopify purchase attribution failed",
+                    order_id=order_id,
+                    error=str(attribution_error),
+                )
             
             conn.commit()
             cursor.close()
             
-            logger.info(f"Shopify webhook: Order {order_id} saved ({items_inserted} items)")
+            logger.info(
+                f"Shopify webhook: Order {order_id} saved ({items_inserted} items)",
+                attributed_recommendations=len(attributed_events),
+            )
             
             return {
                 "success": True,
                 "order_id": order_id,
                 "customer_id": unified_id,
-                "items_count": items_inserted
+                "items_count": items_inserted,
+                "attributed_recommendations": len(attributed_events),
             }
             
         finally:

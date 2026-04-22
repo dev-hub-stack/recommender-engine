@@ -284,10 +284,10 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "http://localhost:3000",
+        "https://master-analyticsdashboard.netlify.app",
         "https://master-dashboard.netlify.app",
-        "https://*.netlify.app",
-        "*"
     ],
+    allow_origin_regex=r"^https://([a-zA-Z0-9-]+\.)?(netlify\.app|myshopify\.com|shopifypreview\.com)$",
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],

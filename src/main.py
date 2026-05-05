@@ -7278,6 +7278,89 @@ async def export_dashboard_csv(
                             cust['last_order_date'].strftime('%Y-%m-%d') if cust['last_order_date'] and cust['last_order_date'].year > 1900 else 'N/A',
                             int(cust['days_since']) if cust['days_since'] else 'N/A'
                         ])
+
+                    # Full order item detail for campaign/cross-sell analysis.
+                    # This uses the current page date/source filters, then expands each order into its purchased items.
+                    writer.writerow([])
+                    writer.writerow(["RFM ORDER ITEM DETAILS"])
+                    writer.writerow(["Filtered by selected date/source. One row per ordered item."])
+                    writer.writerow([
+                        "Segment", "Customer ID", "Customer Name", "Email", "Phone", "City", "Province",
+                        "Order ID", "Order Date", "Order Source", "Order Status", "Order Total (PKR)",
+                        "Product ID / SKU", "Product Name", "Quantity", "Unit Price (PKR)", "Line Total (PKR)"
+                    ])
+
+                    rfm_detail_where = where_clause
+                    rfm_detail_params = list(time_params or [])
+                    source_clause, source_params = get_order_source_filter(
+                        order_source,
+                        table_alias="o",
+                        include_delivered_only=delivered_only,
+                        has_where_clause=bool(rfm_detail_where)
+                    )
+                    if source_clause:
+                        rfm_detail_where = f"{rfm_detail_where} {source_clause}" if rfm_detail_where else source_clause
+                        rfm_detail_params.extend(source_params)
+                    if category_filter_sql:
+                        if not rfm_detail_where:
+                            rfm_detail_where = "WHERE 1=1"
+                        rfm_detail_where = f"{rfm_detail_where} {category_filter_sql}"
+                    if not rfm_detail_where:
+                        rfm_detail_where = "WHERE 1=1"
+                    order_status_select = (
+                        "COALESCE(NULLIF(o.order_status, ''), NULLIF(o.status, ''), 'Unknown')"
+                        if has_status
+                        else "COALESCE(NULLIF(o.order_status, ''), 'Unknown')"
+                    )
+
+                    cursor.execute(f"""
+                        SELECT
+                            cs.customer_segment,
+                            o.unified_customer_id,
+                            COALESCE(NULLIF(o.customer_name, ''), cs.customer_name) AS customer_name,
+                            o.customer_email,
+                            o.customer_phone,
+                            o.customer_city,
+                            o.province,
+                            o.id AS order_id,
+                            o.order_date,
+                            COALESCE(NULLIF(o.order_type, ''), NULLIF(o.source_type, ''), 'Unknown') AS order_source,
+                            {order_status_select} AS order_status,
+                            o.total_price AS order_total,
+                            oi.product_id,
+                            oi.product_name,
+                            oi.quantity,
+                            oi.unit_price,
+                            COALESCE(oi.quantity, 0) * COALESCE(oi.unit_price, 0) AS line_total
+                        FROM customer_statistics cs
+                        JOIN orders o ON cs.customer_id = o.unified_customer_id
+                        JOIN order_items oi ON o.id = oi.order_id
+                        {rfm_detail_where}
+                        AND cs.customer_segment IS NOT NULL
+                        ORDER BY cs.customer_segment, o.order_date DESC, o.id, oi.product_name
+                    """, tuple(rfm_detail_params) if rfm_detail_params else None)
+                    order_items = cursor.fetchall()
+
+                    for item in order_items:
+                        writer.writerow([
+                            item.get('customer_segment') or 'N/A',
+                            item.get('unified_customer_id') or 'N/A',
+                            item.get('customer_name') or 'N/A',
+                            item.get('customer_email') or 'N/A',
+                            normalize_export_phone(item.get('customer_phone')),
+                            item.get('customer_city') or 'N/A',
+                            item.get('province') or 'N/A',
+                            item.get('order_id') or 'N/A',
+                            item['order_date'].strftime('%Y-%m-%d %H:%M') if item.get('order_date') and item['order_date'].year > 1900 else 'N/A',
+                            item.get('order_source') or 'N/A',
+                            item.get('order_status') or 'N/A',
+                            f"{float(item.get('order_total') or 0):,.2f}",
+                            item.get('product_id') or 'N/A',
+                            item.get('product_name') or 'N/A',
+                            item.get('quantity') or 0,
+                            f"{float(item.get('unit_price') or 0):,.2f}",
+                            f"{float(item.get('line_total') or 0):,.2f}",
+                        ])
                     yield get_chunk()
             
             # =========================================

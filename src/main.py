@@ -7236,51 +7236,8 @@ async def export_dashboard_csv(
                             f"{float(seg['avg_orders'] or 0):.1f}"
                         ])
                     
-                    # Detailed customer list by segment
-                    writer.writerow([])
-                    writer.writerow(["CUSTOMERS BY SEGMENT (Top 500)"])
-                    writer.writerow(["Customer ID", "Customer Name", "Email", "Phone", "City", "Address", "Segment", "Total Orders", 
-                                   "Total Spent (PKR)", "Last Order Date", "Days Since Last Order"])
-                    
-                    cursor.execute("""
-                        SELECT 
-                            cs.customer_id,
-                            cs.customer_name,
-                            MAX(o.customer_email) as email,
-                            MAX(o.customer_phone) as phone,
-                            MAX(o.customer_address) as address,
-                            cs.customer_city,
-                            cs.customer_segment,
-                            cs.total_orders,
-                            cs.total_spent,
-                            cs.last_order_date,
-                            EXTRACT(DAY FROM NOW() - cs.last_order_date) as days_since
-                        FROM customer_statistics cs
-                        LEFT JOIN orders o ON cs.customer_id = o.unified_customer_id
-                        WHERE cs.customer_segment IS NOT NULL
-                        GROUP BY cs.customer_id, cs.customer_name, cs.customer_city, cs.customer_segment, cs.total_orders, cs.total_spent, cs.last_order_date, days_since
-                        ORDER BY cs.customer_segment, cs.total_spent DESC
-                        LIMIT 500
-                    """)
-                    customers = cursor.fetchall()
-                    
-                    for cust in customers:
-                        writer.writerow([
-                            cust['customer_id'] or 'N/A',
-                            cust['customer_name'] or 'N/A',
-                            cust['email'] or 'N/A',
-                            normalize_export_phone(cust['phone']),
-                            cust['customer_city'] or 'N/A',
-                            cust['address'] or 'N/A',
-                            cust['customer_segment'] or 'N/A',
-                            cust['total_orders'] or 0,
-                            f"{float(cust['total_spent'] or 0):,.2f}",
-                            cust['last_order_date'].strftime('%Y-%m-%d') if cust['last_order_date'] and cust['last_order_date'].year > 1900 else 'N/A',
-                            int(cust['days_since']) if cust['days_since'] else 'N/A'
-                        ])
-
                     # Full order item detail for campaign/cross-sell analysis.
-                    # This uses the current page date/source filters, then expands each order into its purchased items.
+                    # Put this before the customer summary so Excel opens near the data marketing needs most.
                     writer.writerow([])
                     writer.writerow(["RFM ORDER ITEM DETAILS"])
                     writer.writerow(["Filtered by selected date/source. One row per ordered item."])
@@ -7360,6 +7317,49 @@ async def export_dashboard_csv(
                             item.get('quantity') or 0,
                             f"{float(item.get('unit_price') or 0):,.2f}",
                             f"{float(item.get('line_total') or 0):,.2f}",
+                        ])
+
+                    # Detailed customer list by segment
+                    writer.writerow([])
+                    writer.writerow(["CUSTOMERS BY SEGMENT (Top 500)"])
+                    writer.writerow(["Customer ID", "Customer Name", "Email", "Phone", "City", "Address", "Segment", "Total Orders", 
+                                   "Total Spent (PKR)", "Last Order Date", "Days Since Last Order"])
+                    
+                    cursor.execute("""
+                        SELECT 
+                            cs.customer_id,
+                            cs.customer_name,
+                            MAX(o.customer_email) as email,
+                            MAX(o.customer_phone) as phone,
+                            MAX(o.customer_address) as address,
+                            cs.customer_city,
+                            cs.customer_segment,
+                            cs.total_orders,
+                            cs.total_spent,
+                            cs.last_order_date,
+                            EXTRACT(DAY FROM NOW() - cs.last_order_date) as days_since
+                        FROM customer_statistics cs
+                        LEFT JOIN orders o ON cs.customer_id = o.unified_customer_id
+                        WHERE cs.customer_segment IS NOT NULL
+                        GROUP BY cs.customer_id, cs.customer_name, cs.customer_city, cs.customer_segment, cs.total_orders, cs.total_spent, cs.last_order_date, days_since
+                        ORDER BY cs.customer_segment, cs.total_spent DESC
+                        LIMIT 500
+                    """)
+                    customers = cursor.fetchall()
+                    
+                    for cust in customers:
+                        writer.writerow([
+                            cust['customer_id'] or 'N/A',
+                            cust['customer_name'] or 'N/A',
+                            cust['email'] or 'N/A',
+                            normalize_export_phone(cust['phone']),
+                            cust['customer_city'] or 'N/A',
+                            cust['address'] or 'N/A',
+                            cust['customer_segment'] or 'N/A',
+                            cust['total_orders'] or 0,
+                            f"{float(cust['total_spent'] or 0):,.2f}",
+                            cust['last_order_date'].strftime('%Y-%m-%d') if cust['last_order_date'] and cust['last_order_date'].year > 1900 else 'N/A',
+                            int(cust['days_since']) if cust['days_since'] else 'N/A'
                         ])
                     yield get_chunk()
             

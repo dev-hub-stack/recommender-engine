@@ -2632,18 +2632,29 @@ async def get_custom_rfm_segments(
             FROM customer_rfm
         """, sql_params)
 
-        row = cursor.fetchone()
-        total = row['total'] or 1
+        row = cursor.fetchone() or {}
+        count_keys = [
+            'champions',
+            'loyal',
+            'new_customers',
+            'at_risk',
+            'hibernating',
+            'lost',
+            'total',
+        ]
+        counts = {key: int(row.get(key) or 0) for key in count_keys}
+        total = counts['total']
+        pct_denominator = total or 1
 
-        def pct(n): return round((n or 0) / total * 100, 1)
+        def pct(n): return round((n or 0) / pct_denominator * 100, 1)
 
         segments = [
-            {"segment_name": "Champions",    "customer_count": row['champions'],    "percentage": pct(row['champions'])},
-            {"segment_name": "Loyal",        "customer_count": row['loyal'],        "percentage": pct(row['loyal'])},
-            {"segment_name": "New Customers","customer_count": row['new_customers'],"percentage": pct(row['new_customers'])},
-            {"segment_name": "At Risk",      "customer_count": row['at_risk'],      "percentage": pct(row['at_risk'])},
-            {"segment_name": "Hibernating",  "customer_count": row['hibernating'],  "percentage": pct(row['hibernating'])},
-            {"segment_name": "Lost",         "customer_count": row['lost'],         "percentage": pct(row['lost'])},
+            {"segment_name": "Champions",    "customer_count": counts['champions'],     "percentage": pct(counts['champions'])},
+            {"segment_name": "Loyal",        "customer_count": counts['loyal'],         "percentage": pct(counts['loyal'])},
+            {"segment_name": "New Customers","customer_count": counts['new_customers'], "percentage": pct(counts['new_customers'])},
+            {"segment_name": "At Risk",      "customer_count": counts['at_risk'],       "percentage": pct(counts['at_risk'])},
+            {"segment_name": "Hibernating",  "customer_count": counts['hibernating'],   "percentage": pct(counts['hibernating'])},
+            {"segment_name": "Lost",         "customer_count": counts['lost'],          "percentage": pct(counts['lost'])},
         ]
         return {
             "segments": segments,

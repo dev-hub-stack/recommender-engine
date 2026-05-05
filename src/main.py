@@ -7272,12 +7272,12 @@ async def export_dashboard_csv(
 
                     cursor.execute(f"""
                         SELECT
-                            cs.customer_segment,
+                            COALESCE(NULLIF(cs.customer_segment, ''), 'Unsegmented') AS customer_segment,
                             o.unified_customer_id,
                             COALESCE(NULLIF(o.customer_name, ''), cs.customer_name) AS customer_name,
                             o.customer_email,
                             o.customer_phone,
-                            o.customer_city,
+                            COALESCE(NULLIF(o.customer_city, ''), cs.customer_city) AS customer_city,
                             o.province,
                             o.id AS order_id,
                             o.order_date,
@@ -7289,12 +7289,11 @@ async def export_dashboard_csv(
                             oi.quantity,
                             oi.unit_price,
                             COALESCE(oi.quantity, 0) * COALESCE(oi.unit_price, 0) AS line_total
-                        FROM customer_statistics cs
-                        JOIN orders o ON cs.customer_id = o.unified_customer_id
-                        JOIN order_items oi ON o.id = oi.order_id
+                        FROM orders o
+                        JOIN order_items oi ON o.id::text = oi.order_id::text
+                        LEFT JOIN customer_statistics cs ON cs.customer_id = o.unified_customer_id
                         {rfm_detail_where}
-                        AND cs.customer_segment IS NOT NULL
-                        ORDER BY cs.customer_segment, o.order_date DESC, o.id, oi.product_name
+                        ORDER BY COALESCE(NULLIF(cs.customer_segment, ''), 'Unsegmented'), o.order_date DESC, o.id, oi.product_name
                     """, tuple(rfm_detail_params) if rfm_detail_params else None)
                     order_items = cursor.fetchall()
 

@@ -2551,6 +2551,7 @@ async def get_custom_rfm_segments(
     lost_r: int = Query(365, description="Min recency to be Lost"),
     # Filters
     order_source: str = Query("all", description="Filter: all, oe, pos, historical"),
+    time_filter: str = Query("all", description="Time filter: today, 7days, 30days, 90days, all, or YYYY-MM-DD:YYYY-MM-DD"),
 ):
     """
     Compute RFM segment counts using fully customisable thresholds.
@@ -2561,10 +2562,19 @@ async def get_custom_rfm_segments(
         conn = psycopg2.connect(**get_pg_connection_params())
         cursor = conn.cursor(cursor_factory=RealDictCursor)
 
+        where = "WHERE 1=1"
+        sql_params = []
+
+        start_date = calculate_date_range(time_filter)
+        if start_date:
+            where += " AND o.order_date >= %s"
+            sql_params.append(start_date)
+
         source_clause, source_params = get_order_source_filter(
-            order_source, table_alias="o", has_where_clause=False
+            order_source, table_alias="o", has_where_clause=True
         )
-        where = f"WHERE 1=1 {source_clause.replace('WHERE ', ' AND ')}" if source_clause else "WHERE 1=1"
+        where += source_clause
+        sql_params.extend(source_params)
 
         if order_source.lower() == 'historical':
             sql_select = """
@@ -2581,12 +2591,12 @@ async def get_custom_rfm_segments(
                          AND NOT (frequency >= %s) THEN 1 ELSE 0 END) AS lost,
                 COUNT(*) AS total
             """
-            sql_params = source_params + (
+            sql_params.extend((
                 champion_f, champion_m,
                 champion_f, champion_m, loyal_f, loyal_m,
                 champion_f, champion_m, loyal_f, loyal_m, at_risk_f,
                 champion_f, champion_m, loyal_f, loyal_m, at_risk_f
-            )
+            ))
         else:
             sql_select = """
                 SUM(CASE WHEN recency_days <= %s AND frequency >= %s AND monetary >= %s THEN 1 ELSE 0 END) AS champions,
@@ -2598,14 +2608,14 @@ async def get_custom_rfm_segments(
                 SUM(CASE WHEN recency_days > %s THEN 1 ELSE 0 END)                         AS lost,
                 COUNT(*)                                                                    AS total
             """
-            sql_params = source_params + (
+            sql_params.extend((
                 champion_r, champion_f, champion_m,    # champions
                 champion_r, champion_f, champion_m,    # loyal NOT champions
                 loyal_r, loyal_f, loyal_m,             # loyal
                 at_risk_r_min, at_risk_r_max, at_risk_f,  # at_risk
                 hibernating_r, lost_r,                 # hibernating
                 lost_r,                                # lost
-            )
+            ))
 
         cursor.execute(f"""
             WITH customer_rfm AS (
@@ -2639,6 +2649,7 @@ async def get_custom_rfm_segments(
             "segments": segments,
             "total_customers": total,
             "order_source": order_source,
+            "time_filter": time_filter,
             "thresholds": {
                 "champion": {"recency_max": champion_r, "frequency_min": champion_f, "monetary_min": champion_m},
                 "loyal": {"recency_max": loyal_r, "frequency_min": loyal_f, "monetary_min": loyal_m},
@@ -2680,6 +2691,8 @@ async def export_rfm_campaign_csv(
     hibernating_r: int = Query(180), lost_r: int = Query(365),
     # Filters
     order_source: str = Query("all"),
+    time_filter: str = Query("all", description="Apply the same date window selected in the RFM builder"),
+    exclude_invalid_emails: bool = Query(True, description="Suppress obvious test/junk email addresses from campaign exports"),
 ):
     """
     Export a campaign-ready CSV for one RFM segment.
@@ -2716,13 +2729,42 @@ async def export_rfm_campaign_csv(
         conn = psycopg2.connect(**get_pg_connection_params())
         cursor = conn.cursor(cursor_factory=RealDictCursor)
 
+        where = "WHERE 1=1"
+        query_params = []
+
+        start_date = calculate_date_range(time_filter)
+        if start_date:
+            where += " AND o.order_date >= %s"
+            query_params.append(start_date)
+
         source_clause, source_params = get_order_source_filter(
-            order_source, table_alias="o", has_where_clause=False
+            order_source, table_alias="o", has_where_clause=True
         )
-        where = f"WHERE 1=1 {source_clause.replace('WHERE ', ' AND ')}" if source_clause else "WHERE 1=1"
+        where += source_clause
+        query_params.extend(source_params)
+
+        if exclude_invalid_emails:
+            # Campaign-safe suppression only: do not mutate source data.
+            where += """
+                AND (
+                    o.customer_email IS NULL OR BTRIM(o.customer_email) = '' OR (
+                        o.customer_email ~* '^[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}$'
+                        AND LOWER(SPLIT_PART(o.customer_email, '@', 2)) NOT IN (
+                            'test.com', 'example.com', 'mailinator.com', 'tempmail.com',
+                            '10minutemail.com', 'dummy.com', 'fake.com', 'gmail.com'
+                        )
+                        AND LOWER(SPLIT_PART(o.customer_email, '@', 1)) !~ '(test|dummy|fake|unknown|sample|asdf|qwerty|abc123)'
+                    )
+                )
+            """
 
         cursor.execute(f"""
-            WITH customer_rfm AS (
+            WITH filtered_orders AS (
+                SELECT *
+                FROM orders o
+                {where}
+            ),
+            customer_rfm AS (
                 SELECT
                     o.unified_customer_id,
                     MAX(o.customer_name)  AS customer_name,
@@ -2735,21 +2777,36 @@ async def export_rfm_campaign_csv(
                     COUNT(DISTINCT o.id)                              AS frequency,
                     SUM(o.total_price)                                AS monetary,
                     MAX(o.order_date)                                 AS last_order_date
-                FROM orders o
-                {where}
+                FROM filtered_orders o
+                GROUP BY o.unified_customer_id
+            ),
+            customer_products AS (
+                SELECT
+                    o.unified_customer_id,
+                    STRING_AGG(DISTINCT o.id::text, ', ' ORDER BY o.id::text) AS order_ids,
+                    STRING_AGG(DISTINCT COALESCE(NULLIF(oi.product_name, ''), 'Unknown Product'), ', ' ORDER BY COALESCE(NULLIF(oi.product_name, ''), 'Unknown Product')) AS product_names,
+                    STRING_AGG(DISTINCT COALESCE(NULLIF(oi.product_id, ''), 'N/A'), ', ' ORDER BY COALESCE(NULLIF(oi.product_id, ''), 'N/A')) AS skus,
+                    STRING_AGG(DISTINCT COALESCE(NULLIF(o.order_type, ''), NULLIF(o.source_type, ''), 'Unknown'), ', ' ORDER BY COALESCE(NULLIF(o.order_type, ''), NULLIF(o.source_type, ''), 'Unknown')) AS order_sources
+                FROM filtered_orders o
+                LEFT JOIN order_items oi ON oi.order_id = o.id
                 GROUP BY o.unified_customer_id
             )
             SELECT
-                customer_name, customer_email, customer_phone,
-                customer_city, province, customer_address,
-                frequency AS total_orders,
-                monetary  AS total_spent,
-                last_order_date,
-                recency_days
+                r.customer_name, r.customer_email, r.customer_phone,
+                r.customer_city, r.province, r.customer_address,
+                r.frequency AS total_orders,
+                r.monetary  AS total_spent,
+                r.last_order_date,
+                r.recency_days,
+                p.order_ids,
+                p.product_names,
+                p.skus,
+                p.order_sources
             FROM customer_rfm
+            r LEFT JOIN customer_products p ON p.unified_customer_id = r.unified_customer_id
             WHERE {seg_criteria}
-            ORDER BY monetary DESC
-        """, source_params)
+            ORDER BY r.monetary DESC
+        """, query_params)
 
         rows = cursor.fetchall()
 
@@ -2761,6 +2818,7 @@ async def export_rfm_campaign_csv(
         writer.writerow([
             "Customer Name", "Email", "Phone", "City", "Province", "Address",
             "Total Orders", "Total Spent (PKR)", "Last Purchase Date", "Days Since Purchase",
+            "Order IDs", "Product Names", "SKUs / Product IDs", "Order Sources",
         ])
 
         for r in rows:
@@ -2775,10 +2833,14 @@ async def export_rfm_campaign_csv(
                 f"{float(r['total_spent'] or 0):,.0f}",
                 r['last_order_date'].strftime('%Y-%m-%d') if r['last_order_date'] and r['last_order_date'].year > 1900 else '',
                 r['recency_days'] if r['recency_days'] is not None else '',
+                r.get('order_ids') or '',
+                r.get('product_names') or '',
+                r.get('skus') or '',
+                r.get('order_sources') or '',
             ])
 
         output.seek(0)
-        filename = f"rfm_campaign_{seg_key.replace(' ', '_')}_{order_source}_{datetime.now().strftime('%Y%m%d')}.csv"
+        filename = f"rfm_campaign_{seg_key.replace(' ', '_')}_{order_source}_{time_filter}_{datetime.now().strftime('%Y%m%d')}.csv"
         return StreamingResponse(
             iter([output.getvalue()]),
             media_type="text/csv",

@@ -2748,7 +2748,7 @@ async def export_rfm_campaign_csv(
             where += """
                 AND (
                     o.customer_email IS NULL OR BTRIM(o.customer_email) = '' OR (
-                        o.customer_email ~* '^[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}$'
+                        o.customer_email ~* '^[A-Z0-9._%%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}$'
                         AND LOWER(SPLIT_PART(o.customer_email, '@', 2)) NOT IN (
                             'test.com', 'example.com', 'mailinator.com', 'tempmail.com',
                             '10minutemail.com', 'dummy.com', 'fake.com', 'gmail.com'
@@ -2788,7 +2788,7 @@ async def export_rfm_campaign_csv(
                     STRING_AGG(DISTINCT COALESCE(NULLIF(oi.product_id, ''), 'N/A'), ', ' ORDER BY COALESCE(NULLIF(oi.product_id, ''), 'N/A')) AS skus,
                     STRING_AGG(DISTINCT COALESCE(NULLIF(o.order_type, ''), NULLIF(o.source_type, ''), 'Unknown'), ', ' ORDER BY COALESCE(NULLIF(o.order_type, ''), NULLIF(o.source_type, ''), 'Unknown')) AS order_sources
                 FROM filtered_orders o
-                LEFT JOIN order_items oi ON oi.order_id = o.id
+                LEFT JOIN order_items oi ON oi.order_id::text = o.id::text
                 GROUP BY o.unified_customer_id
             )
             SELECT

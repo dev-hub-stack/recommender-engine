@@ -4705,7 +4705,7 @@ async def get_ml_customer_similarity(
 @app.get("/api/v1/ml/rfm-segments")
 async def get_ml_rfm_segments(
     time_filter: str = Query("all", description="Time filter"),
-    data_source: str = Query("all", description="Data source filter: all, historical, api")
+    data_source: str = Query("all", description="Data source filter: all, historical, api, oe, pos")
 ):
     """
     ⚡ FAST ML RFM Segmentation - Uses Redis Cache + Pre-computed Results
@@ -4714,6 +4714,10 @@ async def get_ml_rfm_segments(
     Returns cached results in <50ms instead of slow database queries
     """
     try:
+        data_source = (data_source or "all").lower()
+        if data_source not in {"all", "historical", "api", "oe", "pos"}:
+            data_source = "all"
+
         cache_key = f"ml:rfm_segments:{time_filter}:{data_source}"
         
         # Try Redis cache first (FAST PATH)
@@ -4746,7 +4750,7 @@ async def get_ml_rfm_segments(
             if data_source == 'all':
                 # If 'all' sources, apply date filter to OE/POS but always include historical
                 where_clause = f"WHERE (o.order_date >= NOW() - INTERVAL '{days} days' OR o.source_type = 'HISTORICAL')"
-            elif data_source == 'api':
+            elif data_source in {'api', 'oe', 'pos'}:
                 where_clause = f"WHERE o.order_date >= NOW() - INTERVAL '{days} days'"
             # If data_source is historical, days is None, so this block is skipped
 
@@ -4755,6 +4759,8 @@ async def get_ml_rfm_segments(
             source_filter = "AND o.source_type = 'HISTORICAL'"
         elif data_source == 'api':
             source_filter = "AND (o.source_type IS NULL OR o.source_type != 'HISTORICAL')"
+        elif data_source in {'oe', 'pos'}:
+            source_filter = f"AND (o.source_type IS NULL OR o.source_type != 'HISTORICAL') AND UPPER(o.order_type) = '{data_source.upper()}'"
         
         # Merge into where_clause
         if source_filter:

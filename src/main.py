@@ -822,7 +822,10 @@ def popular_products(limit: int = 10, time_filter: str = "7days", category: str 
             cached_result = redis_client.get(cache_key)
             if cached_result:
                 logger.info("Popular products served from cache", time_filter=time_filter, limit=limit)
-                return json.loads(cached_result)
+                cached_data = json.loads(cached_result)
+                if isinstance(cached_data, dict):
+                    return cached_data.get("recommendations", [])
+                return cached_data
         except Exception as e:
             logger.warning("Cache read failed for popular products", error=str(e))
     

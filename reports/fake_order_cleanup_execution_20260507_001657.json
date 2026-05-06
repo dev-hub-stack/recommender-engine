@@ -1,0 +1,47 @@
+{
+  "backup_tables": {
+    "customer_statistics": "fake_order_cleanup_customer_stats_backup_20260507_001657",
+    "order_items": "fake_order_cleanup_order_items_backup_20260507_001657",
+    "orders": "fake_order_cleanup_orders_backup_20260507_001657"
+  },
+  "changes_applied": {
+    "deleted_customer_stat_rows": 1926,
+    "deleted_order_rows": 2234,
+    "rebuilt_customer_stat_rows": 137
+  },
+  "impact_before_cleanup": {
+    "fake_distinct_emails": 566,
+    "fake_order_item_revenue_pkr": 33274406.0,
+    "fake_order_item_rows": 910,
+    "fake_order_rows": 2234,
+    "fake_revenue_pkr": 113551733.91,
+    "impacted_customers": 1219
+  },
+  "input_file": "/Users/clustox1/Documents/Master Group/recommendation-engine-service/reports/email_removal_candidates_from_latest.csv",
+  "mode": "applied",
+  "protected_domains": [
+    "lums.edu.pk",
+    "master.com.pk"
+  ],
+  "protected_left_unchanged": {
+    "distinct_emails": 71,
+    "order_rows": 1651
+  },
+  "remaining_after_cleanup": {
+    "fake_order_rows": 0,
+    "fake_revenue_pkr": 0.0
+  },
+  "run_id": "20260507_001657",
+  "totals_after": {
+    "customer_stat_rows": 584244,
+    "order_items": 304916,
+    "orders": 567306,
+    "revenue_pkr": 12050916737.52
+  },
+  "totals_before": {
+    "customer_stat_rows": 586033,
+    "order_items": 305826,
+    "orders": 569540,
+    "revenue_pkr": 12164468471.43
+  }
+}

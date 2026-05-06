@@ -644,6 +644,113 @@ def get_category_filter_sql(category: str) -> str:
     return f"AND ({like_clauses})"
 
 
+def parse_csv_filter_values(value: str = None) -> list:
+    """Parse comma-separated query-string filters into clean values."""
+    if not value:
+        return []
+    return [part.strip() for part in value.split(",") if part and part.strip()]
+
+
+def get_category_like_patterns(category: str) -> list:
+    """Return parameterized LIKE patterns for a dashboard/RFM category filter."""
+    if not category or category.lower() == "all":
+        return []
+
+    category_lower = category.lower()
+    category_patterns = {
+        "mattresses": ["%foam%", "%mattress%", "%sleep%", "%spring%", "%ortho%"],
+        "spring mattresses": ["%spring%", "%pocket%"],
+        "memory foam mattresses": ["%memory%", "%ortho%"],
+        "pillows & accessories": ["%pillow%", "%cushion%"],
+        "pillows": ["%pillow%"],
+        "bedding & accessories": ["%sheet%", "%cover%", "%protector%", "%topper%"],
+        "furniture": ["%sofa%", "%chair%", "%table%", "%bed%"],
+        "general": [],
+    }
+
+    patterns = category_patterns.get(category_lower, [])
+    if not patterns:
+        for key, pats in category_patterns.items():
+            if category_lower in key or key in category_lower:
+                patterns = pats
+                break
+
+    if not patterns:
+        patterns = [f"%{category_lower}%"]
+
+    return patterns
+
+
+def get_order_item_category_exists_filter(categories: list, table_alias: str = "o") -> tuple:
+    """Filter orders to those containing at least one line item in selected categories."""
+    patterns = []
+    for category in categories:
+        patterns.extend(get_category_like_patterns(category))
+
+    # Preserve order while de-duplicating similar category patterns.
+    patterns = list(dict.fromkeys(patterns))
+    if not patterns:
+        return "", ()
+
+    like_sql = " OR ".join(["LOWER(COALESCE(oi_cat.product_name, '')) LIKE %s" for _ in patterns])
+    return (
+        f"""
+        AND EXISTS (
+            SELECT 1
+            FROM order_items oi_cat
+            WHERE oi_cat.order_id::text = {table_alias}.id::text
+              AND ({like_sql})
+        )
+        """,
+        tuple(patterns),
+    )
+
+
+def get_rfm_extra_filter_sql(
+    category: str = None,
+    categories: str = None,
+    statuses: str = None,
+    delivered_only: bool = False,
+    historical_channels: str = None,
+    table_alias: str = "o",
+) -> tuple:
+    """Build reusable RFM filters for category, status, and historical channel controls."""
+    clauses = []
+    params = []
+
+    selected_categories = parse_csv_filter_values(categories) or parse_csv_filter_values(category)
+    category_clause, category_params = get_order_item_category_exists_filter(selected_categories, table_alias)
+    if category_clause:
+        clauses.append(category_clause)
+        params.extend(category_params)
+
+    selected_statuses = parse_csv_filter_values(statuses)
+    if selected_statuses:
+        clauses.append(f"AND {table_alias}.order_status = ANY(%s)")
+        params.append(selected_statuses)
+    elif delivered_only:
+        clauses.append(
+            f"""
+            AND (
+                (UPPER({table_alias}.order_type) = 'OE' AND {table_alias}.order_status = 'Delivered Orders')
+                OR (UPPER({table_alias}.order_type) = 'POS' AND {table_alias}.order_status = 'completed')
+            )
+            """
+        )
+
+    selected_channels = parse_csv_filter_values(historical_channels)
+    if selected_channels:
+        clauses.append(
+            f"""
+            AND {table_alias}.source_type = 'HISTORICAL'
+            AND REPLACE(COALESCE({table_alias}.order_name, ''), 'Historical import - ', '') = ANY(%s)
+            """
+        )
+        params.append(selected_channels)
+
+    return "\n".join(clauses), tuple(params)
+
+
 # Recommendation algorithms
 def collaborative_filtering(customer_id: str, limit: int = 10, time_filter: str = "all") -> List[Dict]:
     """
@@ -2370,7 +2477,14 @@ async def get_city_detailed_performance(
 
 
 @app.get("/api/v1/analytics/customers/rfm-segments")
-async def get_analytics_rfm_segments(time_filter: str = Query("30days")):
+async def get_analytics_rfm_segments(
+    time_filter: str = Query("30days"),
+    category: str = Query(None),
+    categories: str = Query(None),
+    statuses: str = Query(None),
+    delivered_only: bool = Query(False),
+    historical_channels: str = Query(None),
+):
     """Get RFM segment analytics"""
     conn = None
     try:
@@ -2378,6 +2492,18 @@ async def get_analytics_rfm_segments(time_filter: str = Query("30days")):
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
         where_clause, params = get_time_filter_clause(time_filter)
+        if not where_clause:
+            where_clause = "WHERE 1=1"
+        extra_filter, extra_params = get_rfm_extra_filter_sql(
+            category=category,
+            categories=categories,
+            statuses=statuses,
+            delivered_only=delivered_only,
+            historical_channels=historical_channels,
+            table_alias="o",
+        )
+        where_clause += extra_filter
+        params = params + extra_params
         
         cursor.execute(f"""
             WITH customer_rfm AS (
@@ -2560,6 +2686,11 @@ async def get_custom_rfm_segments(
     # Filters
     order_source: str = Query("all", description="Filter: all, oe, pos, historical"),
     time_filter: str = Query("all", description="Time filter: today, 7days, 30days, 90days, all, or YYYY-MM-DD:YYYY-MM-DD"),
+    category: str = Query(None, description="Single category filter"),
+    categories: str = Query(None, description="Comma-separated category filters"),
+    statuses: str = Query(None, description="Comma-separated order statuses"),
+    delivered_only: bool = Query(False, description="Only delivered/completed OE/POS orders"),
+    historical_channels: str = Query(None, description="Comma-separated historical store/channel names"),
 ):
     """
     Compute RFM segment counts using fully customisable thresholds.
@@ -2583,6 +2714,17 @@ async def get_custom_rfm_segments(
         )
         where += source_clause
         sql_params.extend(source_params)
+
+        extra_filter, extra_params = get_rfm_extra_filter_sql(
+            category=category,
+            categories=categories,
+            statuses=statuses,
+            delivered_only=delivered_only,
+            historical_channels=historical_channels,
+            table_alias="o",
+        )
+        where += extra_filter
+        sql_params.extend(extra_params)
 
         if order_source.lower() == 'historical':
             sql_select = """
@@ -2711,6 +2853,11 @@ async def export_rfm_campaign_csv(
     # Filters
     order_source: str = Query("all"),
     time_filter: str = Query("all", description="Apply the same date window selected in the RFM builder"),
+    category: str = Query(None),
+    categories: str = Query(None),
+    statuses: str = Query(None),
+    delivered_only: bool = Query(False),
+    historical_channels: str = Query(None),
     exclude_invalid_emails: bool = Query(True, description="Suppress obvious test/junk email addresses from campaign exports"),
 ):
     """
@@ -2761,6 +2908,17 @@ async def export_rfm_campaign_csv(
         )
         where += source_clause
         query_params.extend(source_params)
+
+        extra_filter, extra_params = get_rfm_extra_filter_sql(
+            category=category,
+            categories=categories,
+            statuses=statuses,
+            delivered_only=delivered_only,
+            historical_channels=historical_channels,
+            table_alias="o",
+        )
+        where += extra_filter
+        query_params.extend(extra_params)
 
         if exclude_invalid_emails:
             # Campaign-safe suppression only: do not mutate source data.
@@ -4724,7 +4882,12 @@ async def get_ml_customer_similarity(
 @app.get("/api/v1/ml/rfm-segments")
 async def get_ml_rfm_segments(
     time_filter: str = Query("all", description="Time filter"),
-    data_source: str = Query("all", description="Data source filter: all, historical, api, oe, pos")
+    data_source: str = Query("all", description="Data source filter: all, historical, api, oe, pos"),
+    category: str = Query(None),
+    categories: str = Query(None),
+    statuses: str = Query(None),
+    delivered_only: bool = Query(False),
+    historical_channels: str = Query(None),
 ):
     """
     ⚡ FAST ML RFM Segmentation - Uses Redis Cache + Pre-computed Results
@@ -4737,7 +4900,14 @@ async def get_ml_rfm_segments(
         if data_source not in {"all", "historical", "api", "oe", "pos"}:
             data_source = "all"
 
-        cache_key = f"ml:rfm_segments:{time_filter}:{data_source}"
+        filter_cache_key = ":".join([
+            category or "",
+            categories or "",
+            statuses or "",
+            "delivered" if delivered_only else "",
+            historical_channels or "",
+        ])
+        cache_key = f"ml:rfm_segments:{time_filter}:{data_source}:{filter_cache_key}"
         
         # Try Redis cache first (FAST PATH)
         try:
@@ -4760,6 +4930,7 @@ async def get_ml_rfm_segments(
         
         where_clause = ""
         source_filter = ""
+        query_params = []
         
         # If looking ONLY at historical, disable time filter because their dates are 1900-01-01
         if data_source == 'historical':
@@ -4787,6 +4958,20 @@ async def get_ml_rfm_segments(
                 where_clause = where_clause + " " + source_filter
             else:
                 where_clause = "WHERE " + source_filter.lstrip("AND ").strip()
+
+        if not where_clause:
+            where_clause = "WHERE 1=1"
+
+        extra_filter, extra_params = get_rfm_extra_filter_sql(
+            category=category,
+            categories=categories,
+            statuses=statuses,
+            delivered_only=delivered_only,
+            historical_channels=historical_channels,
+            table_alias="o",
+        )
+        where_clause += extra_filter
+        query_params.extend(extra_params)
         
         # Use the same query structure as the existing SQL endpoint for consistency
         cursor.execute(f"""
@@ -4855,7 +5040,7 @@ async def get_ml_rfm_segments(
                 AVG(avg_order_value) as avg_order_value
             FROM customer_rfm
             WHERE frequency = 1 AND recency_days <= 30
-        """)
+        """, tuple(query_params))
         
         segments = cursor.fetchall()
         cursor.close()
@@ -4886,6 +5071,7 @@ async def get_ml_rfm_segments(
             "segments": result_segments,
             "algorithm": "rfm_ml_enhanced",
             "time_filter": time_filter,
+            "data_source": data_source,
             "total_customers": total_customers,
             "cached": False,
             "execution_time_ms": "<50ms with Redis cache"

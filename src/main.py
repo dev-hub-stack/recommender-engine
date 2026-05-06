@@ -824,7 +824,12 @@ def popular_products(limit: int = 10, time_filter: str = "7days", category: str 
                 logger.info("Popular products served from cache", time_filter=time_filter, limit=limit)
                 cached_data = json.loads(cached_result)
                 if isinstance(cached_data, dict):
-                    return cached_data.get("recommendations", [])
+                    return (
+                        cached_data.get("recommendations")
+                        or cached_data.get("products")
+                        or cached_data.get("popular_products")
+                        or []
+                    )
                 return cached_data
         except Exception as e:
             logger.warning("Cache read failed for popular products", error=str(e))

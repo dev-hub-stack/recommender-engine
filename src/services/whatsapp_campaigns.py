@@ -33,6 +33,21 @@ DEFAULT_CAMPAIGN_FILTERS = {
     "require_consent": False,
 }
 
+MASTER_RECOMMENDATION_TEMPLATE_NAME = "master_recommendation_winback_v1"
+MASTER_RECOMMENDATION_TEMPLATE_LANGUAGE = "en_US"
+MASTER_RECOMMENDATION_TEMPLATE_CATEGORY = "MARKETING"
+MASTER_RECOMMENDATION_TEMPLATE_BODY = (
+    "Hi {{1}}, based on your recent {{2}} purchase, we picked {{3}} for you. "
+    "Use code {{4}} for a special Master offer: {{5}}"
+)
+MASTER_RECOMMENDATION_TEMPLATE_EXAMPLE = [
+    "Ayesha",
+    "Ortho Mattress",
+    "Mattress Protector",
+    "MASTER10",
+    "https://mastergroup.pk/campaign/whatsapp?utm_source=whatsapp",
+]
+
 SEGMENT_MESSAGE_TEMPLATES = {
     "champions": (
         'Hi {{customer_name | default: "there"}}, as one of our valued Master customers, '
@@ -195,6 +210,63 @@ class MetaWhatsAppProvider:
         if requested_status:
             templates = [template for template in templates if str(template.get("status", "")).upper() == requested_status]
         return [_summarize_template(template) for template in templates]
+
+    def create_message_template(
+        self,
+        *,
+        name: str,
+        language: str,
+        category: str,
+        body_text: str,
+        example_values: Iterable[Any],
+    ) -> Dict[str, Any]:
+        if not self.config.access_token:
+            raise WhatsAppProviderError("WHATSAPP_ACCESS_TOKEN is required")
+        if not self.config.business_account_id:
+            raise WhatsAppProviderError("WHATSAPP_BUSINESS_ACCOUNT_ID is required")
+
+        example_text = [str(value) for value in example_values]
+        payload = {
+            "name": name,
+            "language": language,
+            "category": category,
+            "components": [
+                {
+                    "type": "BODY",
+                    "text": body_text,
+                    "example": {"body_text": [example_text]},
+                }
+            ],
+        }
+        response = self.session.post(
+            f"https://graph.facebook.com/{self.config.api_version}/{self.config.business_account_id}/message_templates",
+            headers={
+                "Authorization": f"Bearer {self.config.access_token}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=30,
+        )
+        data = response.json()
+        if response.status_code >= 400:
+            detail = data.get("error", {}).get("message") if isinstance(data, dict) else None
+            raise WhatsAppProviderError(detail or f"Meta WhatsApp template creation failed with {response.status_code}")
+
+        return {
+            "success": True,
+            "provider": self.provider_name,
+            "provider_mode": self.config.provider_mode,
+            "template": _summarize_template(
+                {
+                    "name": name,
+                    "status": data.get("status") or "PENDING",
+                    "language": language,
+                    "category": category,
+                    "components": payload["components"],
+                }
+            ),
+            "payload": data,
+        }
 
     def _enforce_test_allowlist(self, recipient: str) -> None:
         if self.config.provider_mode != "test":

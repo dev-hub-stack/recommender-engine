@@ -272,6 +272,37 @@ class WhatsAppCampaignServiceTests(unittest.TestCase):
         parameters = payload["template"]["components"][0]["parameters"]
         self.assertEqual([parameter["text"] for parameter in parameters], ["Ali", "Celeste Mattress", "Mattress Protector"])
 
+    def test_meta_provider_creates_master_recommendation_template(self):
+        response = Mock()
+        response.status_code = 200
+        response.json.return_value = {"id": "template-id", "status": "PENDING"}
+        session = Mock()
+        session.post.return_value = response
+        provider = MetaWhatsAppProvider(
+            WhatsAppProviderConfig(
+                provider_mode="test",
+                access_token="token",
+                phone_number_id="1074059625796986",
+                business_account_id="3149643718557386",
+            ),
+            session=session,
+        )
+
+        result = provider.create_message_template(
+            name="master_recommendation_winback_v1",
+            language="en_US",
+            category="MARKETING",
+            body_text="Hi {{1}}, based on {{2}}, try {{3}} with {{4}}: {{5}}",
+            example_values=["Ali", "Celeste Mattress", "Mattress Protector", "MASTER10", "https://mastergroup.pk"],
+        )
+
+        payload = session.post.call_args.kwargs["json"]
+        self.assertEqual(payload["name"], "master_recommendation_winback_v1")
+        self.assertEqual(payload["category"], "MARKETING")
+        self.assertEqual(payload["components"][0]["example"]["body_text"][0][2], "Mattress Protector")
+        self.assertEqual(result["template"]["body_parameter_count"], 5)
+        self.assertEqual(result["template"]["status"], "PENDING")
+
     def test_build_customer_message_context_uses_recent_purchase_and_recommendations(self):
         context = build_customer_message_context(
             {

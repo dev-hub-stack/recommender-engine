@@ -202,6 +202,23 @@ class WhatsAppTestSendRequest(BaseModel):
     template_language: Optional[str] = None
 
 
+class WhatsAppTemplateCreateRequest(BaseModel):
+    name: str = "master_recommendation_winback_v1"
+    language: str = "en_US"
+    category: str = "MARKETING"
+    body_text: str = (
+        "Hi {{1}}, based on your recent {{2}} purchase, we picked {{3}} for you. "
+        "Use code {{4}} for a special Master offer: {{5}}"
+    )
+    example_values: List[str] = [
+        "Ayesha",
+        "Ortho Mattress",
+        "Mattress Protector",
+        "MASTER10",
+        "https://mastergroup.pk/campaign/whatsapp?utm_source=whatsapp",
+    ]
+
+
 def init_redis():
     """Initialize Redis connection"""
     global redis_client
@@ -3477,6 +3494,55 @@ async def list_whatsapp_message_templates(status: str = Query("APPROVED")):
                 "components": [],
             }
         ],
+    }
+
+
+@app.post("/api/v1/whatsapp/templates")
+async def create_whatsapp_message_template(request: WhatsAppTemplateCreateRequest):
+    provider = get_whatsapp_provider_from_env()
+    if provider:
+        try:
+            result = provider.create_message_template(
+                name=request.name,
+                language=request.language,
+                category=request.category,
+                body_text=request.body_text,
+                example_values=request.example_values,
+            )
+            return result
+        except WhatsAppProviderError as e:
+            detail = str(e)
+            if "already exists" in detail.lower() or "duplicate" in detail.lower():
+                return {
+                    "success": True,
+                    "provider": provider.provider_name,
+                    "provider_mode": provider.config.provider_mode,
+                    "message": "Template already exists in Meta.",
+                    "template": {
+                        "name": request.name,
+                        "status": "EXISTS",
+                        "language": request.language,
+                        "category": request.category,
+                        "body_text": request.body_text,
+                        "body_parameter_count": len(re.findall(r"{{\s*\d+\s*}}", request.body_text)),
+                        "components": [],
+                    },
+                }
+            raise HTTPException(status_code=400, detail=detail)
+    return {
+        "success": True,
+        "provider": "mock",
+        "provider_mode": "mock",
+        "message": "Mock template creation recorded only.",
+        "template": {
+            "name": request.name,
+            "status": "PENDING",
+            "language": request.language,
+            "category": request.category,
+            "body_text": request.body_text,
+            "body_parameter_count": len(re.findall(r"{{\s*\d+\s*}}", request.body_text)),
+            "components": [],
+        },
     }
 
 

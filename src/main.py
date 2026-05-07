@@ -198,6 +198,8 @@ class WhatsAppTestSendRequest(BaseModel):
     phone: str
     customer_id: Optional[str] = None
     variables: Optional[Dict[str, Any]] = None
+    template_name: Optional[str] = None
+    template_language: Optional[str] = None
 
 
 def init_redis():
@@ -3447,6 +3449,37 @@ async def get_whatsapp_campaign_message_intelligence(
         _release_campaign_db_connection(conn, from_pool)
 
 
+@app.get("/api/v1/whatsapp/templates")
+async def list_whatsapp_message_templates(status: str = Query("APPROVED")):
+    provider = get_whatsapp_provider_from_env()
+    if provider:
+        try:
+            return {
+                "success": True,
+                "provider": provider.provider_name,
+                "provider_mode": provider.config.provider_mode,
+                "templates": provider.list_message_templates(status=status),
+            }
+        except WhatsAppProviderError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    return {
+        "success": True,
+        "provider": "mock",
+        "provider_mode": "mock",
+        "templates": [
+            {
+                "name": "hello_world",
+                "status": "APPROVED",
+                "language": "en_US",
+                "category": "UTILITY",
+                "body_text": "Welcome and congratulations!! This message demonstrates your ability to send a WhatsApp message notification from the Cloud API, hosted by Meta. Thank you for taking the time to test with us.",
+                "body_parameter_count": 0,
+                "components": [],
+            }
+        ],
+    }
+
+
 @app.post("/api/v1/whatsapp/campaigns/{campaign_id}/test-send")
 async def test_send_whatsapp_campaign(campaign_id: int, request: WhatsAppTestSendRequest):
     conn = None
@@ -3460,10 +3493,11 @@ async def test_send_whatsapp_campaign(campaign_id: int, request: WhatsAppTestSen
             raise HTTPException(status_code=404, detail="Campaign not found")
         provider = get_whatsapp_provider_from_env()
         if provider:
-            template_name = _whatsapp_template_name(campaign.get("message_template"))
+            template_name = request.template_name or _whatsapp_template_name(campaign.get("message_template"))
             result = provider.send_template_message(
                 phone=request.phone,
                 template_name=template_name,
+                template_language=request.template_language,
                 variables=request.variables or {},
             )
             event = record_campaign_event(
@@ -3478,6 +3512,7 @@ async def test_send_whatsapp_campaign(campaign_id: int, request: WhatsAppTestSen
                 payload={
                     "provider_mode": result["provider_mode"],
                     "message_template": template_name,
+                    "template_language": request.template_language,
                     "variables": request.variables or {},
                     "provider_response": result.get("payload") or {},
                 },

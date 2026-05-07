@@ -85,6 +85,7 @@ class WhatsAppProviderConfig:
     provider_mode: str = "mock"
     access_token: Optional[str] = None
     phone_number_id: Optional[str] = None
+    business_account_id: Optional[str] = None
     api_version: str = "v20.0"
     default_template_name: str = "hello_world"
     default_template_language: str = "en_US"
@@ -97,6 +98,7 @@ class WhatsAppProviderConfig:
             provider_mode=(os.getenv("WHATSAPP_PROVIDER_MODE") or "mock").lower(),
             access_token=os.getenv("WHATSAPP_ACCESS_TOKEN"),
             phone_number_id=os.getenv("WHATSAPP_PHONE_NUMBER_ID"),
+            business_account_id=os.getenv("WHATSAPP_BUSINESS_ACCOUNT_ID") or os.getenv("WHATSAPP_WABA_ID") or "3149643718557386",
             api_version=os.getenv("WHATSAPP_META_API_VERSION", "v20.0"),
             default_template_name=os.getenv("WHATSAPP_DEFAULT_TEMPLATE_NAME", "hello_world"),
             default_template_language=os.getenv("WHATSAPP_DEFAULT_TEMPLATE_LANGUAGE", "en_US"),
@@ -167,6 +169,32 @@ class MetaWhatsAppProvider:
             "recipient_phone": f"+{recipient}",
             "payload": data,
         }
+
+    def list_message_templates(self, status: str = "APPROVED") -> List[Dict[str, Any]]:
+        if not self.config.access_token:
+            raise WhatsAppProviderError("WHATSAPP_ACCESS_TOKEN is required")
+        if not self.config.business_account_id:
+            raise WhatsAppProviderError("WHATSAPP_BUSINESS_ACCOUNT_ID is required")
+
+        response = self.session.get(
+            f"https://graph.facebook.com/{self.config.api_version}/{self.config.business_account_id}/message_templates",
+            headers={"Authorization": f"Bearer {self.config.access_token}"},
+            params={
+                "fields": "name,status,language,category,components",
+                "limit": 100,
+            },
+            timeout=30,
+        )
+        data = response.json()
+        if response.status_code >= 400:
+            detail = data.get("error", {}).get("message") if isinstance(data, dict) else None
+            raise WhatsAppProviderError(detail or f"Meta WhatsApp template API failed with {response.status_code}")
+
+        requested_status = (status or "").upper()
+        templates = data.get("data", []) if isinstance(data, dict) else []
+        if requested_status:
+            templates = [template for template in templates if str(template.get("status", "")).upper() == requested_status]
+        return [_summarize_template(template) for template in templates]
 
     def _enforce_test_allowlist(self, recipient: str) -> None:
         if self.config.provider_mode != "test":
@@ -273,14 +301,34 @@ def _whatsapp_api_phone(phone: Any) -> Optional[str]:
 def _template_components(variables: Mapping[str, Any]) -> List[Dict[str, Any]]:
     if not variables:
         return []
-    parameters = [
-        {"type": "text", "text": str(value)}
-        for _, value in sorted(variables.items())
-        if value is not None
-    ]
+    if all(str(key).isdigit() for key in variables):
+        ordered_items = sorted(variables.items(), key=lambda item: int(str(item[0])))
+    else:
+        ordered_items = variables.items()
+    parameters = [{"type": "text", "text": str(value)} for _, value in ordered_items if value is not None]
     if not parameters:
         return []
     return [{"type": "body", "parameters": parameters}]
+
+
+def _summarize_template(template: Mapping[str, Any]) -> Dict[str, Any]:
+    components = template.get("components") or []
+    body_text = ""
+    body_parameter_count = 0
+    for component in components:
+        if str(component.get("type", "")).upper() == "BODY":
+            body_text = str(component.get("text") or "")
+            body_parameter_count = len(re.findall(r"{{\s*\d+\s*}}", body_text))
+            break
+    return {
+        "name": template.get("name"),
+        "status": template.get("status"),
+        "language": template.get("language"),
+        "category": template.get("category"),
+        "body_text": body_text,
+        "body_parameter_count": body_parameter_count,
+        "components": components,
+    }
 
 
 def is_valid_phone(phone: Any) -> bool:

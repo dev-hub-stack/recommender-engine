@@ -204,6 +204,74 @@ class WhatsAppCampaignServiceTests(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertEqual(result["provider_message_id"], "wamid.HBgM")
 
+    def test_meta_provider_lists_approved_templates(self):
+        response = Mock()
+        response.status_code = 200
+        response.json.return_value = {
+            "data": [
+                {
+                    "name": "master_winback_v1",
+                    "status": "APPROVED",
+                    "language": "en_US",
+                    "category": "MARKETING",
+                    "components": [
+                        {"type": "BODY", "text": "Hi {{1}}, based on {{2}}, try {{3}}."}
+                    ],
+                },
+                {
+                    "name": "draft_template",
+                    "status": "PENDING",
+                    "language": "en_US",
+                    "category": "MARKETING",
+                    "components": [{"type": "BODY", "text": "Pending"}],
+                },
+            ]
+        }
+        session = Mock()
+        session.get.return_value = response
+        provider = MetaWhatsAppProvider(
+            WhatsAppProviderConfig(
+                provider_mode="test",
+                access_token="token",
+                phone_number_id="1074059625796986",
+                business_account_id="3149643718557386",
+            ),
+            session=session,
+        )
+
+        templates = provider.list_message_templates()
+
+        session.get.assert_called_once()
+        self.assertEqual(len(templates), 1)
+        self.assertEqual(templates[0]["name"], "master_winback_v1")
+        self.assertEqual(templates[0]["body_parameter_count"], 3)
+
+    def test_meta_provider_orders_numeric_template_variables(self):
+        response = Mock()
+        response.status_code = 200
+        response.json.return_value = {"messages": [{"id": "wamid.HBgM"}]}
+        session = Mock()
+        session.post.return_value = response
+        provider = MetaWhatsAppProvider(
+            WhatsAppProviderConfig(
+                provider_mode="test",
+                access_token="token",
+                phone_number_id="1074059625796986",
+                default_template_name="master_winback_v1",
+                test_allowlist=["923214809481"],
+            ),
+            session=session,
+        )
+
+        provider.send_template_message(
+            phone="923214809481",
+            variables={"2": "Celeste Mattress", "1": "Ali", "3": "Mattress Protector"},
+        )
+
+        payload = session.post.call_args.kwargs["json"]
+        parameters = payload["template"]["components"][0]["parameters"]
+        self.assertEqual([parameter["text"] for parameter in parameters], ["Ali", "Celeste Mattress", "Mattress Protector"])
+
     def test_build_customer_message_context_uses_recent_purchase_and_recommendations(self):
         context = build_customer_message_context(
             {

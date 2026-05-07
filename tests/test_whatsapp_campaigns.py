@@ -2,6 +2,7 @@ import unittest
 import sys
 import types
 from datetime import datetime
+from unittest.mock import Mock
 
 psycopg2_stub = types.ModuleType("psycopg2")
 psycopg2_extras_stub = types.ModuleType("psycopg2.extras")
@@ -11,6 +12,9 @@ sys.modules.setdefault("psycopg2", psycopg2_stub)
 sys.modules.setdefault("psycopg2.extras", psycopg2_extras_stub)
 
 from src.services.whatsapp_campaigns import (
+    MetaWhatsAppProvider,
+    WhatsAppProviderConfig,
+    WhatsAppProviderError,
     create_campaign,
     is_valid_phone,
     normalize_campaign_filters,
@@ -145,6 +149,58 @@ class WhatsAppCampaignServiceTests(unittest.TestCase):
         self.assertEqual(event["provider"], "mock")
         self.assertEqual(event["recipient_phone"], "+923001234567")
         self.assertEqual(event["event_type"], "test_send")
+
+    def test_meta_provider_blocks_numbers_outside_allowlist_in_test_mode(self):
+        provider = MetaWhatsAppProvider(
+            WhatsAppProviderConfig(
+                provider_mode="test",
+                access_token="token",
+                phone_number_id="1074059625796986",
+                default_template_name="hello_world",
+                default_template_language="en_US",
+                test_allowlist=["923214809481", "+923030644282"],
+            )
+        )
+
+        with self.assertRaises(WhatsAppProviderError) as raised:
+            provider.send_template_message(phone="923001111111")
+
+        self.assertIn("not in WHATSAPP_TEST_ALLOWLIST", str(raised.exception))
+
+    def test_meta_provider_posts_template_message_to_graph_api(self):
+        response = Mock()
+        response.status_code = 200
+        response.json.return_value = {
+            "messages": [{"id": "wamid.HBgM"}],
+            "contacts": [{"wa_id": "923214809481"}],
+        }
+        session = Mock()
+        session.post.return_value = response
+        provider = MetaWhatsAppProvider(
+            WhatsAppProviderConfig(
+                provider_mode="test",
+                access_token="token",
+                phone_number_id="1074059625796986",
+                default_template_name="hello_world",
+                default_template_language="en_US",
+                test_allowlist=["923214809481", "923030644282"],
+            ),
+            session=session,
+        )
+
+        result = provider.send_template_message(phone="0321 4809481")
+
+        session.post.assert_called_once()
+        url = session.post.call_args.args[0]
+        headers = session.post.call_args.kwargs["headers"]
+        payload = session.post.call_args.kwargs["json"]
+        self.assertEqual(url, "https://graph.facebook.com/v20.0/1074059625796986/messages")
+        self.assertEqual(headers["Authorization"], "Bearer token")
+        self.assertEqual(payload["to"], "923214809481")
+        self.assertEqual(payload["template"]["name"], "hello_world")
+        self.assertEqual(payload["template"]["language"]["code"], "en_US")
+        self.assertTrue(result["success"])
+        self.assertEqual(result["provider_message_id"], "wamid.HBgM")
 
 
 if __name__ == "__main__":

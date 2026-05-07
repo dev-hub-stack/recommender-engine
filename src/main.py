@@ -50,13 +50,16 @@ from src.services.recommendation_events import (
 from src.services.recommendation_reporting import build_recommendation_reporting_summary
 from src.services.whatsapp_campaigns import (
     CAMPAIGN_STATUSES,
+    WhatsAppProviderError,
     create_campaign,
+    get_whatsapp_provider_from_env,
     get_campaign,
     is_valid_phone,
     list_campaigns,
     mark_campaign_sent_mock,
     normalize_campaign_filters,
     normalize_phone,
+    record_campaign_event,
     record_mock_event,
     update_campaign,
 )
@@ -3131,6 +3134,15 @@ def _build_whatsapp_audience_preview(conn, campaign: Dict[str, Any]) -> Dict[str
         cursor.close()
 
 
+def _whatsapp_template_name(message_template: Optional[str]) -> Optional[str]:
+    if not message_template:
+        return None
+    candidate = message_template.strip()
+    if not candidate or re.search(r"\s|{{|}}", candidate):
+        return None
+    return candidate
+
+
 @app.post("/api/v1/whatsapp/campaigns")
 async def create_whatsapp_campaign_draft(request: WhatsAppCampaignDraftRequest):
     conn = None
@@ -3237,6 +3249,38 @@ async def test_send_whatsapp_campaign(campaign_id: int, request: WhatsAppTestSen
         campaign = get_campaign(conn, campaign_id)
         if not campaign:
             raise HTTPException(status_code=404, detail="Campaign not found")
+        provider = get_whatsapp_provider_from_env()
+        if provider:
+            template_name = _whatsapp_template_name(campaign.get("message_template"))
+            result = provider.send_template_message(
+                phone=request.phone,
+                template_name=template_name,
+                variables=request.variables or {},
+            )
+            event = record_campaign_event(
+                conn,
+                campaign_id,
+                "test_send",
+                "sent",
+                recipient_phone=request.phone,
+                customer_id=request.customer_id,
+                provider=result["provider"],
+                provider_message_id=result.get("provider_message_id"),
+                payload={
+                    "provider_mode": result["provider_mode"],
+                    "message_template": template_name,
+                    "variables": request.variables or {},
+                    "provider_response": result.get("payload") or {},
+                },
+            )
+            return {
+                "success": True,
+                "mock_mode": False,
+                "provider": result["provider"],
+                "provider_mode": result["provider_mode"],
+                "message": "WhatsApp test send submitted to provider.",
+                "event": event,
+            }
         event = record_mock_event(
             conn,
             campaign_id,
@@ -3253,6 +3297,8 @@ async def test_send_whatsapp_campaign(campaign_id: int, request: WhatsAppTestSen
         return {"success": True, "mock_mode": True, "message": "Mock test send recorded only.", "event": event}
     except HTTPException:
         raise
+    except WhatsAppProviderError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error("WhatsApp campaign test send failed", error=str(e), campaign_id=campaign_id)
         raise HTTPException(status_code=500, detail=str(e))

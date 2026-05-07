@@ -38,7 +38,7 @@ MASTER_RECOMMENDATION_TEMPLATE_LANGUAGE = "en_US"
 MASTER_RECOMMENDATION_TEMPLATE_CATEGORY = "MARKETING"
 MASTER_RECOMMENDATION_TEMPLATE_BODY = (
     "Hi {{1}}, based on your recent {{2}} purchase, we picked {{3}} for you. "
-    "Use code {{4}} for a special Master offer: {{5}}"
+    "Use code {{4}} for a special Master offer. View details here: {{5}} Reply YES for help."
 )
 MASTER_RECOMMENDATION_TEMPLATE_EXAMPLE = [
     "Ayesha",

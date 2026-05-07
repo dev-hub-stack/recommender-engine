@@ -208,7 +208,7 @@ class WhatsAppTemplateCreateRequest(BaseModel):
     category: str = "MARKETING"
     body_text: str = (
         "Hi {{1}}, based on your recent {{2}} purchase, we picked {{3}} for you. "
-        "Use code {{4}} for a special Master offer: {{5}}"
+        "Use code {{4}} for a special Master offer. View details here: {{5}} Reply YES for help."
     )
     example_values: List[str] = [
         "Ayesha",

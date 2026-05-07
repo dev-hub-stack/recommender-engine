@@ -51,6 +51,8 @@ from src.services.recommendation_reporting import build_recommendation_reporting
 from src.services.whatsapp_campaigns import (
     CAMPAIGN_STATUSES,
     WhatsAppProviderError,
+    build_customer_message_context,
+    build_smart_message_template,
     create_campaign,
     get_whatsapp_provider_from_env,
     get_campaign,
@@ -2924,6 +2926,21 @@ def _looks_like_fake_or_test_customer(row: Dict[str, Any]) -> bool:
     return bool(re.search(r"\b(test|dummy|fake|sample|asdf|qwerty|unknown)\b", combined))
 
 
+def _infer_whatsapp_product_category(product_names: List[str]) -> str:
+    product_text = " ".join(product_names).lower()
+    category_rules = [
+        ("Pillows", ("pillow", "cushion", "neck")),
+        ("Mattresses", ("mattress", "foam", "spring", "ortho", "celeste")),
+        ("Protectors", ("protector", "cover", "quilted")),
+        ("Bedsheets", ("bedsheet", "sheet", "linen")),
+        ("Accessories", ("accessory", "bundle", "package")),
+    ]
+    for category, needles in category_rules:
+        if any(needle in product_text for needle in needles):
+            return category
+    return "Comfort products"
+
+
 def _whatsapp_audience_query_context(filters: Dict[str, Any]) -> tuple:
     where = "WHERE 1=1"
     params = []
@@ -3134,6 +3151,168 @@ def _build_whatsapp_audience_preview(conn, campaign: Dict[str, Any]) -> Dict[str
         cursor.close()
 
 
+def _build_whatsapp_message_intelligence(
+    conn,
+    campaign: Dict[str, Any],
+    *,
+    sample_limit: int = 5,
+    discount_code: Optional[str] = None,
+    campaign_link: Optional[str] = None,
+) -> Dict[str, Any]:
+    filters = normalize_campaign_filters(campaign.get("filters") or {})
+    where, params, criteria = _whatsapp_audience_query_context(filters)
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        base_cte = f"""
+            WITH filtered_orders AS (
+                SELECT *
+                FROM orders o
+                {where}
+                  AND o.unified_customer_id IS NOT NULL
+                  AND BTRIM(o.unified_customer_id) <> ''
+            ),
+            customer_rfm AS (
+                SELECT
+                    o.unified_customer_id,
+                    MAX(o.customer_name) AS customer_name,
+                    MAX(o.customer_email) AS customer_email,
+                    MAX(o.customer_phone) AS customer_phone,
+                    MAX(o.customer_city) AS customer_city,
+                    EXTRACT(days FROM NOW() - MAX(o.order_date))::int AS recency_days,
+                    COUNT(DISTINCT o.id) AS frequency,
+                    SUM(o.total_price) AS monetary,
+                    MAX(o.order_date)::date AS last_purchase_date
+                FROM filtered_orders o
+                GROUP BY o.unified_customer_id
+            ),
+            segment_customers AS (
+                SELECT *
+                FROM customer_rfm
+                WHERE {criteria}
+            ),
+            ranked_orders AS (
+                SELECT
+                    o.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY o.unified_customer_id
+                        ORDER BY o.order_date DESC NULLS LAST, o.id DESC
+                    ) AS order_rank
+                FROM filtered_orders o
+                JOIN segment_customers sc ON sc.unified_customer_id = o.unified_customer_id
+            )
+        """
+        cursor.execute(
+            f"""
+            {base_cte},
+            recent_products AS (
+                SELECT
+                    ro.unified_customer_id,
+                    ARRAY_REMOVE(
+                        ARRAY_AGG(DISTINCT COALESCE(NULLIF(oi.product_name, ''), NULLIF(oi.product_id, ''))),
+                        NULL
+                    ) AS recent_products
+                FROM ranked_orders ro
+                LEFT JOIN order_items oi ON oi.order_id::text = ro.id::text
+                WHERE ro.order_rank <= 3
+                GROUP BY ro.unified_customer_id
+            )
+            SELECT
+                sc.unified_customer_id AS customer_id,
+                sc.customer_name,
+                sc.customer_phone,
+                sc.customer_city AS city,
+                sc.last_purchase_date,
+                sc.frequency AS total_orders,
+                sc.monetary AS total_spend,
+                sc.recency_days,
+                COALESCE(rp.recent_products, ARRAY[]::text[]) AS recent_products
+            FROM segment_customers sc
+            LEFT JOIN recent_products rp ON rp.unified_customer_id = sc.unified_customer_id
+            WHERE sc.customer_phone IS NOT NULL
+            ORDER BY sc.last_purchase_date DESC NULLS LAST, sc.monetary DESC NULLS LAST
+            LIMIT %s
+            """,
+            [*params, sample_limit],
+        )
+        customers = [dict(row) for row in cursor.fetchall()]
+
+        cursor.execute(
+            f"""
+            {base_cte}
+            SELECT
+                COALESCE(NULLIF(oi.product_name, ''), NULLIF(oi.product_id, ''), 'Master product') AS product_name,
+                COUNT(DISTINCT o.unified_customer_id) AS customer_count,
+                COUNT(DISTINCT o.id) AS order_count
+            FROM filtered_orders o
+            JOIN segment_customers sc ON sc.unified_customer_id = o.unified_customer_id
+            LEFT JOIN order_items oi ON oi.order_id::text = o.id::text
+            WHERE oi.product_name IS NOT NULL OR oi.product_id IS NOT NULL
+            GROUP BY COALESCE(NULLIF(oi.product_name, ''), NULLIF(oi.product_id, ''), 'Master product')
+            ORDER BY customer_count DESC, order_count DESC
+            LIMIT 20
+            """,
+            params,
+        )
+        segment_products = [dict(row) for row in cursor.fetchall()]
+        segment_recommendations = [row["product_name"] for row in segment_products if row.get("product_name")]
+
+        sample_contexts = []
+        for row in customers:
+            recent_products = [str(product) for product in (row.get("recent_products") or []) if product]
+            recent_set = {product.lower() for product in recent_products}
+            recommended_products = [
+                product
+                for product in segment_recommendations
+                if product.lower() not in recent_set
+            ][:3]
+            context = build_customer_message_context(
+                {
+                    **row,
+                    "customer_city": row.get("city"),
+                    "segment": filters.get("segment"),
+                    "recent_products": recent_products,
+                    "recommended_products": recommended_products,
+                    "top_category": _infer_whatsapp_product_category(recent_products),
+                },
+                discount_code=discount_code,
+                campaign_link=campaign_link,
+            )
+            sample_contexts.append(context)
+
+        template = build_smart_message_template(filters.get("segment"))
+        return {
+            "campaign_id": campaign["id"],
+            "segment": filters.get("segment"),
+            "time_filter": filters.get("time_filter"),
+            "template": template,
+            "available_variables": [
+                "customer_name",
+                "city",
+                "segment",
+                "last_product",
+                "recent_products",
+                "top_category",
+                "recommended_product_1",
+                "recommended_product_2",
+                "recommended_product_3",
+                "discount_code",
+                "campaign_link",
+            ],
+            "sample_customers": sample_contexts,
+            "segment_recommendations": segment_products[:10],
+            "message_strategy": {
+                "uses": [
+                    "RFM segment selected by date/source filters",
+                    "Customer recent purchases from the last three orders",
+                    "Segment-level popular products excluding each customer's recent products",
+                ],
+                "manual_review": "Preview a few rendered samples; do not review every customer one by one.",
+            },
+        }
+    finally:
+        cursor.close()
+
+
 def _whatsapp_template_name(message_template: Optional[str]) -> Optional[str]:
     if not message_template:
         return None
@@ -3233,6 +3412,36 @@ async def get_whatsapp_campaign_audience(campaign_id: int):
         raise
     except Exception as e:
         logger.error("WhatsApp campaign audience failed", error=str(e), campaign_id=campaign_id)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        _release_campaign_db_connection(conn, from_pool)
+
+
+@app.get("/api/v1/whatsapp/campaigns/{campaign_id}/message-intelligence")
+async def get_whatsapp_campaign_message_intelligence(
+    campaign_id: int,
+    limit: int = Query(5, ge=1, le=20),
+    discount_code: Optional[str] = Query(None),
+    campaign_link: Optional[str] = Query(None),
+):
+    conn = None
+    from_pool = False
+    try:
+        conn, from_pool = _campaign_db_connection()
+        campaign = get_campaign(conn, campaign_id)
+        if not campaign:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        return _build_whatsapp_message_intelligence(
+            conn,
+            campaign,
+            sample_limit=limit,
+            discount_code=discount_code,
+            campaign_link=campaign_link,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("WhatsApp message intelligence failed", error=str(e), campaign_id=campaign_id)
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         _release_campaign_db_connection(conn, from_pool)

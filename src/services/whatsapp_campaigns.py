@@ -33,6 +33,48 @@ DEFAULT_CAMPAIGN_FILTERS = {
     "require_consent": False,
 }
 
+SEGMENT_MESSAGE_TEMPLATES = {
+    "champions": (
+        'Hi {{customer_name | default: "there"}}, as one of our valued Master customers, '
+        "we picked {{recommended_product_1 | default: \"a premium comfort upgrade\"}} "
+        "to pair with your recent {{last_product | default: \"Master purchase\"}}. "
+        "Use {{discount_code | default: \"your VIP offer\"}} here: {{campaign_link}}"
+    ),
+    "loyal": (
+        'Hi {{customer_name | default: "there"}}, thank you for choosing Master again. '
+        "Based on your recent {{last_product | default: \"purchase\"}}, "
+        "we recommend {{recommended_product_1 | default: \"a comfort add-on\"}}. "
+        "Use {{discount_code | default: \"your loyalty offer\"}}: {{campaign_link}}"
+    ),
+    "loyal customers": (
+        'Hi {{customer_name | default: "there"}}, thank you for choosing Master again. '
+        "Based on your recent {{last_product | default: \"purchase\"}}, "
+        "we recommend {{recommended_product_1 | default: \"a comfort add-on\"}}. "
+        "Use {{discount_code | default: \"your loyalty offer\"}}: {{campaign_link}}"
+    ),
+    "new customers": (
+        'Hi {{customer_name | default: "there"}}, welcome to Master. '
+        "To complete your {{last_product | default: \"new setup\"}}, "
+        "we picked {{recommended_product_1 | default: \"a useful add-on\"}} for you: {{campaign_link}}"
+    ),
+    "at risk": (
+        'Hi {{customer_name | default: "there"}}, we noticed it has been a while since your '
+        "{{last_product | default: \"last Master purchase\"}}. "
+        "We selected {{recommended_product_1 | default: \"a comfort upgrade\"}} for you, "
+        "with {{discount_code | default: \"a special offer\"}}: {{campaign_link}}"
+    ),
+    "hibernating": (
+        'Hi {{customer_name | default: "there"}}, it has been a while since your last Master order. '
+        "Based on your previous {{top_category | default: \"comfort\"}} purchase, "
+        "we picked {{recommended_product_1 | default: \"a fresh upgrade\"}} for you: {{campaign_link}}"
+    ),
+    "lost": (
+        'Hi {{customer_name | default: "there"}}, we would love to welcome you back to Master. '
+        "Your past {{last_product | default: \"Master purchase\"}} pairs well with "
+        "{{recommended_product_1 | default: \"today's recommended comfort offer\"}}: {{campaign_link}}"
+    ),
+}
+
 
 class WhatsAppProviderError(Exception):
     pass
@@ -159,6 +201,47 @@ def _list(value: Any) -> List[str]:
     if isinstance(value, Iterable) and not isinstance(value, (dict, bytes)):
         return [str(part).strip() for part in value if str(part).strip()]
     return [str(value).strip()]
+
+
+def _first_text(values: Any) -> Optional[str]:
+    items = _list(values)
+    return items[0] if items else None
+
+
+def build_smart_message_template(segment: Optional[str]) -> str:
+    segment_key = (segment or "loyal").lower().strip()
+    return SEGMENT_MESSAGE_TEMPLATES.get(segment_key, SEGMENT_MESSAGE_TEMPLATES["loyal"])
+
+
+def build_customer_message_context(
+    row: Mapping[str, Any],
+    *,
+    discount_code: Optional[str] = None,
+    campaign_link: Optional[str] = None,
+) -> Dict[str, Any]:
+    recent_products = _list(row.get("recent_products"))
+    recommended_products = _list(row.get("recommended_products"))
+    last_product = _text(row.get("last_product")) or _first_text(recent_products)
+    return {
+        "customer_id": _text(row.get("customer_id")),
+        "customer_name": _text(row.get("customer_name")) or "there",
+        "phone": normalize_phone(row.get("customer_phone") or row.get("phone")),
+        "city": _text(row.get("city") or row.get("customer_city")) or "your city",
+        "segment": _text(row.get("segment")),
+        "last_product": last_product or "your recent Master purchase",
+        "last_purchase_date": _text(row.get("last_purchase_date")),
+        "recent_products": recent_products,
+        "top_category": _text(row.get("top_category")) or "comfort products",
+        "recommended_products": recommended_products,
+        "recommended_product_1": recommended_products[0] if len(recommended_products) >= 1 else None,
+        "recommended_product_2": recommended_products[1] if len(recommended_products) >= 2 else None,
+        "recommended_product_3": recommended_products[2] if len(recommended_products) >= 3 else None,
+        "total_orders": int(row.get("total_orders") or 0),
+        "total_spend": float(row.get("total_spend") or 0),
+        "recency_days": int(row.get("recency_days") or 0),
+        "discount_code": _text(discount_code) or "MASTER10",
+        "campaign_link": _text(campaign_link) or "https://mastergroup.pk/campaign/whatsapp?utm_source=whatsapp",
+    }
 
 
 def normalize_phone(phone: Any) -> Optional[str]:

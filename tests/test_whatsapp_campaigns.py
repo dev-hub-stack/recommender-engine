@@ -15,6 +15,8 @@ from src.services.whatsapp_campaigns import (
     MetaWhatsAppProvider,
     WhatsAppProviderConfig,
     WhatsAppProviderError,
+    build_customer_message_context,
+    build_smart_message_template,
     create_campaign,
     is_valid_phone,
     normalize_campaign_filters,
@@ -201,6 +203,43 @@ class WhatsAppCampaignServiceTests(unittest.TestCase):
         self.assertEqual(payload["template"]["language"]["code"], "en_US")
         self.assertTrue(result["success"])
         self.assertEqual(result["provider_message_id"], "wamid.HBgM")
+
+    def test_build_customer_message_context_uses_recent_purchase_and_recommendations(self):
+        context = build_customer_message_context(
+            {
+                "customer_id": "cust-1",
+                "customer_name": "Ali Khan",
+                "customer_phone": "0303-0644282",
+                "city": "Lahore",
+                "segment": "At Risk",
+                "recent_products": ["Celeste Mattress", "Memory Pillow"],
+                "recommended_products": ["Mattress Protector", "Cooling Pillow"],
+                "top_category": "Mattresses",
+                "last_purchase_date": "2026-04-18",
+                "total_orders": 3,
+                "total_spend": 120000,
+                "recency_days": 45,
+            },
+            discount_code="MASTER10",
+            campaign_link="https://mastergroup.pk/campaign?utm_source=whatsapp",
+        )
+
+        self.assertEqual(context["customer_name"], "Ali Khan")
+        self.assertEqual(context["phone"], "+923030644282")
+        self.assertEqual(context["last_product"], "Celeste Mattress")
+        self.assertEqual(context["recent_products"], ["Celeste Mattress", "Memory Pillow"])
+        self.assertEqual(context["recommended_product_1"], "Mattress Protector")
+        self.assertEqual(context["recommended_product_2"], "Cooling Pillow")
+        self.assertEqual(context["top_category"], "Mattresses")
+        self.assertEqual(context["segment"], "At Risk")
+
+    def test_build_smart_message_template_is_segment_and_purchase_aware(self):
+        template = build_smart_message_template("At Risk")
+
+        self.assertIn("{{customer_name", template)
+        self.assertIn("{{last_product", template)
+        self.assertIn("{{recommended_product_1", template)
+        self.assertIn("{{discount_code", template)
 
 
 if __name__ == "__main__":

@@ -170,7 +170,7 @@ class MetaWhatsAppProvider:
         )
         data = response.json()
         if response.status_code >= 400:
-            detail = data.get("error", {}).get("message") if isinstance(data, dict) else None
+            detail = _meta_error_detail(data)
             raise WhatsAppProviderError(detail or f"Meta WhatsApp API failed with {response.status_code}")
 
         message_id = None
@@ -202,7 +202,7 @@ class MetaWhatsAppProvider:
         )
         data = response.json()
         if response.status_code >= 400:
-            detail = data.get("error", {}).get("message") if isinstance(data, dict) else None
+            detail = _meta_error_detail(data)
             raise WhatsAppProviderError(detail or f"Meta WhatsApp template API failed with {response.status_code}")
 
         requested_status = (status or "").upper()
@@ -249,7 +249,7 @@ class MetaWhatsAppProvider:
         )
         data = response.json()
         if response.status_code >= 400:
-            detail = data.get("error", {}).get("message") if isinstance(data, dict) else None
+            detail = _meta_error_detail(data)
             raise WhatsAppProviderError(detail or f"Meta WhatsApp template creation failed with {response.status_code}")
 
         return {
@@ -401,6 +401,18 @@ def _summarize_template(template: Mapping[str, Any]) -> Dict[str, Any]:
         "body_parameter_count": body_parameter_count,
         "components": components,
     }
+
+
+def _meta_error_detail(data: Any) -> Optional[str]:
+    if not isinstance(data, dict) or not isinstance(data.get("error"), dict):
+        return None
+    error = data["error"]
+    parts = [
+        error.get("error_user_title"),
+        error.get("error_user_msg"),
+        error.get("message"),
+    ]
+    return " - ".join(str(part) for part in parts if part)
 
 
 def is_valid_phone(phone: Any) -> bool:

@@ -48,6 +48,18 @@ from src.services.recommendation_events import (
     record_recommendation_events,
 )
 from src.services.recommendation_reporting import build_recommendation_reporting_summary
+from src.services.whatsapp_campaigns import (
+    CAMPAIGN_STATUSES,
+    create_campaign,
+    get_campaign,
+    is_valid_phone,
+    list_campaigns,
+    mark_campaign_sent_mock,
+    normalize_campaign_filters,
+    normalize_phone,
+    record_mock_event,
+    update_campaign,
+)
 
 # Initialize global ML service
 ml_service = get_ml_service()
@@ -161,6 +173,26 @@ class CartRecommendationRequest(BaseModel):
 class BatchLocationRequest(BaseModel):
     locations: List[LocationRequest]
     limit: Optional[int] = 10
+
+
+class WhatsAppCampaignDraftRequest(BaseModel):
+    name: str
+    message_template: Optional[str] = None
+    filters: Optional[Dict[str, Any]] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class WhatsAppCampaignUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    message_template: Optional[str] = None
+    filters: Optional[Dict[str, Any]] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class WhatsAppTestSendRequest(BaseModel):
+    phone: str
+    customer_id: Optional[str] = None
+    variables: Optional[Dict[str, Any]] = None
 
 
 def init_redis():
@@ -2838,6 +2870,439 @@ def normalize_export_phone(phone: str) -> str:
     
     # Wrap in Excel formula syntax to force text formatting (prevents scientific notation like 9.23E+11)
     return f'="{p}"'
+
+
+def _campaign_db_connection():
+    if pg_pool:
+        return pg_pool.getconn(), True
+    return psycopg2.connect(**get_pg_connection_params()), False
+
+
+def _release_campaign_db_connection(conn, from_pool: bool):
+    if from_pool and pg_pool:
+        pg_pool.putconn(conn)
+    elif conn:
+        conn.close()
+
+
+def _whatsapp_segment_criteria(segment: str, order_source: str) -> str:
+    segment_key = (segment or "").lower().strip()
+    if order_source.lower() == "historical":
+        segment_sql_map = {
+            "champions": "frequency >= 5 AND monetary >= 50000",
+            "loyal": "NOT (frequency >= 5 AND monetary >= 50000) AND frequency >= 3 AND monetary >= 20000",
+            "loyal customers": "NOT (frequency >= 5 AND monetary >= 50000) AND frequency >= 3 AND monetary >= 20000",
+            "new customers": "1=0",
+            "at risk": "NOT (frequency >= 5 AND monetary >= 50000) AND NOT (frequency >= 3 AND monetary >= 20000) AND frequency >= 2",
+            "hibernating": "1=0",
+            "lost": "NOT (frequency >= 5 AND monetary >= 50000) AND NOT (frequency >= 3 AND monetary >= 20000) AND NOT (frequency >= 2)",
+        }
+    else:
+        segment_sql_map = {
+            "champions": "recency_days <= 30 AND frequency >= 5 AND monetary >= 50000",
+            "loyal": "NOT (recency_days <= 30 AND frequency >= 5 AND monetary >= 50000) AND recency_days <= 60 AND frequency >= 3 AND monetary >= 20000",
+            "loyal customers": "NOT (recency_days <= 30 AND frequency >= 5 AND monetary >= 50000) AND recency_days <= 60 AND frequency >= 3 AND monetary >= 20000",
+            "new": "frequency = 1 AND recency_days <= 30",
+            "new customers": "frequency = 1 AND recency_days <= 30",
+            "at risk": "recency_days > 90 AND recency_days <= 180 AND frequency >= 2",
+            "hibernating": "recency_days > 180 AND recency_days <= 365",
+            "lost": "recency_days > 365",
+        }
+    if segment_key not in segment_sql_map:
+        raise HTTPException(status_code=400, detail=f"Unknown WhatsApp audience segment '{segment}'")
+    return segment_sql_map[segment_key]
+
+
+def _looks_like_fake_or_test_customer(row: Dict[str, Any]) -> bool:
+    combined = " ".join(
+        str(row.get(key) or "").lower()
+        for key in ("customer_id", "customer_name", "customer_email")
+    )
+    return bool(re.search(r"\b(test|dummy|fake|sample|asdf|qwerty|unknown)\b", combined))
+
+
+def _whatsapp_audience_query_context(filters: Dict[str, Any]) -> tuple:
+    where = "WHERE 1=1"
+    params = []
+
+    time_filter = filters.get("time_filter") or "all"
+    if isinstance(time_filter, str) and ":" in time_filter:
+        try:
+            start_raw, end_raw = time_filter.split(":", 1)
+            where += " AND o.order_date >= %s AND o.order_date < %s"
+            params.extend([
+                datetime.strptime(start_raw, "%Y-%m-%d"),
+                datetime.strptime(end_raw, "%Y-%m-%d") + timedelta(days=1),
+            ])
+        except ValueError:
+            start_date = calculate_date_range(time_filter)
+            if start_date:
+                where += " AND o.order_date >= %s"
+                params.append(start_date)
+    else:
+        start_date = calculate_date_range(time_filter)
+        if start_date:
+            where += " AND o.order_date >= %s"
+            params.append(start_date)
+
+    source_clause, source_params = get_order_source_filter(
+        filters.get("order_source") or "all",
+        table_alias="o",
+        has_where_clause=True,
+    )
+    where += source_clause
+    params.extend(source_params)
+
+    extra_filter, extra_params = get_rfm_extra_filter_sql(
+        categories=",".join(filters.get("categories") or []),
+        statuses=",".join(filters.get("statuses") or []),
+        historical_channels=",".join(filters.get("historical_channels") or []),
+        table_alias="o",
+    )
+    where += extra_filter
+    params.extend(extra_params)
+
+    criteria = _whatsapp_segment_criteria(
+        filters.get("segment") or "Champions",
+        filters.get("order_source") or "all",
+    )
+    return where, params, criteria
+
+
+def _build_whatsapp_audience_preview(conn, campaign: Dict[str, Any]) -> Dict[str, Any]:
+    filters = normalize_campaign_filters(campaign.get("filters") or {})
+    where, params, criteria = _whatsapp_audience_query_context(filters)
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        base_cte = f"""
+            WITH filtered_orders AS (
+                SELECT *
+                FROM orders o
+                {where}
+                  AND o.unified_customer_id IS NOT NULL
+                  AND BTRIM(o.unified_customer_id) <> ''
+            ),
+            customer_rfm AS (
+                SELECT
+                    o.unified_customer_id,
+                    MAX(o.customer_name) AS customer_name,
+                    MAX(o.customer_email) AS customer_email,
+                    MAX(o.customer_phone) AS customer_phone,
+                    EXTRACT(days FROM NOW() - MAX(o.order_date))::int AS recency_days,
+                    COUNT(DISTINCT o.id) AS frequency,
+                    SUM(o.total_price) AS monetary,
+                    STRING_AGG(DISTINCT COALESCE(NULLIF(o.source_type, ''), NULLIF(o.order_type, ''), 'Unknown'), ', ') AS source_mix
+                FROM filtered_orders o
+                GROUP BY o.unified_customer_id
+            ),
+            segment_customers AS (
+                SELECT *
+                FROM customer_rfm
+                WHERE {criteria}
+            )
+        """
+        cursor.execute(
+            f"""
+            {base_cte}
+            SELECT
+                unified_customer_id AS customer_id,
+                customer_name,
+                customer_email,
+                customer_phone,
+                source_mix
+            FROM segment_customers
+            """,
+            params,
+        )
+        customers = [dict(row) for row in cursor.fetchall()]
+
+        total_customers = len(customers)
+        phone_available = 0
+        valid_phone_count = 0
+        duplicate_phone = 0
+        fake_or_test = 0
+        missing_consent = 0
+        seen_phones = set()
+        sendable_phones = set()
+
+        for customer in customers:
+            raw_phone = customer.get("customer_phone")
+            normalized = normalize_phone(raw_phone)
+            has_phone = bool(str(raw_phone or "").strip())
+            is_fake = _looks_like_fake_or_test_customer(customer)
+            if has_phone:
+                phone_available += 1
+            if normalized:
+                valid_phone_count += 1
+                if normalized in seen_phones:
+                    duplicate_phone += 1
+                seen_phones.add(normalized)
+            if is_fake:
+                fake_or_test += 1
+            if filters.get("require_consent"):
+                missing_consent += 1
+                continue
+            if normalized and not is_fake:
+                if filters.get("dedupe_by_phone", True):
+                    sendable_phones.add(normalized)
+                else:
+                    sendable_phones.add(f"{normalized}:{customer.get('customer_id')}")
+
+        cursor.execute(
+            f"""
+            {base_cte}
+            SELECT
+                COALESCE(NULLIF(oi.product_id, ''), 'N/A') AS product_id,
+                COALESCE(NULLIF(MAX(oi.product_name), ''), 'Unknown Product') AS product_name,
+                COUNT(DISTINCT o.id) AS order_count,
+                COUNT(DISTINCT o.unified_customer_id) AS customer_count
+            FROM filtered_orders o
+            JOIN segment_customers sc ON sc.unified_customer_id = o.unified_customer_id
+            LEFT JOIN order_items oi ON oi.order_id::text = o.id::text
+            WHERE oi.product_id IS NOT NULL OR oi.product_name IS NOT NULL
+            GROUP BY COALESCE(NULLIF(oi.product_id, ''), 'N/A')
+            ORDER BY customer_count DESC, order_count DESC
+            LIMIT 10
+            """,
+            params,
+        )
+        top_products = [
+            {
+                "product_id": row["product_id"],
+                "product_name": row["product_name"],
+                "order_count": int(row["order_count"] or 0),
+                "customer_count": int(row["customer_count"] or 0),
+            }
+            for row in cursor.fetchall()
+        ]
+
+        cursor.execute(
+            f"""
+            {base_cte}
+            SELECT
+                COALESCE(NULLIF(o.source_type, ''), NULLIF(o.order_type, ''), 'Unknown') AS source,
+                COUNT(DISTINCT o.unified_customer_id) AS customer_count,
+                COUNT(DISTINCT o.id) AS order_count
+            FROM filtered_orders o
+            JOIN segment_customers sc ON sc.unified_customer_id = o.unified_customer_id
+            GROUP BY COALESCE(NULLIF(o.source_type, ''), NULLIF(o.order_type, ''), 'Unknown')
+            ORDER BY customer_count DESC
+            """,
+            params,
+        )
+        source_breakdown = [
+            {
+                "source": row["source"],
+                "customer_count": int(row["customer_count"] or 0),
+                "order_count": int(row["order_count"] or 0),
+            }
+            for row in cursor.fetchall()
+        ]
+
+        invalid_phone = max(phone_available - valid_phone_count, 0)
+        missing_phone = max(total_customers - phone_available, 0)
+        suppressed = {
+            "missing_phone": missing_phone,
+            "invalid_phone": invalid_phone,
+            "duplicate_phone": duplicate_phone if filters.get("dedupe_by_phone", True) else 0,
+            "missing_consent": missing_consent,
+            "opt_out": 0,
+            "fake_or_test": fake_or_test,
+        }
+
+        return {
+            "campaign_id": campaign["id"],
+            "filters": filters,
+            "total_customers": total_customers,
+            "phone_available": phone_available,
+            "valid_phone_count": valid_phone_count,
+            "sendable_count": 0 if filters.get("require_consent") else len(sendable_phones),
+            "suppressed": suppressed,
+            "top_products": top_products,
+            "source_breakdown": source_breakdown,
+            "mock_mode": True,
+            "provider": "mock",
+            "limitations": [
+                "WhatsApp reachability is estimated from phone format only.",
+                "Consent and opt-out tables are not present, so consent is only enforced when require_consent=true.",
+            ],
+        }
+    finally:
+        cursor.close()
+
+
+@app.post("/api/v1/whatsapp/campaigns")
+async def create_whatsapp_campaign_draft(request: WhatsAppCampaignDraftRequest):
+    conn = None
+    from_pool = False
+    try:
+        conn, from_pool = _campaign_db_connection()
+        return create_campaign(conn, request.model_dump(exclude_unset=True))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("WhatsApp campaign create failed", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        _release_campaign_db_connection(conn, from_pool)
+
+
+@app.get("/api/v1/whatsapp/campaigns")
+async def list_whatsapp_campaigns(
+    status_filter: Optional[str] = Query(None, alias="status"),
+    limit: int = Query(100, ge=1, le=500),
+):
+    if status_filter and status_filter not in CAMPAIGN_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Unsupported campaign status '{status_filter}'")
+    conn = None
+    from_pool = False
+    try:
+        conn, from_pool = _campaign_db_connection()
+        campaigns = list_campaigns(conn, status=status_filter, limit=limit)
+        return {"campaigns": campaigns, "count": len(campaigns)}
+    except Exception as e:
+        logger.error("WhatsApp campaign list failed", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        _release_campaign_db_connection(conn, from_pool)
+
+
+@app.get("/api/v1/whatsapp/campaigns/{campaign_id}")
+async def get_whatsapp_campaign(campaign_id: int):
+    conn = None
+    from_pool = False
+    try:
+        conn, from_pool = _campaign_db_connection()
+        campaign = get_campaign(conn, campaign_id)
+        if not campaign:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        return campaign
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("WhatsApp campaign get failed", error=str(e), campaign_id=campaign_id)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        _release_campaign_db_connection(conn, from_pool)
+
+
+@app.put("/api/v1/whatsapp/campaigns/{campaign_id}")
+async def update_whatsapp_campaign_draft(campaign_id: int, request: WhatsAppCampaignUpdateRequest):
+    conn = None
+    from_pool = False
+    try:
+        conn, from_pool = _campaign_db_connection()
+        campaign = update_campaign(conn, campaign_id, request.model_dump(exclude_unset=True))
+        if not campaign:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        return campaign
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("WhatsApp campaign update failed", error=str(e), campaign_id=campaign_id)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        _release_campaign_db_connection(conn, from_pool)
+
+
+@app.get("/api/v1/whatsapp/campaigns/{campaign_id}/audience")
+async def get_whatsapp_campaign_audience(campaign_id: int):
+    conn = None
+    from_pool = False
+    try:
+        conn, from_pool = _campaign_db_connection()
+        campaign = get_campaign(conn, campaign_id)
+        if not campaign:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        return _build_whatsapp_audience_preview(conn, campaign)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("WhatsApp campaign audience failed", error=str(e), campaign_id=campaign_id)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        _release_campaign_db_connection(conn, from_pool)
+
+
+@app.post("/api/v1/whatsapp/campaigns/{campaign_id}/test-send")
+async def test_send_whatsapp_campaign(campaign_id: int, request: WhatsAppTestSendRequest):
+    conn = None
+    from_pool = False
+    try:
+        if not is_valid_phone(request.phone):
+            raise HTTPException(status_code=400, detail="Invalid Pakistani mobile phone format")
+        conn, from_pool = _campaign_db_connection()
+        campaign = get_campaign(conn, campaign_id)
+        if not campaign:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        event = record_mock_event(
+            conn,
+            campaign_id,
+            "test_send",
+            "sent",
+            recipient_phone=request.phone,
+            customer_id=request.customer_id,
+            payload={
+                "mock_mode": True,
+                "variables": request.variables or {},
+                "message_template": campaign.get("message_template"),
+            },
+        )
+        return {"success": True, "mock_mode": True, "message": "Mock test send recorded only.", "event": event}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("WhatsApp campaign test send failed", error=str(e), campaign_id=campaign_id)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        _release_campaign_db_connection(conn, from_pool)
+
+
+@app.post("/api/v1/whatsapp/campaigns/{campaign_id}/send")
+async def send_whatsapp_campaign_mock(campaign_id: int):
+    conn = None
+    from_pool = False
+    try:
+        conn, from_pool = _campaign_db_connection()
+        campaign = get_campaign(conn, campaign_id)
+        if not campaign:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        audience = _build_whatsapp_audience_preview(conn, campaign)
+        updated = mark_campaign_sent_mock(conn, campaign_id, audience_summary={
+            "sendable_count": audience["sendable_count"],
+            "total_customers": audience["total_customers"],
+            "suppressed": audience["suppressed"],
+        })
+        record_mock_event(
+            conn,
+            campaign_id,
+            "campaign_send",
+            "sent",
+            payload={
+                "mock_mode": True,
+                "sendable_count": audience["sendable_count"],
+                "suppressed": audience["suppressed"],
+            },
+        )
+        return {
+            "success": True,
+            "mock_mode": True,
+            "message": "Campaign marked sent in mock mode; no WhatsApp provider was called.",
+            "campaign": updated,
+            "audience": audience,
+        }
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("WhatsApp campaign mock send failed", error=str(e), campaign_id=campaign_id)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        _release_campaign_db_connection(conn, from_pool)
+
 
 @app.get("/api/v1/export/rfm-campaign-csv")
 async def export_rfm_campaign_csv(
